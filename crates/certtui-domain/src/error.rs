@@ -24,3 +24,16 @@ pub enum ParseError {
         extra: usize,
     },
 }
+
+/// Error building a certificate chain.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ChainError {
+    /// More records than `Limits::max_chain_len`.
+    #[error("chain has {len} certificates, above the limit of {max}")]
+    TooLong {
+        /// Number of records supplied.
+        len: usize,
+        /// The configured maximum.
+        max: usize,
+    },
+}

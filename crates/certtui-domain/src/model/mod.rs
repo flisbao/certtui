@@ -1,12 +1,17 @@
 //! Certificate model types.
 
+pub mod chain;
 pub mod extensions;
 pub mod fingerprint;
 pub mod key;
 pub mod name;
+pub mod note;
 pub mod parse;
+pub mod record;
+pub mod report;
 pub mod summary;
 
+pub use chain::Chain;
 pub use extensions::{
     AuthorityInfoAccess, BasicConstraints, ExtendedKeyUsage, ExtensionSummary, KeyId, KeyUsage,
     SctEntry, SubjectAltName, extension_name,
@@ -14,5 +19,8 @@ pub use extensions::{
 pub use fingerprint::{Digest, FingerprintAlgorithm, FingerprintFormat, Fingerprints};
 pub use key::{HashAlgorithm, PublicKeyAlgorithm, PublicKeyInfo, SignatureAlgorithm};
 pub use name::{DistinguishedName, SerialNumber};
+pub use note::{LoadNote, RejectReason};
 pub use parse::parse_der_cert;
+pub use record::{CertOrigin, CertificateRecord};
+pub use report::{InspectionReport, RevocationStatus, Timings, TlsSessionInfo, TrustVerdict};
 pub use summary::CertificateSummary;
