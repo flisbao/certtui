@@ -19,8 +19,9 @@
 //! token)`, and the bytes decoded across the whole queue stay near 1.75 times
 //! the input (each layer is at most 3/4 of the one before, and there are at
 //! most three), so the scan stays linear. A budget of twice the input is
-//! enforced anyway, as defence in depth. Candidates and diagnostics found inside decoded text carry the
-//! offset of the top-level run they came from; they never carry content.
+//! enforced anyway, as defence in depth. Candidates and diagnostics found
+//! inside decoded text carry the offset of the top-level run they came from;
+//! they never carry content.
 //!
 //! A run may continue across lines (wrapped Base64, YAML block scalars), but a
 //! continuation line must hold nothing but one Base64 token, so the next
@@ -350,7 +351,9 @@ fn collect(det: &mut Detections, found: &mut Found, inner: Detections, work: &Wo
 /// Results from decoded text are appended in text order: by the offset of the
 /// top-level run, then by position inside each decoded layer, so a child
 /// spawned by a run sits where that run is among its siblings. Each candidate
-/// and diagnostic carries the offset of its top-level run.
+/// and diagnostic carries the offset of its top-level run. When
+/// `max_certs_per_source` truncates, the nested results kept are the first
+/// found (queue order), not the first in text order, and `truncated` is set.
 pub(crate) fn find_nested_base64(
     input: &[u8],
     consumed: &[Range<usize>],
@@ -390,6 +393,9 @@ fn drain_queue(
         queue.enqueue_runs(&work.text, &claimed, Some(&work), &mut inner);
         collect(det, &mut found, inner, &work);
     }
+    // `top` is compared first because candidates all end up with `top` as
+    // their public offset, so the key alone (offsets inside each decoded text)
+    // says nothing about two different top-level runs.
     found
         .candidates
         .sort_by(|a, b| a.top.cmp(&b.top).then_with(|| a.key.cmp(&b.key)));
@@ -480,6 +486,22 @@ mod tests {
         assert_eq!(det.candidates[0].offset, "data:\n  tls.crt: ".len());
         assert_eq!(det.candidates[0].kind, CandidateKind::Certificate);
         assert!(decoded <= 2 * text.len());
+    }
+
+    #[test]
+    fn quando_ha_dois_runs_de_topo_deve_ordenar_pelo_offset_do_run_antes_do_offset_interno() {
+        // The first run holds the certificate after a header (inner offset
+        // 9), the second at inner offset 0: only the top-level offset tells
+        // them apart. No `scan_text` sort here.
+        let first = STANDARD.encode(format!("# header\n{}", leaf_pem()));
+        let second = STANDARD.encode(leaf_pem());
+        let text = format!("a: {first}\nb: {second}\n");
+        let (det, _) = run(text.as_bytes(), &[]);
+        let offsets: Vec<usize> = det.candidates.iter().map(|c| c.offset).collect();
+        assert_eq!(
+            offsets,
+            vec!["a: ".len(), text.find("b: ").unwrap() + "b: ".len()]
+        );
     }
 
     #[test]

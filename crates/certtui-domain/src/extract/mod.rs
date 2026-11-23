@@ -243,7 +243,10 @@ fn scan_flat(input: &[u8], limits: &Limits, det: &mut Detections) {
 /// Candidates found inside decoded text carry the offset of the Base64 run
 /// they came from. Candidates and diagnostics are sorted by offset (stable);
 /// among those of one decoded run the order is the order in the decoded text,
-/// and a layer decoded from a run sits where that run is.
+/// and a layer decoded from a run sits where that run is. When
+/// `max_certs_per_source` truncates, the nested results kept are the first
+/// found (detection order), not the first in text order, and `truncated` is
+/// set.
 #[must_use]
 pub fn scan_text(input: &[u8], limits: &Limits) -> ScanOutcome {
     let mut detections = Detections::new(limits);

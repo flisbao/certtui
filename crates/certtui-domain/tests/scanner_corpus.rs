@@ -1426,21 +1426,61 @@ fn quando_secret_decodifica_para_pem_e_depois_hex_deve_seguir_a_ordem_do_texto()
 }
 
 #[test]
-fn quando_camada_filha_esta_no_meio_do_texto_decodificado_deve_ficar_no_meio() {
+fn quando_camada_filha_esta_em_qualquer_posicao_do_texto_decodificado_deve_ficar_la() {
     let chain = reference_chain();
-    // PEM B, then a Base64 layer that decodes to PEM A, then PEM C.
-    let decoded = format!(
-        "{}{}\n{}",
-        pem_of_der(&chain[1]),
-        b64(pem_of_der(&chain[0])),
-        pem_of_der(&chain[2])
+    let (a, b, c) = (&chain[0], &chain[1], &chain[2]);
+    // `A` always comes from a Base64 layer inside the decoded text; the header
+    // line keeps every inner offset away from 0, so a key that forgot the
+    // path of the layer would not tie by luck.
+    let layer = b64(pem_of_der(a));
+    let cases = [
+        (
+            "no meio",
+            [pem_of_der(b), layer.clone(), pem_of_der(c)],
+            [b, a, c],
+        ),
+        (
+            "primeira",
+            [layer.clone(), pem_of_der(b), pem_of_der(c)],
+            [a, b, c],
+        ),
+        ("ultima", [pem_of_der(b), pem_of_der(c), layer], [b, c, a]),
+    ];
+    for (name, parts, expected) in cases {
+        let decoded = format!("# header\n{}\n{}\n{}", parts[0], parts[1], parts[2]);
+        let out = scan(secret_with(&b64(decoded)).as_bytes());
+        assert_eq!(ders(&out), expected.to_vec(), "{name}");
+        assert_eq!(out.diagnostics.len(), 0, "{name}: {:?}", out.diagnostics);
+        // All three inherit the offset of the one top-level run.
+        let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
+        assert!(offsets.windows(2).all(|w| w[0] == w[1]), "{name}");
+    }
+}
+
+#[test]
+fn quando_dois_secrets_tem_camada_filha_no_meio_deve_manter_a_ordem_dos_runs_de_topo() {
+    let chain = reference_chain();
+    let (a, b, c) = (&chain[0], &chain[1], &chain[2]);
+    let secret = |first: &[u8], child: &[u8], last: &[u8]| {
+        b64(format!(
+            "# header\n{}\n{}\n{}",
+            pem_of_der(first),
+            b64(pem_of_der(child)),
+            pem_of_der(last)
+        ))
+    };
+    // First run: [B, A, C]; second run: [C, B, A].
+    let text = format!(
+        "data:\n  x: {}\n  y: {}\n",
+        secret(b, a, c),
+        secret(c, b, a)
     );
-    let out = scan(secret_with(&b64(decoded)).as_bytes());
-    assert_eq!(ders(&out), vec![&chain[1], &chain[0], &chain[2]]);
-    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
-    // All three inherit the offset of the one top-level run.
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![b, a, c, c, b, a]);
     let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
-    assert!(offsets.windows(2).all(|w| w[0] == w[1]));
+    assert!(offsets[..3].iter().all(|&o| o == offsets[0]));
+    assert!(offsets[3..].iter().all(|&o| o == offsets[3]));
+    assert!(offsets[0] < offsets[3]);
 }
 
 #[test]
