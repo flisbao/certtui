@@ -4,4 +4,6 @@ pub mod limits;
 
 pub mod model;
 
+pub mod sanitize;
+
 pub mod time;
