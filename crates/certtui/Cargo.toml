@@ -6,11 +6,5 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[dependencies]
-certtui-tui = { path = "../certtui-tui" }
-certtui-infra = { path = "../certtui-infra" }
-certtui-app = { path = "../certtui-app" }
-certtui-domain = { path = "../certtui-domain" }
-
 [lints]
 workspace = true

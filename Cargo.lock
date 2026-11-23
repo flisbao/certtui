@@ -5,12 +5,6 @@ version = 4
 [[package]]
 name = "certtui"
 version = "0.1.0"
-dependencies = [
- "certtui-app",
- "certtui-domain",
- "certtui-infra",
- "certtui-tui",
-]
 
 [[package]]
 name = "certtui-app"
@@ -40,10 +34,6 @@ dependencies = [
 [[package]]
 name = "certtui-tui"
 version = "0.1.0"
-dependencies = [
- "certtui-app",
- "certtui-domain",
-]
 
 [[package]]
 name = "deranged"
