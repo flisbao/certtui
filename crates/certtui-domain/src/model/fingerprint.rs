@@ -106,7 +106,7 @@ impl Fingerprints {
 }
 
 /// Hex-encodes `bytes`, joining the byte pairs with `sep`.
-fn join_hex(bytes: &[u8], sep: &str, upper: bool) -> String {
+pub(crate) fn join_hex(bytes: &[u8], sep: &str, upper: bool) -> String {
     let mut out = String::with_capacity(bytes.len() * (2 + sep.len()));
     for (i, byte) in bytes.iter().enumerate() {
         if i > 0 {
