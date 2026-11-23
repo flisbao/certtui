@@ -1,0 +1,5 @@
+.superpowers/
+target/
+*.key
+fuzz/artifacts/
+fuzz/target/
