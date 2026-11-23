@@ -3,10 +3,6 @@
 //! Counts here are RAW candidates (before deduplication, done in a later
 //! task), so they can differ from `messy/expected.tsv`, which is post-dedupe.
 
-// Justificativa: fixture helpers outside #[test] fns may panic on a missing
-// fixture; clippy's allow-in-tests only covers the test functions themselves.
-#![allow(clippy::unwrap_used)]
-
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use certtui_domain::extract::{Candidate, CandidateKind, RejectReason, scan_text};
@@ -14,6 +10,9 @@ use certtui_domain::limits::Limits;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures");
 
+// Justificativa: a helper outside #[test] fns; a missing fixture must fail the
+// test loudly, and clippy's allow-in-tests covers only the test fns themselves.
+#[allow(clippy::unwrap_used)]
 fn read(rel: &str) -> Vec<u8> {
     std::fs::read(format!("{FIXTURES}/{rel}")).unwrap()
 }
@@ -34,6 +33,9 @@ fn reference_chain() -> Vec<Vec<u8>> {
 }
 
 /// Base64 body of the leaf of `chain-3.pem`, wrapped at 64 columns.
+// Justificativa: the chunks of a Base64 string are ASCII, so `from_utf8` cannot
+// fail; the helper lives outside the #[test] fns that clippy exempts.
+#[allow(clippy::unwrap_used)]
 fn leaf_body_lines() -> Vec<String> {
     let leaf = reference_chain().remove(0);
     STANDARD
@@ -51,25 +53,52 @@ fn pem(label: &str, body_lines: &[String]) -> String {
     )
 }
 
+/// Rows of `messy/expected.tsv` as `(file, expected count, note kinds)`.
+fn expected_row(file: &str) -> Result<(usize, Vec<RejectReason>), String> {
+    let tsv = String::from_utf8(read("messy/expected.tsv")).unwrap_or_default();
+    let row = tsv
+        .lines()
+        .find_map(|l| {
+            let cols: Vec<&str> = l.split('\t').collect();
+            (cols.first() == Some(&file)).then_some(cols)
+        })
+        .unwrap_or_default();
+    let count = row
+        .get(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(usize::MAX);
+    let reasons = match row.get(2).copied() {
+        Some("-") => vec![],
+        Some("UnterminatedPem") => vec![RejectReason::UnterminatedPem],
+        other => return Err(format!("unexpected note kinds for {file}: {other:?}")),
+    };
+    Ok((count, reasons))
+}
+
 #[test]
 fn quando_arquivo_de_pem_sujo_deve_contar_candidatos_brutos_e_motivos() {
-    // (file, raw PEM candidates, rejections). Post-dedupe counts in
-    // expected.tsv: s_client-output has 4 blocks (leaf repeated) for 3 certs.
-    let table: &[(&str, usize, &[RejectReason])] = &[
-        ("pem-indented.txt", 3, &[]),
-        ("pem-email-quoted.txt", 3, &[]),
-        ("pem-crlf.txt", 3, &[]),
-        ("pem-json-escaped.json", 3, &[]),
-        ("pem-one-line.txt", 3, &[]),
-        ("openssl-x509-text.txt", 2, &[]),
-        ("s_client-output.txt", 4, &[]),
-        ("truncated.txt", 2, &[RejectReason::UnterminatedPem]),
-        ("garbage-between.txt", 3, &[]),
-    ];
-    for (file, count, expected_reasons) in table {
+    // expected.tsv counts are post-dedupe; for these files they equal the raw
+    // PEM count, except s_client-output, which prints the leaf twice (4 raw
+    // blocks for 3 certificates).
+    for file in [
+        "pem-indented.txt",
+        "pem-email-quoted.txt",
+        "pem-crlf.txt",
+        "pem-json-escaped.json",
+        "pem-one-line.txt",
+        "openssl-x509-text.txt",
+        "s_client-output.txt",
+        "truncated.txt",
+        "garbage-between.txt",
+    ] {
+        let (mut count, expected_reasons) = expected_row(file).unwrap();
+        if file == "s_client-output.txt" {
+            assert_eq!(count, 3, "expected.tsv still says 3 after dedupe");
+            count = 4;
+        }
         let out = scan(&read(&format!("messy/{file}")));
-        assert_eq!(out.candidates.len(), *count, "{file}: candidatos");
-        assert_eq!(reasons(&out), *expected_reasons, "{file}: motivos");
+        assert_eq!(out.candidates.len(), count, "{file}: candidatos");
+        assert_eq!(reasons(&out), expected_reasons, "{file}: motivos");
         assert!(!out.truncated, "{file}");
         assert!(
             out.candidates
@@ -308,6 +337,45 @@ fn quando_corpo_enorme_sem_end_deve_terminar_em_tempo_linear() {
     let out = scan(&input);
     assert_eq!(reasons(&out), vec![RejectReason::UnterminatedPem]);
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn quando_json_escapa_barra_deve_tratar_como_barra_no_corpo() {
+    let leaf = reference_chain().remove(0);
+    let body = leaf_body_lines();
+    assert!(body.iter().any(|l| l.contains('/')));
+    let escaped: Vec<String> = body.iter().map(|l| l.replace('/', "\\/")).collect();
+    let text = format!(
+        "{{\"pem\":\"-----BEGIN CERTIFICATE-----\\n{}\\n-----END CERTIFICATE-----\\n\"}}",
+        escaped.join("\\n")
+    );
+    let out = scan(text.as_bytes());
+    let ders: Vec<&Vec<u8>> = out.candidates.iter().map(|c| &c.der).collect();
+    assert_eq!(ders, vec![&leaf]);
+}
+
+#[test]
+fn quando_muitos_begin_com_corpo_parcial_sem_end_deve_terminar_em_tempo_linear() {
+    let block = "-----BEGIN CERTIFICATE-----\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
+    let input = block.repeat(50_000);
+    let started = std::time::Instant::now();
+    let out = scan(input.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert!(out.diagnostics_truncated);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn quando_diagnosticos_estouram_o_limite_deve_marcar_diagnostics_truncated() {
+    let limits = Limits {
+        max_scan_diagnostics: 3,
+        ..Limits::default()
+    };
+    let input = "-----BEGIN CERTIFICATE-----\n".repeat(10);
+    let out = scan_text(input.as_bytes(), &limits);
+    assert_eq!(out.diagnostics.len(), 3);
+    assert!(out.diagnostics_truncated);
+    assert!(!out.truncated);
 }
 
 #[test]

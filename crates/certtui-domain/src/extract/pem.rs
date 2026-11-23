@@ -90,36 +90,90 @@ fn body_bound(kind: CandidateKind, limits: &Limits) -> usize {
     (max_der.saturating_mul(4) / 3).saturating_add(4)
 }
 
-/// Collects the Base64 characters of `body`, line by line: noise before the
-/// first and after the last Base64 character of a line is dropped, spaces
-/// inside are ignored and any other byte is an error.
+/// The part of `line` that can hold Base64: noise before the first and after
+/// the last Base64 character is dropped, and so is a `// ` comment prefix (it
+/// is made of Base64 characters; it can stand alone before a trailing `END`
+/// marker). `None` when nothing is left.
+fn line_core(line: &[u8]) -> Option<&[u8]> {
+    let first = line.iter().position(|&b| is_b64(b))?;
+    let last = line.iter().rposition(|&b| is_b64(b))?;
+    let mut core = line.get(first..=last)?;
+    if core.starts_with(b"//") && core.get(2).is_none_or(u8::is_ascii_whitespace) {
+        core = core.get(2..)?;
+    }
+    let core = core.trim_ascii_start();
+    (!core.is_empty()).then_some(core)
+}
+
+/// One byte of a line core: a Base64 character (JSON `\/` counts as `/`), a
+/// space to ignore, or an invalid byte.
+enum CoreByte {
+    Char(u8),
+    Space,
+    Invalid,
+}
+
+fn core_bytes(core: &[u8]) -> impl Iterator<Item = CoreByte> + '_ {
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        let b = *core.get(i)?;
+        i += 1;
+        Some(if is_b64(b) {
+            CoreByte::Char(b)
+        } else if b == b'\\' && core.get(i) == Some(&b'/') {
+            i += 1;
+            CoreByte::Char(b'/')
+        } else if b.is_ascii_whitespace() {
+            CoreByte::Space
+        } else {
+            CoreByte::Invalid
+        })
+    })
+}
+
+/// Collects the Base64 characters of `body`, line by line (see
+/// [`line_core`]): spaces inside a line are ignored and any other byte is an
+/// error.
 fn collect_base64(body: &[u8], bound: usize) -> Result<Vec<u8>, RejectReason> {
     let mut out: Vec<u8> = Vec::new();
     for (_, line) in split_lines(body) {
-        let Some(first) = line.iter().position(|&b| is_b64(b)) else {
+        let Some(core) = line_core(line) else {
             continue;
         };
-        let Some(last) = line.iter().rposition(|&b| is_b64(b)) else {
-            continue;
-        };
-        let mut core = line.get(first..=last).unwrap_or_default();
-        // A `// ` comment prefix is made of Base64 characters; it stands
-        // alone before a trailing `END` marker.
-        if core.starts_with(b"//") && core.get(2).is_none_or(u8::is_ascii_whitespace) {
-            core = core.get(2..).unwrap_or_default();
-        }
-        for &b in core {
-            if is_b64(b) {
-                if out.len() >= bound {
-                    return Err(RejectReason::TooLarge);
+        for byte in core_bytes(core) {
+            match byte {
+                CoreByte::Char(b) => {
+                    if out.len() >= bound {
+                        return Err(RejectReason::TooLarge);
+                    }
+                    out.push(b);
                 }
-                out.push(b);
-            } else if !b.is_ascii_whitespace() {
-                return Err(RejectReason::InvalidBase64);
+                CoreByte::Space => {}
+                CoreByte::Invalid => return Err(RejectReason::InvalidBase64),
             }
         }
     }
     Ok(out)
+}
+
+/// End of the contiguous run of Base64-looking lines at the start of `body`
+/// (`input[body_start..body_end]`), as an absolute offset; `body_start` when
+/// there is none. Blank lines are skipped but do not extend the run. A line
+/// belongs to the run only when its core is made of Base64 characters alone
+/// (so prose with spaces or punctuation stops it).
+fn base64_run_end(input: &[u8], body_start: usize, body_end: usize) -> usize {
+    let body = input.get(body_start..body_end).unwrap_or_default();
+    let mut end = body_start;
+    for (offset, line) in split_lines(body) {
+        let Some(core) = line_core(line) else {
+            continue;
+        };
+        if !core_bytes(core).all(|b| matches!(b, CoreByte::Char(_))) {
+            break;
+        }
+        end = body_start + offset + line.len();
+    }
+    end
 }
 
 /// Decodes a collected body and cuts it at the DER length it declares.
@@ -155,16 +209,35 @@ pub(super) fn detect(input: &[u8], limits: &Limits, det: &mut Detections) {
         let kind = kind_for(label);
 
         // Look for the matching END, stopping at the next BEGIN or at EOF.
-        let (body_end, resume, result) = match find_marker(input, body_start) {
+        // `resume` is where the search continues; `claimed` is what later
+        // detectors must not read again. An unterminated block claims only
+        // its run of Base64-looking lines, so text after a prose mention of
+        // a BEGIN line stays visible to them.
+        let (body_end, resume, claimed, result) = match find_marker(input, body_start) {
             Some((pos, Marker::End)) => match parse_label(input, pos + END.len()) {
-                Some((end_label, after)) if end_label == label => (pos, after, Ok(())),
-                Some((_, after)) => (pos, after, Err(RejectReason::LabelMismatch)),
-                None => (pos, pos + END.len(), Err(RejectReason::UnterminatedPem)),
+                Some((end_label, after)) if end_label == label => (pos, after, after, Ok(())),
+                Some((_, after)) => (pos, after, after, Err(RejectReason::LabelMismatch)),
+                None => (
+                    pos,
+                    pos + END.len(),
+                    base64_run_end(input, body_start, pos),
+                    Err(RejectReason::UnterminatedPem),
+                ),
             },
-            Some((pos, Marker::Begin)) => (pos, pos, Err(RejectReason::UnterminatedPem)),
-            None => (input.len(), input.len(), Err(RejectReason::UnterminatedPem)),
+            Some((pos, Marker::Begin)) => (
+                pos,
+                pos,
+                base64_run_end(input, body_start, pos),
+                Err(RejectReason::UnterminatedPem),
+            ),
+            None => (
+                input.len(),
+                input.len(),
+                base64_run_end(input, body_start, input.len()),
+                Err(RejectReason::UnterminatedPem),
+            ),
         };
-        det.consumed.push(begin..resume);
+        det.consumed.push(begin..claimed.max(body_start));
         cursor = resume;
 
         let Some(kind) = kind else {
@@ -190,5 +263,175 @@ pub(super) fn detect(input: &[u8], limits: &Limits, det: &mut Detections) {
             }
             Err(reason) => det.reject(begin, reason),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Range;
+
+    use super::*;
+
+    /// `30 03 01 01 00`: the smallest well-formed SEQUENCE.
+    const TINY: &str = "MAMBAQA=";
+
+    fn run(input: &[u8], limits: &Limits) -> Detections {
+        let mut det = Detections::new(limits);
+        detect(input, limits, &mut det);
+        det
+    }
+
+    fn at(text: &str, needle: &str) -> usize {
+        text.find(needle).unwrap()
+    }
+
+    #[test]
+    fn quando_ha_blocos_de_todos_os_tipos_deve_registrar_os_ranges_consumidos_exatos() {
+        let valid = format!("-----BEGIN CERTIFICATE-----\n{TINY}\n-----END CERTIFICATE-----\n");
+        let key = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+        let mismatch = format!("-----BEGIN CERTIFICATE-----\n{TINY}\n-----END PKCS7-----\n");
+        let open = format!("-----BEGIN CERTIFICATE-----\n{TINY}\nAAAA\nfim, obrigado.\n");
+        let text = format!("prosa\n{valid}{key}{mismatch}ruido\n{open}");
+
+        let det = run(text.as_bytes(), &Limits::default());
+
+        let v = at(&text, &valid);
+        let k = at(&text, key);
+        let m = at(&text, &mismatch);
+        let o = at(&text, &open);
+        let open_run_end = o + "-----BEGIN CERTIFICATE-----\nMAMBAQA=\nAAAA".len();
+        let expected: Vec<Range<usize>> = vec![
+            v..v + valid.len() - 1,
+            k..k + key.len() - 1,
+            m..m + mismatch.len() - 1,
+            o..open_run_end,
+        ];
+        assert_eq!(det.consumed.as_slice(), expected.as_slice());
+        assert_eq!(det.candidates.len(), 1);
+        assert_eq!(det.candidates[0].offset, v);
+        let diags: Vec<(usize, RejectReason)> = det
+            .diagnostics
+            .iter()
+            .map(|d| (d.offset, d.reason))
+            .collect();
+        assert_eq!(
+            diags,
+            vec![
+                (k, RejectReason::UnsupportedLabel),
+                (m, RejectReason::LabelMismatch),
+                (o, RejectReason::UnterminatedPem),
+            ]
+        );
+    }
+
+    #[test]
+    fn quando_begin_solto_e_seguido_de_prosa_deve_consumir_so_ate_antes_da_prosa() {
+        let text =
+            format!("-----BEGIN CERTIFICATE-----\nveja o certificado abaixo, valeu.\n{TINY}\n");
+        let det = run(text.as_bytes(), &Limits::default());
+        assert_eq!(det.diagnostics.len(), 1);
+        assert_eq!(det.diagnostics[0].reason, RejectReason::UnterminatedPem);
+        let begin_end = "-----BEGIN CERTIFICATE-----".len();
+        assert_eq!(det.consumed.as_slice().len(), 1);
+        assert_eq!(det.consumed.as_slice()[0], 0..begin_end);
+        let bare = at(&text, TINY);
+        assert!(!det.consumed.contains(bare));
+    }
+
+    #[test]
+    fn quando_begin_solto_e_seguido_de_outro_begin_deve_consumir_so_o_corpo_base64() {
+        let text = format!(
+            "-----BEGIN CERTIFICATE-----\nAAAA\nBBBB\nprosa qualquer\n\
+             -----BEGIN CERTIFICATE-----\n{TINY}\n-----END CERTIFICATE-----\n"
+        );
+        let det = run(text.as_bytes(), &Limits::default());
+        let second = at(&text, "-----BEGIN CERTIFICATE-----\nMAMB");
+        let first_run_end = "-----BEGIN CERTIFICATE-----\nAAAA\nBBBB".len();
+        assert_eq!(det.consumed.as_slice()[0], 0..first_run_end);
+        assert_eq!(det.candidates.len(), 1);
+        assert_eq!(det.candidates[0].offset, second);
+    }
+
+    #[test]
+    fn quando_fixture_truncada_deve_consumir_o_corpo_parcial_ate_o_fim() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/messy/truncated.txt"
+        );
+        let input = std::fs::read(path).unwrap();
+        let det = run(&input, &Limits::default());
+        assert_eq!(det.candidates.len(), 2);
+        assert_eq!(det.consumed.as_slice().len(), 3);
+        let last_begin = input
+            .windows(BEGIN.len())
+            .rposition(|w| w == BEGIN)
+            .unwrap();
+        assert_eq!(
+            det.consumed.as_slice()[2],
+            last_begin..input.trim_ascii_end().len()
+        );
+    }
+
+    #[test]
+    fn quando_end_solto_vem_antes_do_begin_deve_ignorar_o_end_e_achar_o_bloco() {
+        let text = format!(
+            "-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\n{TINY}\n-----END CERTIFICATE-----\n"
+        );
+        let det = run(text.as_bytes(), &Limits::default());
+        assert_eq!(det.diagnostics.len(), 0);
+        assert_eq!(det.candidates.len(), 1);
+        assert_eq!(
+            det.candidates[0].offset,
+            "-----END CERTIFICATE-----\n".len()
+        );
+        assert_eq!(det.consumed.as_slice().len(), 1);
+    }
+
+    /// PEM whose body is a SEQUENCE of exactly `total` bytes.
+    fn pem_with_der_total(total: usize) -> String {
+        let mut der = vec![0x30, u8::try_from(total - 2).unwrap()];
+        der.resize(total, 0);
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            STANDARD_FOR_TESTS.encode(der)
+        )
+    }
+
+    const STANDARD_FOR_TESTS: base64::engine::GeneralPurpose =
+        base64::engine::general_purpose::STANDARD;
+
+    #[test]
+    fn quando_der_declarado_passa_do_limite_deve_dar_too_large_e_no_limite_deve_aceitar() {
+        let limits = Limits {
+            max_cert_der_bytes: 100,
+            ..Limits::default()
+        };
+        // 136 Base64 characters for 101 bytes: under the pre-decode bound
+        // (100 * 4 / 3 + 4 = 137), so only the post-decode check can reject.
+        let over = run(pem_with_der_total(101).as_bytes(), &limits);
+        assert_eq!(over.candidates.len(), 0);
+        assert_eq!(over.diagnostics.len(), 1);
+        assert_eq!(over.diagnostics[0].reason, RejectReason::TooLarge);
+
+        let exact = run(pem_with_der_total(100).as_bytes(), &limits);
+        assert_eq!(exact.diagnostics.len(), 0);
+        assert_eq!(exact.candidates.len(), 1);
+        assert_eq!(exact.candidates[0].der.len(), 100);
+    }
+
+    #[test]
+    fn quando_corpo_tem_barra_escapada_de_json_deve_tratar_como_barra() {
+        // 0xff bytes encode to `/` characters.
+        let der_body = STANDARD_FOR_TESTS.encode([0x30, 0x04, 0xff, 0xff, 0xff, 0xff]);
+        assert!(der_body.contains('/'));
+        let escaped = der_body.replace('/', "\\/");
+        let text =
+            format!("\"-----BEGIN CERTIFICATE-----\\n{escaped}\\n-----END CERTIFICATE-----\\n\"");
+        let det = run(text.as_bytes(), &Limits::default());
+        assert_eq!(det.diagnostics.len(), 0);
+        assert_eq!(
+            det.candidates[0].der,
+            vec![0x30, 0x04, 0xff, 0xff, 0xff, 0xff]
+        );
     }
 }

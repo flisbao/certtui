@@ -44,7 +44,7 @@ mod tests {
     }
 
     #[test]
-    fn quando_comprimento_estoura_usize_deve_dar_none() {
+    fn quando_comprimento_tem_mais_de_4_bytes_ou_e_invalido_deve_dar_none() {
         // Five length bytes are outside the accepted range.
         assert_eq!(der_total_len(&[0x30, 0x85, 1, 0, 0, 0, 0]), None);
         // Indefinite form.

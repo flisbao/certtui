@@ -88,6 +88,12 @@ mod tests {
     }
 
     #[test]
+    fn quando_split_lines_tem_linha_vazia_deve_manter_sem_segmento_final_vazio() {
+        let got = lines(b"a\n\nb\n");
+        assert_eq!(got, vec![(0, &b"a"[..]), (2, &b""[..]), (3, &b"b"[..])]);
+    }
+
+    #[test]
     fn quando_split_lines_entrada_vazia_deve_nao_devolver_linhas() {
         assert_eq!(lines(b"").len(), 0);
     }

@@ -62,10 +62,14 @@ pub struct ScanOutcome {
     pub candidates: Vec<Candidate>,
     /// Rejected blocks, limited by `Limits::max_scan_diagnostics`.
     pub diagnostics: Vec<ScanDiagnostic>,
-    /// Number of private key blocks skipped without being decoded.
+    /// Number of private key blocks skipped without being decoded. Filled by
+    /// the private-key detector; zero until that detector exists.
     pub private_key_blocks_ignored: usize,
     /// `true` when extraction stopped at `Limits::max_certs_per_source`.
     pub truncated: bool,
+    /// `true` when at least one diagnostic was dropped because
+    /// `Limits::max_scan_diagnostics` was reached.
+    pub diagnostics_truncated: bool,
 }
 
 /// Sorted, non-overlapping byte ranges already claimed by a detector, so the
@@ -79,12 +83,25 @@ pub(crate) struct ConsumedRanges {
 // following tasks; until then only the tests exercise them.
 #[cfg_attr(not(test), allow(dead_code))]
 impl ConsumedRanges {
-    /// Records `range`, keeping the list sorted by start.
+    /// Records `range`, keeping the list sorted by start. Empty ranges are
+    /// ignored. Ranges must not overlap one already recorded (detectors check
+    /// [`Self::overlaps`] or only claim bytes past their own cursor); this is
+    /// a `debug_assert`, not a runtime check.
     pub(crate) fn push(&mut self, range: Range<usize>) {
         if range.is_empty() {
             return;
         }
         let at = self.ranges.partition_point(|r| r.start <= range.start);
+        debug_assert!(
+            at.checked_sub(1)
+                .and_then(|i| self.ranges.get(i))
+                .is_none_or(|prev| prev.end <= range.start)
+                && self
+                    .ranges
+                    .get(at)
+                    .is_none_or(|next| range.end <= next.start),
+            "consumed ranges must not overlap"
+        );
         self.ranges.insert(at, range);
     }
 
@@ -120,6 +137,7 @@ pub(crate) struct Detections {
     pub(crate) diagnostics: Vec<ScanDiagnostic>,
     pub(crate) private_key_blocks_ignored: usize,
     pub(crate) truncated: bool,
+    pub(crate) diagnostics_truncated: bool,
     pub(crate) consumed: ConsumedRanges,
     max_candidates: usize,
     max_diagnostics: usize,
@@ -132,6 +150,7 @@ impl Detections {
             diagnostics: Vec::new(),
             private_key_blocks_ignored: 0,
             truncated: false,
+            diagnostics_truncated: false,
             consumed: ConsumedRanges::default(),
             max_candidates: limits.max_certs_per_source,
             max_diagnostics: limits.max_scan_diagnostics,
@@ -149,10 +168,13 @@ impl Detections {
         true
     }
 
-    /// Records a rejection; drops it silently past `max_scan_diagnostics`.
+    /// Records a rejection; past `max_scan_diagnostics` it is dropped and
+    /// `diagnostics_truncated` is set.
     pub(crate) fn reject(&mut self, offset: usize, reason: RejectReason) {
         if self.diagnostics.len() < self.max_diagnostics {
             self.diagnostics.push(ScanDiagnostic { offset, reason });
+        } else {
+            self.diagnostics_truncated = true;
         }
     }
 
@@ -162,6 +184,7 @@ impl Detections {
             diagnostics: self.diagnostics,
             private_key_blocks_ignored: self.private_key_blocks_ignored,
             truncated: self.truncated,
+            diagnostics_truncated: self.diagnostics_truncated,
         }
     }
 }
@@ -207,6 +230,28 @@ mod tests {
             d.reject(i, RejectReason::InvalidBase64);
         }
         assert_eq!(d.diagnostics.len(), 2);
+        assert!(d.diagnostics_truncated);
+    }
+
+    #[test]
+    fn quando_diagnosticos_cabem_no_limite_nao_deve_marcar_truncado() {
+        let limits = Limits {
+            max_scan_diagnostics: 2,
+            ..Limits::default()
+        };
+        let mut d = Detections::new(&limits);
+        d.reject(0, RejectReason::InvalidBase64);
+        d.reject(1, RejectReason::InvalidBase64);
+        assert!(!d.diagnostics_truncated);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "consumed ranges must not overlap")]
+    fn quando_range_consumido_sobrepoe_deve_falhar_em_debug() {
+        let mut c = ConsumedRanges::default();
+        c.push(0..10);
+        c.push(5..15);
     }
 
     #[test]
