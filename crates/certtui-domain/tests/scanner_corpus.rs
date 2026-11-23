@@ -1788,6 +1788,21 @@ fn quando_bundle_mixed_deve_bater_com_expected_tsv() {
             "{file}: candidatos"
         );
         assert_eq!(note_kinds(&out), expected, "{file}: tipos de nota");
+        let notes = Vec::<LoadNote>::from(&out);
+        let expected_notes: Vec<LoadNote> = expected
+            .iter()
+            .map(|k| match k.as_str() {
+                "UnterminatedPem" => LoadNote::Rejected {
+                    offset: out.diagnostics[0].offset,
+                    reason: RejectReason::UnterminatedPem,
+                },
+                "PrivateKeyBlocksIgnored" => LoadNote::PrivateKeyBlocksIgnored {
+                    count: out.private_key_blocks_ignored,
+                },
+                other => panic!("tipo de nota desconhecido: {other}"),
+            })
+            .collect();
+        assert_eq!(notes, expected_notes, "{file}: LoadNote");
         assert!(!out.truncated && !out.diagnostics_truncated, "{file}");
         rows += 1;
     }
@@ -2115,6 +2130,71 @@ fn quando_lixo_precede_o_certificado_dentro_do_limite_deve_achar_o_certificado()
     let out = scan(text.as_bytes());
     assert_eq!(ders(&out), vec![&leaf]);
     assert!(!out.truncated);
+    assert!(
+        out.diagnostics
+            .iter()
+            .all(|d| d.reason == RejectReason::NotDerSequence)
+    );
+}
+
+#[test]
+fn quando_lixo_passa_do_limite_de_falhas_e_vem_pem_depois_deve_manter_o_pem() {
+    let leaf = reference_chain().remove(0);
+    // 600 > the default cap (500) of structural failures.
+    let garbage = garbage_runs_b64(600 * 401, 300);
+    let text = format!("{garbage}{}", pem("CERTIFICATE", &leaf_body_lines()));
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    assert!(out.truncated);
+    assert!(
+        out.diagnostics
+            .iter()
+            .all(|d| d.reason == RejectReason::NotDerSequence)
+    );
+}
+
+#[test]
+fn quando_lixo_passa_do_limite_de_falhas_e_vem_base64_solto_depois_pode_perder_o_certificado() {
+    // Documented limitation: past `max_certs_per_source` structural
+    // failures, later candidates that would need a parse are dropped
+    // unparsed (the scan reports `truncated`); only PEM certificates and
+    // PKCS#7 are still kept.
+    let garbage = garbage_runs_b64(600 * 401, 300);
+    let text = format!("{garbage}{}\n", leaf_base64());
+    let out = scan(text.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert!(out.truncated);
+}
+
+/// A certificate DER that fails `parse_der_cert` only deep inside (a corrupted
+/// byte as far from the start as possible), same length as the original.
+fn late_failing_cert() -> Vec<u8> {
+    let der = reference_chain().remove(0);
+    let limits = Limits::default();
+    // The tail is the signature, which is not parsed: the failing byte
+    // closest to the end lies at the end of the extensions.
+    for pos in (0..der.len()).rev() {
+        let mut bad = der.clone();
+        if let Some(b) = bad.get_mut(pos) {
+            *b = 0xff;
+        }
+        if certtui_domain::model::parse_der_cert(&bad, &limits).is_err() {
+            assert!(pos > der.len() / 2, "falha tarde: {pos} de {}", der.len());
+            return bad;
+        }
+    }
+    Vec::new()
+}
+
+#[test]
+fn quando_ha_4_mib_de_certificados_que_falham_tarde_no_parse_deve_terminar_em_tempo_linear() {
+    let bad = late_failing_cert();
+    assert_ne!(bad.len(), 0);
+    let one = format!("{}\n", STANDARD.encode(&bad));
+    let input = one.repeat(FOUR_MIB / one.len());
+    let out = assert_fast(input.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert!(out.truncated);
     assert!(
         out.diagnostics
             .iter()

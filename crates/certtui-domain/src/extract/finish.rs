@@ -36,9 +36,12 @@ pub(super) fn detection_cap(limits: &Limits) -> usize {
 ///
 /// Parsing is bounded: each candidate is parsed at most once (cost linear in
 /// its size, and candidates do not overlap), the pass stops as soon as the
-/// cap is exceeded, and it gives up (setting `truncated`) after
-/// `max_certs_per_source` structural failures, so a flood of garbage cannot
-/// cause unbounded work.
+/// cap is exceeded, and after `max_certs_per_source` structural failures it
+/// stops parsing (setting `truncated`): later candidates that would need a
+/// parse are dropped unparsed (a real bare Base64 / hex / nested certificate
+/// after that many failures is lost), while PEM certificates and PKCS#7
+/// candidates, which need no parse, are still kept. So a flood of garbage
+/// cannot cause unbounded work.
 pub(super) fn finish(raw: Detections, limits: &Limits) -> ScanOutcome {
     let Detections {
         candidates,
@@ -68,8 +71,11 @@ pub(super) fn finish(raw: Detections, limits: &Limits) -> ScanOutcome {
     for (needs_check, candidate) in checked {
         if needs_check {
             if failures >= cap {
+                // Failure bound reached: candidates that would need a parse
+                // are dropped unparsed, the ones that need none (PEM
+                // certificates, PKCS#7) are still processed below.
                 truncated = true;
-                break;
+                continue;
             }
             if parse_der_cert(&candidate.der, limits).is_err() {
                 failures += 1;

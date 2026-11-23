@@ -75,7 +75,11 @@ pub struct ScanOutcome {
     /// unterminated key block (no `BEGIN` of its own) is therefore not found.
     pub private_key_blocks_ignored: usize,
     /// `true` when extraction stopped at, or candidates were dropped because
-    /// of, `Limits::max_certs_per_source`.
+    /// of, `Limits::max_certs_per_source`. It also means the internal bounds
+    /// tripped: the detectors' collection bound (twice that limit) or the
+    /// bound on structural failures (that limit again), so some later
+    /// candidates may not have been looked at, and fewer than
+    /// `cert_limit` candidates may have been kept.
     pub truncated: bool,
     /// `true` when at least one diagnostic was dropped because
     /// `Limits::max_scan_diagnostics` was reached.
@@ -145,6 +149,10 @@ impl ConsumedRanges {
 }
 
 /// Accumulator shared by all detectors of one scan.
+///
+/// `truncated` is set when a detector hits its collection bound (twice
+/// `Limits::max_certs_per_source`, leaving room for candidates `finish` will
+/// drop), not only when the final cap is exceeded.
 #[derive(Debug)]
 pub(crate) struct Detections {
     pub(crate) candidates: Vec<Candidate>,

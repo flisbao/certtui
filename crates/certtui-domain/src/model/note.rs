@@ -48,7 +48,10 @@ pub enum LoadNote {
         /// Offset of the failure, when known.
         offset: Option<usize>,
     },
-    /// Extraction stopped at the per-source certificate limit.
+    /// Extraction stopped at the per-source certificate limit. `limit` is the
+    /// configured cap, not necessarily the number of certificates kept: the
+    /// scanner's internal bounds (twice the cap for what detectors collect,
+    /// the cap again for structural failures) can also trigger this note.
     TruncatedAtCertLimit {
         /// The limit that was hit.
         limit: usize,
