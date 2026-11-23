@@ -2,6 +2,8 @@
 
 pub mod error;
 
+pub mod extract;
+
 pub mod finding;
 
 pub mod limits;
