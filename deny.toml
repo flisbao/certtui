@@ -1,0 +1,43 @@
+# cargo-deny policy for CertTui (spec section 13, gate 5).
+# Schema: cargo-deny >= 0.16 (advisories/licenses without the removed
+# `vulnerability`/`unlicensed`/`deny`/`copyleft` keys).
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities are always denied in the current schema; unmaintained and
+# unsound advisories are denied for every crate, and yanked crates are denied.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+
+[licenses]
+# Anything not listed here is rejected.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+deny = [
+    # Zero OpenSSL: TLS and crypto stay in pure Rust.
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
