@@ -56,6 +56,8 @@ As chaves privadas ficam em `mktemp -d` e são apagadas ao final do script.
 | `chain-3.p7b` | PKCS#7 DER com os 3 certs, sem CRL | `openssl crl2pkcs7 -nocrl -certfile chain-3.pem -outform DER` |
 | `public-leaf-with-sct` | leaf **real** de `example.com` (lista de SCTs embutida, 2 SCTs v1 com log id de 32 bytes) | veja abaixo |
 
+Nenhum leaf destas fixtures está sem SAN; o teste de "cert sem SAN" usa o intermediário de `chain-3` (2º bloco de `chain-3.pem`).
+
 ### `public-leaf-with-sct` (real, não sintético)
 
 É o certificado leaf público de `example.com`, capturado uma vez com:

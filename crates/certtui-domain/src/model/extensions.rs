@@ -105,8 +105,9 @@ pub struct AuthorityInfoAccess {
 /// A Signed Certificate Timestamp embedded in the certificate (RFC 6962).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SctEntry {
-    /// SCT version as a human number: `1` for the RFC 6962 "v1" (wire
-    /// value 0), mirroring `CertificateSummary::version`.
+    /// SCT version as a human-readable number: the wire value plus one, so
+    /// `1` for the RFC 6962 "v1" (wire value 0, the only version RFC 6962
+    /// defines), mirroring `CertificateSummary::version`.
     pub version: u8,
     /// Log identifier (SHA-256 of the log's public key).
     pub log_id: [u8; 32],
@@ -123,6 +124,11 @@ pub struct ExtensionSummary {
     pub critical: bool,
     /// Human-readable name; the dotted OID when unknown.
     pub name: String,
+    /// `true` when the extension's content could not be decoded (malformed
+    /// for its type). The certificate is still accepted and the matching
+    /// summary field stays empty, so UIs should flag the row rather than
+    /// show the extension as absent or normal.
+    pub decode_error: bool,
 }
 
 /// Known extension OIDs and their display names.

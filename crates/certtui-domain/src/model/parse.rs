@@ -47,8 +47,10 @@ const MAX_SCT_ENTRIES: usize = 64;
 /// parsing.
 ///
 /// An extension whose content fails to decode (bad SAN, bad SCT list, ...)
-/// leaves its summary field empty but still appears in `extensions`, so a
-/// certificate with one broken extension remains inspectable.
+/// does not reject the certificate: its summary field stays empty and its
+/// entry in `extensions` has `decode_error == true` (with `critical`
+/// preserved), so the problem is shown rather than hidden. A repeated
+/// extension, by contrast, is a hard error (see below).
 ///
 /// # Errors
 ///
@@ -118,7 +120,8 @@ struct ExtensionFields {
 
 impl ExtensionFields {
     /// Records what one decoded extension contributes to the summary.
-    /// Unrecognized or undecodable extensions contribute nothing.
+    /// Unrecognized or undecodable extensions contribute nothing; undecodable
+    /// ones are flagged separately by [`extension_summary`].
     fn absorb(&mut self, parsed: &ParsedExtension<'_>) {
         match parsed {
             ParsedExtension::SubjectAlternativeName(san) => {
@@ -156,18 +159,25 @@ fn read_extensions(cert: &X509Certificate<'_>) -> Result<ExtensionFields, ParseE
         if !seen.insert(oid.clone()) {
             return Err(ParseError::Malformed(format!("duplicate extension {oid}")));
         }
-        fields.absorb(ext.parsed_extension());
-        fields.extensions.push(extension_summary(ext, oid));
+        let parsed = ext.parsed_extension();
+        fields.absorb(parsed);
+        fields.extensions.push(extension_summary(ext, oid, parsed));
     }
     Ok(fields)
 }
 
-/// One-line description of an extension: OID, criticality, display name.
-fn extension_summary(ext: &X509Extension<'_>, oid: String) -> ExtensionSummary {
+/// One-line description of an extension: OID, criticality, display name and
+/// whether its content failed to decode.
+fn extension_summary(
+    ext: &X509Extension<'_>,
+    oid: String,
+    parsed: &ParsedExtension<'_>,
+) -> ExtensionSummary {
     ExtensionSummary {
         name: extension_name(&oid),
         oid,
         critical: ext.critical,
+        decode_error: parsed.error().is_some(),
     }
 }
 
@@ -917,9 +927,9 @@ mod tests {
         (data[0], &data[header..header + len], &data[header + len..])
     }
 
-    /// The leaf of `chain-3` re-encoded with its extension list repeated
-    /// after its first extension (every OID appears twice).
-    fn der_with_duplicate_extension() -> Vec<u8> {
+    /// Re-encodes the `chain-3` leaf with its extensions (each one a whole
+    /// DER TLV) rewritten by `rewrite`; the signature is left untouched.
+    fn der_with_extensions(rewrite: impl FnOnce(Vec<Vec<u8>>) -> Vec<Vec<u8>>) -> Vec<u8> {
         let der = fixture("chain-3");
         let (_, cert, _) = split_tlv(&der);
         let (_, tbs, after_tbs) = split_tlv(cert);
@@ -933,14 +943,84 @@ mod tests {
         }
         let wrapper = raw_fields.pop().unwrap();
         let (_, wrapper_content, _) = split_tlv(wrapper);
-        let (_, ext_list, _) = split_tlv(wrapper_content);
-        let first_len = ext_list.len() - split_tlv(ext_list).2.len();
-        let doubled = tlv(0x30, &[&ext_list[..first_len], ext_list].concat());
+        let (_, mut ext_list, _) = split_tlv(wrapper_content);
+        let mut exts = Vec::new();
+        while !ext_list.is_empty() {
+            let (_, _, next) = split_tlv(ext_list);
+            exts.push(ext_list[..ext_list.len() - next.len()].to_vec());
+            ext_list = next;
+        }
+        let new_list = tlv(0x30, &rewrite(exts).concat());
         let mut new_tbs = raw_fields.concat();
-        new_tbs.extend(tlv(0xA3, &doubled));
+        new_tbs.extend(tlv(0xA3, &new_list));
         let mut new_cert = tlv(0x30, &new_tbs);
         new_cert.extend_from_slice(after_tbs);
         tlv(0x30, &new_cert)
+    }
+
+    /// The chain-3 leaf with every extension repeated (each OID twice).
+    fn der_with_duplicate_extension() -> Vec<u8> {
+        der_with_extensions(|exts| [exts.clone(), exts].concat())
+    }
+
+    /// Replaces the content of the extension with OID `oid_der` (the OID
+    /// TLV bytes) by an OCTET STRING holding a BOOLEAN, which is never a
+    /// valid SAN or Basic Constraints SEQUENCE. The OID and `critical` flag
+    /// are kept.
+    fn corrupt_extension(ext: &[u8], oid_der: &[u8]) -> Vec<u8> {
+        let (_, content, _) = split_tlv(ext);
+        if !content.starts_with(oid_der) {
+            return ext.to_vec();
+        }
+        let (_, _, rest) = split_tlv(content);
+        let (tag, _, after_flag) = split_tlv(rest);
+        let head = if tag == 0x01 {
+            &content[..content.len() - after_flag.len()]
+        } else {
+            &content[..content.len() - rest.len()]
+        };
+        tlv(0x30, &[head, &tlv(0x04, &[0x01, 0x01, 0xFF])].concat())
+    }
+
+    fn der_with_corrupt_san_and_basic_constraints() -> Vec<u8> {
+        der_with_extensions(|exts| {
+            exts.iter()
+                .map(|e| corrupt_extension(e, &[0x06, 0x03, 0x55, 0x1D, 0x11]))
+                .map(|e| corrupt_extension(&e, &[0x06, 0x03, 0x55, 0x1D, 0x13]))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn quando_extensao_nao_decodifica_deve_aceitar_o_cert_e_marcar_decode_error() {
+        let der = der_with_corrupt_san_and_basic_constraints();
+        let s = parse_der_cert(&der, &Limits::default()).unwrap();
+        assert_eq!(s.subject_alt_names, Vec::new());
+        assert_eq!(s.basic_constraints, None);
+        let find = |oid: &str| s.extensions.iter().find(|e| e.oid == oid).unwrap();
+        let san = find("2.5.29.17");
+        assert!(san.decode_error && !san.critical, "{san:?}");
+        let bc = find("2.5.29.19");
+        assert!(bc.decode_error && bc.critical, "{bc:?}");
+        // Untouched extensions still decode.
+        assert!(!find("2.5.29.15").decode_error);
+        assert!(s.key_usage.is_some());
+    }
+
+    #[test]
+    fn quando_cert_saudavel_nenhuma_extensao_deve_ter_decode_error() {
+        for name in [
+            "rsa2048-leaf",
+            "ec-p256-leaf",
+            "san-multi",
+            "expired",
+            "public-leaf-with-sct",
+            "chain-3",
+        ] {
+            let s = summary(name);
+            assert!(!s.extensions.is_empty(), "{name}");
+            assert!(s.extensions.iter().all(|e| !e.decode_error), "{name}");
+        }
     }
 
     #[test]
