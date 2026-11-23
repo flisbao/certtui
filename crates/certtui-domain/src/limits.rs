@@ -3,7 +3,9 @@
 //!
 //! Every limit lives in [`Limits`]. A configuration may lower or raise a
 //! limit up to its hard cap; anything above the cap is truncated and reported
-//! through a [`LimitWarning`]. A zero override is always rejected.
+//! through a [`LimitWarning`]. A zero override is rejected, except for
+//! `max_http_redirects` and `max_dir_depth`, where `0` is meaningful (no
+//! redirects, no recursion).
 
 use std::time::Duration;
 
@@ -147,9 +149,14 @@ impl Limits {
     /// Each present override is checked against [`Limits::HARD_CAPS`]: values
     /// above the cap are truncated to it and reported as a [`LimitWarning`].
     ///
+    /// Callers must start from [`Limits::default()`] so the hard cap is never
+    /// exceeded by construction.
+    ///
     /// # Errors
     ///
-    /// Returns [`LimitsError::ZeroNotAllowed`] if any override is `0`.
+    /// Returns [`LimitsError::ZeroNotAllowed`] if any override is `0`, except
+    /// `max_http_redirects` and `max_dir_depth`, which accept `0` (no
+    /// redirects, no recursion).
     pub fn with_overrides(
         self,
         o: &LimitsOverrides,
@@ -191,11 +198,12 @@ impl Limits {
 
         // Counts/sizes: the override field has the same name as the limit.
         macro_rules! counts {
-            ($($f:ident),* $(,)?) => {$(
+            ($zero:expr; $($f:ident),* $(,)?) => {$(
                 apply_count(
                     stringify!($f),
                     $f,
                     caps.$f,
+                    $zero,
                     &mut out.$f,
                     &mut w,
                 )?;
@@ -215,6 +223,7 @@ impl Limits {
         }
 
         counts!(
+            ZeroPolicy::Reject;
             max_cert_der_bytes,
             max_chain_len,
             max_input_file_bytes,
@@ -222,14 +231,12 @@ impl Limits {
             max_certs_per_source,
             max_stdin_bytes,
             max_dir_entries,
-            max_dir_depth,
             max_ca_file_certs,
             max_scan_diagnostics,
             max_handshake_bytes,
             max_ocsp_response_bytes,
             max_crl_bytes,
             max_aia_cert_bytes,
-            max_http_redirects,
             max_revocation_cache_bytes,
             batch_concurrency,
             max_batch_targets,
@@ -237,6 +244,8 @@ impl Limits {
             history_entries,
             max_clipboard_bytes,
         );
+        // `0` is meaningful here: no redirects, no directory recursion.
+        counts!(ZeroPolicy::Allow; max_http_redirects, max_dir_depth);
         secs!(
             dns_timeout => dns_timeout_secs,
             connect_timeout => connect_timeout_secs,
@@ -334,7 +343,7 @@ pub struct LimitWarning {
 /// Errors produced while applying [`LimitsOverrides`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LimitsError {
-    /// An override of zero was supplied; zero is never a valid limit.
+    /// An override of zero was supplied for a limit where zero is not valid.
     #[error("limit override `{field}` must not be zero")]
     ZeroNotAllowed {
         /// Name of the offending override field.
@@ -342,14 +351,25 @@ pub enum LimitsError {
     },
 }
 
-/// Validates `requested` against `cap`: rejects zero and truncates above the
-/// cap, returning the value to apply and an optional warning.
+/// Whether an override of `0` is a valid value for a limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZeroPolicy {
+    /// Zero is rejected with [`LimitsError::ZeroNotAllowed`].
+    Reject,
+    /// Zero is accepted as a meaningful value.
+    Allow,
+}
+
+/// Validates `requested` against `cap`: rejects zero (unless `zero` allows it)
+/// and truncates above the cap, returning the value to apply and an optional
+/// warning.
 fn clamp(
     field: &'static str,
     requested: u64,
     cap: u64,
+    zero: ZeroPolicy,
 ) -> Result<(u64, Option<LimitWarning>), LimitsError> {
-    if requested == 0 {
+    if requested == 0 && zero == ZeroPolicy::Reject {
         return Err(LimitsError::ZeroNotAllowed { field });
     }
     if requested > cap {
@@ -368,6 +388,7 @@ fn apply_count(
     field: &'static str,
     requested: Option<u64>,
     cap: usize,
+    zero: ZeroPolicy,
     slot: &mut usize,
     warnings: &mut Vec<LimitWarning>,
 ) -> Result<(), LimitsError> {
@@ -375,7 +396,7 @@ fn apply_count(
         return Ok(());
     };
     let cap = u64::try_from(cap).unwrap_or(u64::MAX);
-    let (value, warning) = clamp(field, requested, cap)?;
+    let (value, warning) = clamp(field, requested, cap, zero)?;
     // `value <= cap`, and `cap` came from a `usize`, so this never saturates.
     *slot = usize::try_from(value).unwrap_or(usize::MAX);
     warnings.extend(warning);
@@ -394,7 +415,7 @@ fn apply_secs(
     let Some(requested) = requested else {
         return Ok(());
     };
-    let (value, warning) = clamp(field, requested, cap.as_secs())?;
+    let (value, warning) = clamp(field, requested, cap.as_secs(), ZeroPolicy::Reject)?;
     *slot = Duration::from_secs(value);
     warnings.extend(warning);
     Ok(())
@@ -552,6 +573,45 @@ mod tests {
     }
 
     #[test]
+    fn quando_max_http_redirects_zero_deve_aceitar_e_aplicar_zero() {
+        let o = LimitsOverrides {
+            max_http_redirects: Some(0),
+            ..LimitsOverrides::default()
+        };
+        let (l, warnings) = Limits::default().with_overrides(&o).unwrap();
+        assert_eq!(l.max_http_redirects, 0);
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn quando_max_dir_depth_zero_deve_aceitar_e_aplicar_zero() {
+        let o = LimitsOverrides {
+            max_dir_depth: Some(0),
+            ..LimitsOverrides::default()
+        };
+        let (l, warnings) = Limits::default().with_overrides(&o).unwrap();
+        assert_eq!(l.max_dir_depth, 0);
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn quando_zero_em_campo_vizinho_de_redirects_e_depth_deve_continuar_falhando() {
+        let o = LimitsOverrides {
+            max_dir_entries: Some(0),
+            max_http_redirects: Some(0),
+            max_dir_depth: Some(0),
+            ..LimitsOverrides::default()
+        };
+        let err = Limits::default().with_overrides(&o).unwrap_err();
+        assert_eq!(
+            err,
+            LimitsError::ZeroNotAllowed {
+                field: "max_dir_entries"
+            }
+        );
+    }
+
+    #[test]
     fn quando_override_de_timeout_zero_deve_falhar() {
         let o = LimitsOverrides {
             http_timeout_secs: Some(0),
@@ -661,7 +721,8 @@ mod tests {
     #[test]
     fn quando_json_tem_campo_desconhecido_deve_falhar() {
         let r: Result<LimitsOverrides, _> = serde_json::from_str(r#"{"campo_inexistente": 1}"#);
-        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("campo_inexistente"), "mensagem: {msg}");
     }
 
     #[test]
@@ -791,20 +852,20 @@ mod tests {
                 "max_certs_per_source",
                 "max_stdin_bytes",
                 "max_dir_entries",
-                "max_dir_depth",
                 "max_ca_file_certs",
                 "max_scan_diagnostics",
                 "max_handshake_bytes",
                 "max_ocsp_response_bytes",
                 "max_crl_bytes",
                 "max_aia_cert_bytes",
-                "max_http_redirects",
                 "max_revocation_cache_bytes",
                 "batch_concurrency",
                 "max_batch_targets",
                 "channel_capacity",
                 "history_entries",
                 "max_clipboard_bytes",
+                "max_http_redirects",
+                "max_dir_depth",
                 "dns_timeout_secs",
                 "connect_timeout_secs",
                 "handshake_timeout_secs",
