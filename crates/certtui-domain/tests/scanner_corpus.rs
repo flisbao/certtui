@@ -1128,3 +1128,484 @@ fn quando_ha_inundacao_de_begin_private_key_deve_terminar_em_tempo_linear() {
     let out = assert_fast(block.repeat(FOUR_MIB / block.len()).as_bytes());
     assert_eq!(out.private_key_blocks_ignored, FOUR_MIB / block.len());
 }
+
+// ---- hex DER detector --------------------------------------------------------
+
+/// Hex of `bytes`, two digits per byte, joined with `sep`.
+fn hex_of(bytes: &[u8], sep: &str) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+#[test]
+fn quando_hex_com_dois_pontos_e_continuo_deve_achar_a_cadeia_de_referencia() {
+    let reference = reference_chain();
+    for file in ["hex-colon.txt", "hex-plain.txt"] {
+        let out = scan(&read(&format!("messy/{file}")));
+        assert_eq!(ders(&out), reference.iter().collect::<Vec<_>>(), "{file}");
+        assert_eq!(out.diagnostics.len(), 0, "{file}: {:?}", out.diagnostics);
+        assert!(!out.truncated, "{file}");
+        let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
+        assert!(offsets.windows(2).all(|w| w[0] < w[1]), "{file}");
+        assert!(
+            out.candidates
+                .iter()
+                .all(|c| c.kind == CandidateKind::Certificate)
+        );
+    }
+}
+
+#[test]
+fn quando_hex_tem_caixa_mista_deve_decodificar() {
+    let leaf = reference_chain().remove(0);
+    let mixed: String = hex_of(&leaf, ":")
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i % 3 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect();
+    assert!(mixed.chars().any(|c| c.is_ascii_uppercase()));
+    assert!(mixed.chars().any(|c| c.is_ascii_lowercase()));
+    let out = scan(format!("serial: {mixed}\n").as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    assert_eq!(out.candidates[0].offset, "serial: ".len());
+}
+
+#[test]
+fn quando_hex_atravessa_linhas_e_separadores_deve_juntar() {
+    let leaf = reference_chain().remove(0);
+    let plain = hex_of(&leaf, "");
+    let wrapped: Vec<String> = plain
+        .as_bytes()
+        .chunks(64)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect();
+    for (sep, name) in [("\n", "lf"), ("\r\n", "crlf"), ("\n  ", "indentado?")] {
+        // Indented continuation lines are not supported: the indentation is
+        // made of spaces, which ARE separators, so it works too.
+        let text = format!("hex:\n{}\nfim", wrapped.join(sep));
+        let out = scan(text.as_bytes());
+        assert_eq!(ders(&out), vec![&leaf], "{name}");
+        assert_eq!(out.candidates[0].offset, "hex:\n".len(), "{name}");
+    }
+    let spaced = hex_of(&leaf, " ");
+    assert_eq!(ders(&scan(spaced.as_bytes())), vec![&leaf]);
+}
+
+#[test]
+fn quando_hex_nao_comeca_com_3082_ou_3081_deve_ignorar() {
+    let leaf = reference_chain().remove(0);
+    let body = hex_of(&leaf[2..], "");
+    for head in ["3183", "3083", "0230", "a082", "3182", "3080", "ff"] {
+        let text = format!("x = {head}{body}\n");
+        let out = scan(text.as_bytes());
+        assert_eq!(out.candidates.len(), 0, "{head}");
+        assert_eq!(out.diagnostics.len(), 0, "{head}: {:?}", out.diagnostics);
+    }
+}
+
+#[test]
+fn quando_hex_comeca_com_3081_deve_cortar_no_tamanho_declarado() {
+    // 30 81 80 + 128 bytes: the short long-form (one length byte).
+    let mut der = vec![0x30, 0x81, 0x80];
+    der.extend(std::iter::repeat_n(0x05, 0x80));
+    for sep in ["", ":", " "] {
+        let text = format!("k={}\n", hex_of(&der, sep));
+        assert_eq!(ders(&scan(text.as_bytes())), vec![&der], "{sep:?}");
+    }
+}
+
+#[test]
+fn quando_ha_bytes_depois_do_der_em_hex_deve_cortar_no_tamanho_declarado() {
+    let leaf = reference_chain().remove(0);
+    let mut padded = leaf.clone();
+    padded.extend_from_slice(&[0, 0, 0, 0, 0]);
+    let out = scan(hex_of(&padded, ":").as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+}
+
+#[test]
+fn quando_hex_tem_certificados_colados_deve_achar_todos() {
+    let reference = reference_chain();
+    let glued: String = reference.iter().map(|d| hex_of(d, "")).collect();
+    let out = scan(glued.as_bytes());
+    assert_eq!(ders(&out), reference.iter().collect::<Vec<_>>());
+    let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
+    assert_eq!(
+        offsets,
+        vec![
+            0,
+            2 * reference[0].len(),
+            2 * (reference[0].len() + reference[1].len())
+        ]
+    );
+}
+
+#[test]
+fn quando_hex_tem_comprimento_impar_ou_curto_deve_dar_length_mismatch() {
+    let leaf = reference_chain().remove(0);
+    let plain = hex_of(&leaf, "");
+    // One digit missing at the end: odd number of digits.
+    let odd = &plain[..plain.len() - 1];
+    assert_eq!(odd.len() % 2, 1);
+    let out = scan(format!("x {odd}\n").as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![RejectReason::LengthMismatch]);
+    assert_eq!(out.diagnostics[0].offset, 2);
+    // Even but truncated.
+    let out = scan(format!("x {}\n", &plain[..plain.len() / 2]).as_bytes());
+    assert_eq!(reasons(&out), vec![RejectReason::LengthMismatch]);
+}
+
+#[test]
+fn quando_hex_curto_parece_hash_deve_ignorar_sem_diagnostico() {
+    // A SHA-256 fingerprint that happens to start with 3082.
+    let hash = format!("3082{}", "ab".repeat(30));
+    for text in [
+        hash.clone(),
+        format!("SHA256: {}", hex_of(&hex_bytes(&hash), ":")),
+    ] {
+        let out = scan(text.as_bytes());
+        assert_eq!(out.candidates.len(), 0);
+        assert_eq!(out.diagnostics.len(), 0);
+    }
+}
+
+fn hex_bytes(s: &str) -> Vec<u8> {
+    s.as_bytes()
+        .chunks(2)
+        .filter_map(|p| u8::from_str_radix(&String::from_utf8_lossy(p), 16).ok())
+        .collect()
+}
+
+#[test]
+fn quando_hex_vem_depois_de_palavra_hex_deve_achar_o_certificado() {
+    let leaf = reference_chain().remove(0);
+    let h = hex_of(&leaf, ":");
+    for prefix in ["deadbeef ", "cert1: ", "face\n", "0x", "de ad be ef\n"] {
+        let out = scan(format!("{prefix}{h}").as_bytes());
+        assert_eq!(ders(&out), vec![&leaf], "{prefix:?}");
+        assert_eq!(out.candidates[0].offset, prefix.len(), "{prefix:?}");
+    }
+}
+
+#[test]
+fn quando_hex_passa_do_limite_de_tamanho_deve_dar_too_large() {
+    let limits = Limits {
+        max_cert_der_bytes: 100,
+        ..Limits::default()
+    };
+    let leaf = reference_chain().remove(0);
+    let out = scan_text(hex_of(&leaf, ":").as_bytes(), &limits);
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![RejectReason::TooLarge]);
+}
+
+#[test]
+fn quando_hex_passa_do_limite_de_certs_deve_marcar_truncado() {
+    let limits = Limits {
+        max_certs_per_source: 2,
+        ..Limits::default()
+    };
+    let out = scan_text(&read("messy/hex-colon.txt"), &limits);
+    assert_eq!(out.candidates.len(), 2);
+    assert!(out.truncated);
+}
+
+#[test]
+fn quando_pem_contem_hex_dentro_do_corpo_deve_nao_reler_o_range_do_pem() {
+    // The PEM body is claimed whole; hex-looking Base64 inside it is not read.
+    let out = scan(&read("chain-3.pem"));
+    assert_eq!(out.candidates.len(), 3);
+    assert_eq!(out.diagnostics.len(), 0);
+}
+
+#[test]
+fn quando_arquivo_mistura_pem_base64_e_hex_deve_achar_os_tres_em_ordem() {
+    let reference = reference_chain();
+    let out = scan(&read("messy/bundle-mixed.txt"));
+    assert_eq!(ders(&out), reference.iter().collect::<Vec<_>>());
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
+    let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
+    assert!(offsets.windows(2).all(|w| w[0] < w[1]));
+}
+
+#[test]
+fn quando_arquivo_repete_o_certificado_em_pem_e_hex_deve_achar_os_dois_brutos() {
+    // Deduplication is a later task: two raw candidates, same DER.
+    let leaf = reference_chain().remove(0);
+    let out = scan(&read("messy/duplicates.txt"));
+    assert_eq!(ders(&out), vec![&leaf, &leaf]);
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
+}
+
+#[test]
+fn quando_hex_diagnostico_e_formatado_deve_ter_so_offset_e_motivo() {
+    let leaf = reference_chain().remove(0);
+    let plain = hex_of(&leaf, "");
+    let out = scan(format!("x {}", &plain[..plain.len() / 2]).as_bytes());
+    assert_eq!(
+        format!("{:?}", out.diagnostics),
+        "[ScanDiagnostic { offset: 2, reason: LengthMismatch }]"
+    );
+}
+
+#[test]
+fn quando_ha_inundacao_de_palavras_hex_por_4_mib_deve_terminar_em_tempo_linear() {
+    let _ = assert_fast("deadbeef cafe face ".repeat(FOUR_MIB / 19).as_bytes());
+    let _ = assert_fast("0123456789abcdef".repeat(FOUR_MIB / 16).as_bytes());
+    let _ = assert_fast("ab:cd:ef:01\n".repeat(FOUR_MIB / 12).as_bytes());
+    let _ = assert_fast("a".repeat(FOUR_MIB).as_bytes());
+    let _ = assert_fast("30 30 ".repeat(FOUR_MIB / 6).as_bytes());
+    let _ = assert_fast("3 0 8 2 ".repeat(FOUR_MIB / 8).as_bytes());
+    let _ = assert_fast(format!("30{}30", " ".repeat(FOUR_MIB)).as_bytes());
+}
+
+#[test]
+fn quando_hex_repete_30_82_por_4_mib_deve_terminar_em_tempo_linear() {
+    let out = assert_fast("30 82 ".repeat(FOUR_MIB / 6).as_bytes());
+    assert!(out.candidates.len() <= Limits::default().max_certs_per_source);
+    for filler in [
+        "30 82 ff ff ",
+        "30 81 00 ",
+        "30:82:00:01:",
+        "3082",
+        "30 82\n",
+    ] {
+        let _ = assert_fast(filler.repeat(FOUR_MIB / filler.len()).as_bytes());
+    }
+}
+
+// ---- nested Base64 (Kubernetes Secret) ---------------------------------------
+
+/// Standard Base64 of `text`, in one line.
+fn b64(text: impl AsRef<[u8]>) -> String {
+    STANDARD.encode(text)
+}
+
+fn secret_with(value: &str) -> String {
+    format!("apiVersion: v1\nkind: Secret\ndata:\n  tls.crt: {value}\n  other: xyz\n")
+}
+
+#[test]
+fn quando_secret_k8s_deve_extrair_os_certificados_brutos_dos_dois_campos() {
+    // tls.crt holds the 3-cert chain and ca.crt the root: 4 RAW candidates
+    // (the root twice); expected.tsv says 3 because deduplication is Task 11.
+    let reference = reference_chain();
+    let input = read("messy/k8s-secret.yaml");
+    let out = scan(&input);
+    assert_eq!(
+        ders(&out),
+        vec![&reference[0], &reference[1], &reference[2], &reference[2]]
+    );
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
+    assert_eq!(out.private_key_blocks_ignored, 0);
+    // Offsets inherit the Base64 run of each field.
+    let text = String::from_utf8(input).unwrap();
+    let tls = text.find("tls.crt: ").unwrap() + "tls.crt: ".len();
+    let ca = text.find("ca.crt: ").unwrap() + "ca.crt: ".len();
+    let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
+    assert_eq!(offsets, vec![tls, tls, tls, ca]);
+}
+
+#[test]
+fn quando_base64_de_pem_tem_um_nivel_deve_extrair() {
+    let leaf = reference_chain().remove(0);
+    let value = b64(pem("CERTIFICATE", &leaf_body_lines()));
+    let text = secret_with(&value);
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    assert_eq!(out.candidates[0].offset, text.find(&value).unwrap());
+    assert_eq!(out.diagnostics.len(), 0);
+}
+
+#[test]
+fn quando_base64_de_base64_de_pem_deve_extrair_com_profundidade_2() {
+    let leaf = reference_chain().remove(0);
+    let value = b64(b64(pem("CERTIFICATE", &leaf_body_lines())));
+    let text = secret_with(&value);
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    assert_eq!(out.candidates[0].offset, text.find(&value).unwrap());
+    assert_eq!(out.diagnostics.len(), 0);
+}
+
+#[test]
+fn quando_aninhamento_passa_de_2_deve_dar_nesting_too_deep() {
+    let value = b64(b64(b64(pem("CERTIFICATE", &leaf_body_lines()))));
+    let text = secret_with(&value);
+    let out = scan(text.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![RejectReason::NestingTooDeep]);
+    assert_eq!(out.diagnostics[0].offset, text.find(&value).unwrap());
+    let shown = format!("{:?}", out.diagnostics);
+    assert!(!shown.contains("BEGIN") && !shown.contains(&value[..16]));
+}
+
+#[test]
+fn quando_aninhado_nao_contem_begin_deve_ignorar_sem_diagnostico() {
+    let prose = "isto nao e um certificado, e so uma frase longa o bastante para ter mais de sessenta e quatro caracteres.";
+    for inner in [
+        prose.as_bytes().to_vec(),
+        (0..=255u8).cycle().take(300).collect::<Vec<u8>>(),
+        b"-----BEGIN-----".repeat(10),
+    ] {
+        let text = secret_with(&b64(&inner));
+        let out = scan(text.as_bytes());
+        assert_eq!(out.candidates.len(), 0);
+        assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
+    }
+}
+
+#[test]
+fn quando_secret_tem_chave_privada_e_cert_deve_devolver_so_o_cert_e_contar_a_chave() {
+    let leaf = reference_chain().remove(0);
+    let key = fake_key_lines();
+    let key_der = fake_key_der();
+    let inner = format!(
+        "{}{}",
+        pem("PRIVATE KEY", &key),
+        pem("CERTIFICATE", &leaf_body_lines())
+    );
+    for (layers, value) in [(1, b64(&inner)), (2, b64(b64(&inner)))] {
+        let text = secret_with(&value);
+        let out = scan(text.as_bytes());
+        assert_eq!(ders(&out), vec![&leaf], "camadas {layers}");
+        assert_eq!(out.private_key_blocks_ignored, 1, "camadas {layers}");
+        assert_eq!(out.diagnostics.len(), 0, "camadas {layers}");
+        for c in &out.candidates {
+            assert!(
+                !c.der
+                    .windows(16)
+                    .any(|w| key_der.windows(16).any(|k| k == w)),
+                "camadas {layers}: a chave vazou para um candidato"
+            );
+        }
+        let shown = format!("{out:?}");
+        assert!(!shown.contains(&key[0][..16]), "camadas {layers}");
+    }
+}
+
+#[test]
+fn quando_secret_so_tem_chave_privada_deve_contar_e_nao_devolver_nada() {
+    let text = secret_with(&b64(pem("RSA PRIVATE KEY", &fake_key_lines())));
+    let out = scan(text.as_bytes());
+    assert_eq!(out.private_key_blocks_ignored, 1);
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(out.diagnostics.len(), 0);
+}
+
+#[test]
+fn quando_base64_aninhado_esta_quebrado_em_linhas_deve_juntar() {
+    let leaf = reference_chain().remove(0);
+    let wrapped: Vec<String> = b64(pem("CERTIFICATE", &leaf_body_lines()))
+        .as_bytes()
+        .chunks(76)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect();
+    assert!(wrapped.len() > 2);
+    let yaml = format!(
+        "data:\n  tls.crt: |\n    {}\n  ca.crt: abc\n",
+        wrapped.join("\n    ")
+    );
+    assert_eq!(ders(&scan(yaml.as_bytes())), vec![&leaf]);
+    let plain = format!("antes\n{}\ndepois\n", wrapped.join("\r\n"));
+    assert_eq!(ders(&scan(plain.as_bytes())), vec![&leaf]);
+    let escaped = format!("{{\"v\":\"{}\"}}", wrapped.join("\\n"));
+    assert_eq!(ders(&scan(escaped.as_bytes())), vec![&leaf]);
+}
+
+#[test]
+fn quando_base64_aninhado_tem_base64_solto_dentro_deve_achar_o_certificado() {
+    // The Secret holds a bare Base64 DER (no PEM headers).
+    let leaf = reference_chain().remove(0);
+    let text = secret_with(&b64(format!("{}\n", b64(&leaf))));
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+}
+
+#[test]
+fn quando_candidatos_aninhados_passam_do_limite_deve_marcar_truncado() {
+    let limits = Limits {
+        max_certs_per_source: 2,
+        ..Limits::default()
+    };
+    let out = scan_text(&read("messy/k8s-secret.yaml"), &limits);
+    assert_eq!(out.candidates.len(), 2);
+    assert!(out.truncated);
+}
+
+#[test]
+fn quando_corrida_base64_aninhada_ja_foi_reivindicada_deve_nao_ser_decodificada_de_novo() {
+    // A bare Base64 certificate is claimed by the bare detector; the nested
+    // detector must not decode it again (a DER is not text anyway).
+    let leaf = reference_chain().remove(0);
+    let out = scan(secret_with(&b64(&leaf)).as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    assert_eq!(out.diagnostics.len(), 0);
+}
+
+#[test]
+fn quando_ha_inundacao_de_base64_por_4_mib_deve_terminar_em_tempo_linear_aninhado() {
+    let _ = assert_fast("A".repeat(FOUR_MIB).as_bytes());
+    let _ = assert_fast(
+        format!("{}\n", "QUFB".repeat(16))
+            .repeat(FOUR_MIB / 65)
+            .as_bytes(),
+    );
+    let _ = assert_fast(
+        format!("{} ", "A".repeat(64))
+            .repeat(FOUR_MIB / 65)
+            .as_bytes(),
+    );
+    let _ = assert_fast(
+        format!("{} ", "A".repeat(15))
+            .repeat(FOUR_MIB / 16)
+            .as_bytes(),
+    );
+    let _ = assert_fast("a\n".repeat(FOUR_MIB / 2).as_bytes());
+    let _ = assert_fast(
+        format!("A\n{}", " ".repeat(255))
+            .repeat(FOUR_MIB / 257)
+            .as_bytes(),
+    );
+    let _ = assert_fast("-".repeat(FOUR_MIB).as_bytes());
+}
+
+#[test]
+fn quando_ha_bomba_de_base64_aninhado_de_4_mib_deve_terminar_em_tempo_linear() {
+    let mut layer = "A".repeat(1_769_472).into_bytes();
+    for _ in 0..3 {
+        layer = STANDARD.encode(&layer).into_bytes();
+    }
+    assert!(layer.len() >= FOUR_MIB - 8);
+    let out = assert_fast(&layer);
+    assert_eq!(reasons(&out), vec![RejectReason::NestingTooDeep]);
+    assert_eq!(out.candidates.len(), 0);
+}
+
+#[test]
+fn quando_ha_muitas_corridas_aninhadas_pequenas_deve_terminar_em_tempo_linear() {
+    // Each run decodes to Base64 text, so each one is queued and scanned.
+    let inner = b64("A".repeat(60));
+    assert!(inner.len() >= 64);
+    let _ = assert_fast(
+        format!("{inner}\n")
+            .repeat(FOUR_MIB / (inner.len() + 1))
+            .as_bytes(),
+    );
+    let pem_inner = b64(pem("CERTIFICATE", &["AAAA".to_owned()]));
+    let _ = assert_fast(
+        format!("{pem_inner}\n")
+            .repeat(FOUR_MIB / (pem_inner.len() + 1))
+            .as_bytes(),
+    );
+}

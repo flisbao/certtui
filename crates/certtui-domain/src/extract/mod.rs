@@ -7,7 +7,9 @@
 
 mod base64_run;
 mod der_len;
+mod hex_run;
 mod lines;
+mod nested;
 mod pem;
 
 use std::ops::Range;
@@ -195,15 +197,59 @@ impl Detections {
     }
 }
 
+/// The parts of `0..len` that are not inside any of the sorted, non-overlapping
+/// `consumed` ranges, in order. Empty parts are not yielded.
+pub(crate) fn free_regions(
+    len: usize,
+    consumed: &[Range<usize>],
+) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut pos = 0;
+    let mut ranges = consumed.iter();
+    let mut done = false;
+    std::iter::from_fn(move || {
+        while !done {
+            let region = if let Some(r) = ranges.next() {
+                let region = pos..r.start.min(len);
+                pos = pos.max(r.end);
+                region
+            } else {
+                done = true;
+                pos..len
+            };
+            if region.start < region.end {
+                return Some(region);
+            }
+        }
+        None
+    })
+}
+
+/// Runs the flat detectors (PEM, private keys, bare Base64, hex) on `input`,
+/// each one only on what the previous ones did not claim.
+fn scan_flat(input: &[u8], limits: &Limits, det: &mut Detections) {
+    pem::detect(input, limits, det);
+    let claimed = det.consumed.as_slice().to_vec();
+    base64_run::find_bare_base64(input, &claimed, limits, det);
+    let claimed = det.consumed.as_slice().to_vec();
+    hex_run::find_hex_der(input, &claimed, limits, det);
+}
+
 /// Extracts certificate candidates from arbitrary text, in text order.
 ///
-/// `input` may be any bytes. Cost is linear in `input.len()`.
+/// `input` may be any bytes. Cost is linear in `input.len()`. The detectors
+/// run in this order, each on what the previous ones left alone: PEM blocks,
+/// private keys (skipped and counted), bare Base64, hex, and finally Base64
+/// that decodes to text which is scanned again (see the `nested` module).
+/// Candidates found inside decoded text carry the offset of the Base64 run
+/// they came from. Candidates and diagnostics are sorted by offset (stable).
 #[must_use]
 pub fn scan_text(input: &[u8], limits: &Limits) -> ScanOutcome {
     let mut detections = Detections::new(limits);
-    pem::detect(input, limits, &mut detections);
+    scan_flat(input, limits, &mut detections);
     let claimed = detections.consumed.as_slice().to_vec();
-    base64_run::find_bare_base64(input, &claimed, limits, &mut detections);
+    let _decoded = nested::find_nested_base64(input, &claimed, limits, &mut detections);
+    detections.candidates.sort_by_key(|c| c.offset);
+    detections.diagnostics.sort_by_key(|d| d.offset);
     detections.into_outcome()
 }
 

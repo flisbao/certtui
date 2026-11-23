@@ -15,7 +15,7 @@ struct Lines<'a> {
 }
 
 /// Length of the separator at `i`, or `None` when there is none.
-fn separator_len(input: &[u8], i: usize) -> Option<usize> {
+pub(super) fn separator_len(input: &[u8], i: usize) -> Option<usize> {
     match input.get(i)? {
         b'\n' => Some(1),
         b'\r' => Some(if input.get(i + 1) == Some(&b'\n') {
