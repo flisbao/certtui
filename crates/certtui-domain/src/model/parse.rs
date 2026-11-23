@@ -1,7 +1,17 @@
 //! DER certificate parsing into a [`CertificateSummary`] (spec D1, section 9).
 
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use x509_parser::asn1_rs::Tag;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::extensions::SignedCertificateTimestamp;
+use x509_parser::extensions::{
+    self as x509_ext, DistributionPointName, GeneralName, ParsedExtension, X509Extension,
+};
+use x509_parser::oid_registry::{
+    OID_PKIX_ACCESS_DESCRIPTOR_CA_ISSUERS, OID_PKIX_ACCESS_DESCRIPTOR_OCSP,
+};
 use x509_parser::parse_x509_certificate;
 use x509_parser::public_key::PublicKey;
 use x509_parser::x509::{AttributeTypeAndValue, SubjectPublicKeyInfo, X509Name};
@@ -10,10 +20,14 @@ use crate::error::ParseError;
 use crate::limits::Limits;
 use crate::time::Timestamp;
 
+use super::extensions::{
+    AuthorityInfoAccess, BasicConstraints, ExtendedKeyUsage, ExtensionSummary, KeyId, KeyUsage,
+    SctEntry, SubjectAltName, extension_name,
+};
 use super::fingerprint::join_hex;
 use super::key::{PublicKeyAlgorithm, PublicKeyInfo, SignatureAlgorithm};
 use super::name::{DistinguishedName, SerialNumber};
-use super::summary::{AuthorityInfoAccess, CertificateSummary};
+use super::summary::CertificateSummary;
 
 const OID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
 const OID_RSA_ENCRYPTION: &str = "1.2.840.113549.1.1.1";
@@ -23,15 +37,25 @@ const OID_CURVE_P256: &str = "1.2.840.10045.3.1.7";
 const OID_CURVE_P384: &str = "1.3.132.0.34";
 const OID_CURVE_P521: &str = "1.3.132.0.35";
 
+/// Most embedded SCTs kept per certificate. Real certificates carry two or
+/// three; the cap only bounds hostile input.
+const MAX_SCT_ENTRIES: usize = 64;
+
 /// Parses one DER certificate and extracts its core fields.
 ///
 /// The size check against `limits.max_cert_der_bytes` runs before any
-/// parsing. Extension-derived fields of the summary are left empty.
+/// parsing.
+///
+/// An extension whose content fails to decode (bad SAN, bad SCT list, ...)
+/// leaves its summary field empty but still appears in `extensions`, so a
+/// certificate with one broken extension remains inspectable.
 ///
 /// # Errors
 ///
 /// [`ParseError::TooLarge`] when `der` exceeds the limit,
-/// [`ParseError::Malformed`] when it is not a well-formed certificate, and
+/// [`ParseError::Malformed`] when it is not a well-formed certificate or
+/// repeats an extension (RFC 5280 section 4.2 forbids it; `x509-parser`
+/// only reports that when an extension is looked up, not while parsing), and
 /// [`ParseError::TrailingData`] when bytes follow the certificate.
 pub fn parse_der_cert(der: &[u8], limits: &Limits) -> Result<CertificateSummary, ParseError> {
     if der.len() > limits.max_cert_der_bytes {
@@ -45,13 +69,14 @@ pub fn parse_der_cert(der: &[u8], limits: &Limits) -> Result<CertificateSummary,
     if !rest.is_empty() {
         return Err(ParseError::TrailingData { extra: rest.len() });
     }
-    Ok(summarize(&cert))
+    summarize(&cert)
 }
 
 /// Builds the summary from an already-parsed certificate.
-fn summarize(cert: &X509Certificate<'_>) -> CertificateSummary {
+fn summarize(cert: &X509Certificate<'_>) -> Result<CertificateSummary, ParseError> {
     let validity = cert.validity();
-    CertificateSummary {
+    let ext = read_extensions(cert)?;
+    Ok(CertificateSummary {
         // X.509 encodes v1 as 0, v2 as 1, v3 as 2.
         version: u8::try_from(cert.version().0.saturating_add(1)).unwrap_or(u8::MAX),
         serial: SerialNumber::from_bytes(cert.raw_serial()),
@@ -63,16 +88,225 @@ fn summarize(cert: &X509Certificate<'_>) -> CertificateSummary {
         signature_algorithm: SignatureAlgorithm::from_oid(
             &cert.signature_algorithm.algorithm.to_id_string(),
         ),
-        subject_alt_names: Vec::new(),
-        basic_constraints: None,
-        key_usage: None,
-        extended_key_usage: Vec::new(),
-        subject_key_id: None,
-        authority_key_id: None,
-        aia: AuthorityInfoAccess::default(),
-        crl_distribution_points: Vec::new(),
-        embedded_scts: Vec::new(),
-        extensions: Vec::new(),
+        subject_alt_names: ext.subject_alt_names,
+        basic_constraints: ext.basic_constraints,
+        key_usage: ext.key_usage,
+        extended_key_usage: ext.extended_key_usage,
+        subject_key_id: ext.subject_key_id,
+        authority_key_id: ext.authority_key_id,
+        aia: ext.aia,
+        crl_distribution_points: ext.crl_distribution_points,
+        embedded_scts: ext.embedded_scts,
+        extensions: ext.extensions,
+    })
+}
+
+/// The extension-derived part of a [`CertificateSummary`].
+#[derive(Default)]
+struct ExtensionFields {
+    subject_alt_names: Vec<SubjectAltName>,
+    basic_constraints: Option<BasicConstraints>,
+    key_usage: Option<KeyUsage>,
+    extended_key_usage: Vec<ExtendedKeyUsage>,
+    subject_key_id: Option<KeyId>,
+    authority_key_id: Option<KeyId>,
+    aia: AuthorityInfoAccess,
+    crl_distribution_points: Vec<String>,
+    embedded_scts: Vec<SctEntry>,
+    extensions: Vec<ExtensionSummary>,
+}
+
+impl ExtensionFields {
+    /// Records what one decoded extension contributes to the summary.
+    /// Unrecognized or undecodable extensions contribute nothing.
+    fn absorb(&mut self, parsed: &ParsedExtension<'_>) {
+        match parsed {
+            ParsedExtension::SubjectAlternativeName(san) => {
+                self.subject_alt_names = subject_alt_names(san);
+            }
+            ParsedExtension::BasicConstraints(bc) => {
+                self.basic_constraints = Some(basic_constraints(bc));
+            }
+            ParsedExtension::KeyUsage(ku) => self.key_usage = Some(key_usage(*ku)),
+            ParsedExtension::ExtendedKeyUsage(eku) => {
+                self.extended_key_usage = extended_key_usage(eku);
+            }
+            ParsedExtension::SubjectKeyIdentifier(id) => self.subject_key_id = Some(key_id(id)),
+            ParsedExtension::AuthorityKeyIdentifier(aki) => {
+                self.authority_key_id = aki.key_identifier.as_ref().map(key_id);
+            }
+            ParsedExtension::AuthorityInfoAccess(aia) => {
+                self.aia = authority_info_access(aia);
+            }
+            ParsedExtension::CRLDistributionPoints(points) => {
+                self.crl_distribution_points = crl_distribution_urls(points);
+            }
+            ParsedExtension::SCT(scts) => self.embedded_scts = sct_entries(scts),
+            _ => {}
+        }
+    }
+}
+
+/// Walks the extensions in certificate order, rejecting repeated OIDs.
+fn read_extensions(cert: &X509Certificate<'_>) -> Result<ExtensionFields, ParseError> {
+    let mut fields = ExtensionFields::default();
+    let mut seen = HashSet::new();
+    for ext in cert.extensions() {
+        let oid = ext.oid.to_id_string();
+        if !seen.insert(oid.clone()) {
+            return Err(ParseError::Malformed(format!("duplicate extension {oid}")));
+        }
+        fields.absorb(ext.parsed_extension());
+        fields.extensions.push(extension_summary(ext, oid));
+    }
+    Ok(fields)
+}
+
+/// One-line description of an extension: OID, criticality, display name.
+fn extension_summary(ext: &X509Extension<'_>, oid: String) -> ExtensionSummary {
+    ExtensionSummary {
+        name: extension_name(&oid),
+        oid,
+        critical: ext.critical,
+    }
+}
+
+/// The SAN entries, in certificate order.
+fn subject_alt_names(san: &x509_ext::SubjectAlternativeName<'_>) -> Vec<SubjectAltName> {
+    san.general_names.iter().map(subject_alt_name).collect()
+}
+
+/// Maps one general name to its [`SubjectAltName`].
+fn subject_alt_name(name: &GeneralName<'_>) -> SubjectAltName {
+    let other = |kind: &str| SubjectAltName::Other {
+        kind: kind.to_owned(),
+    };
+    match name {
+        GeneralName::DNSName(dns) => SubjectAltName::Dns((*dns).to_owned()),
+        GeneralName::RFC822Name(email) => SubjectAltName::Email((*email).to_owned()),
+        GeneralName::URI(uri) => SubjectAltName::Uri((*uri).to_owned()),
+        GeneralName::IPAddress(bytes) => ip_address(bytes)
+            .map_or_else(|| other("iPAddress (invalid length)"), SubjectAltName::Ip),
+        GeneralName::OtherName(..) => other("otherName"),
+        GeneralName::X400Address(_) => other("x400Address"),
+        GeneralName::DirectoryName(_) => other("directoryName"),
+        GeneralName::EDIPartyName(_) => other("ediPartyName"),
+        GeneralName::RegisteredID(_) => other("registeredID"),
+        GeneralName::Invalid(..) => other("invalid"),
+    }
+}
+
+/// An IPv4 (4 bytes) or IPv6 (16 bytes) address; `None` for other lengths.
+fn ip_address(bytes: &[u8]) -> Option<IpAddr> {
+    if let Ok(v4) = <[u8; 4]>::try_from(bytes) {
+        Some(IpAddr::V4(Ipv4Addr::from(v4)))
+    } else if let Ok(v6) = <[u8; 16]>::try_from(bytes) {
+        Some(IpAddr::V6(Ipv6Addr::from(v6)))
+    } else {
+        None
+    }
+}
+
+/// Basic Constraints.
+fn basic_constraints(bc: &x509_ext::BasicConstraints) -> BasicConstraints {
+    BasicConstraints {
+        ca: bc.ca,
+        path_len: bc.path_len_constraint,
+    }
+}
+
+/// Key Usage bits.
+fn key_usage(ku: x509_ext::KeyUsage) -> KeyUsage {
+    KeyUsage {
+        digital_signature: ku.digital_signature(),
+        non_repudiation: ku.non_repudiation(),
+        key_encipherment: ku.key_encipherment(),
+        data_encipherment: ku.data_encipherment(),
+        key_agreement: ku.key_agreement(),
+        key_cert_sign: ku.key_cert_sign(),
+        crl_sign: ku.crl_sign(),
+        encipher_only: ku.encipher_only(),
+        decipher_only: ku.decipher_only(),
+    }
+}
+
+/// Extended Key Usage purposes: the well-known ones in a fixed order, then
+/// any others as dotted OIDs (the original order across both groups is not
+/// preserved by the parser).
+fn extended_key_usage(eku: &x509_ext::ExtendedKeyUsage<'_>) -> Vec<ExtendedKeyUsage> {
+    let known = [
+        (eku.any, ExtendedKeyUsage::Any),
+        (eku.server_auth, ExtendedKeyUsage::ServerAuth),
+        (eku.client_auth, ExtendedKeyUsage::ClientAuth),
+        (eku.code_signing, ExtendedKeyUsage::CodeSigning),
+        (eku.email_protection, ExtendedKeyUsage::EmailProtection),
+        (eku.time_stamping, ExtendedKeyUsage::TimeStamping),
+        (eku.ocsp_signing, ExtendedKeyUsage::OcspSigning),
+    ];
+    known
+        .into_iter()
+        .filter_map(|(present, purpose)| present.then_some(purpose))
+        .chain(
+            eku.other
+                .iter()
+                .map(|oid| ExtendedKeyUsage::Other(oid.to_id_string())),
+        )
+        .collect()
+}
+
+/// A subject or authority key identifier.
+fn key_id(id: &x509_ext::KeyIdentifier<'_>) -> KeyId {
+    KeyId(id.0.to_vec())
+}
+
+/// OCSP and CA Issuers URLs from the Authority Information Access
+/// extension; other access methods and non-URI locations are ignored.
+fn authority_info_access(aia: &x509_ext::AuthorityInfoAccess<'_>) -> AuthorityInfoAccess {
+    let mut out = AuthorityInfoAccess::default();
+    for desc in aia.iter() {
+        let GeneralName::URI(url) = &desc.access_location else {
+            continue;
+        };
+        if desc.access_method == OID_PKIX_ACCESS_DESCRIPTOR_OCSP {
+            out.ocsp.push((*url).to_owned());
+        } else if desc.access_method == OID_PKIX_ACCESS_DESCRIPTOR_CA_ISSUERS {
+            out.ca_issuers.push((*url).to_owned());
+        }
+    }
+    out
+}
+
+/// The URI entries of every distribution point's `fullName`.
+fn crl_distribution_urls(points: &x509_ext::CRLDistributionPoints<'_>) -> Vec<String> {
+    points
+        .iter()
+        .filter_map(|point| match &point.distribution_point {
+            Some(DistributionPointName::FullName(names)) => Some(names),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|name| match name {
+            GeneralName::URI(url) => Some((*url).to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The embedded SCTs (at most [`MAX_SCT_ENTRIES`]). `x509-parser` decodes
+/// the TLS-encoded list with bounds-checked readers; a list that does not
+/// decode never reaches this function.
+fn sct_entries(scts: &[SignedCertificateTimestamp<'_>]) -> Vec<SctEntry> {
+    scts.iter().take(MAX_SCT_ENTRIES).map(sct_entry).collect()
+}
+
+/// One SCT. The wire timestamp is milliseconds since the Unix epoch.
+fn sct_entry(sct: &SignedCertificateTimestamp<'_>) -> SctEntry {
+    let seconds = i64::try_from(sct.timestamp / 1000).unwrap_or(i64::MAX);
+    SctEntry {
+        // The wire value is 0 for v1.
+        version: sct.version.0.saturating_add(1),
+        log_id: *sct.id.key_id,
+        timestamp: Timestamp::from_unix_saturating(seconds),
     }
 }
 
@@ -330,7 +564,10 @@ fn public_key_info(spki: &SubjectPublicKeyInfo<'_>) -> PublicKeyInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{HashAlgorithm, PublicKeyAlgorithm};
+    use crate::model::{
+        AuthorityInfoAccess, BasicConstraints, ExtendedKeyUsage, HashAlgorithm, PublicKeyAlgorithm,
+        SubjectAltName,
+    };
     use crate::time::Timestamp;
     use x509_parser::prelude::FromDer;
 
@@ -484,6 +721,297 @@ mod tests {
             let result = parse_der_cert(&fixture(name), &Limits::default());
             assert!(result.is_ok(), "{name}: {result:?}");
         }
+    }
+
+    fn summary(name: &str) -> CertificateSummary {
+        parse_der_cert(&fixture(name), &Limits::default()).unwrap()
+    }
+
+    /// DER of the intermediate CA (second certificate) of `chain-3.pem`.
+    fn chain_intermediate() -> Vec<u8> {
+        let pem = std::fs::read(format!("{FIXTURES}/chain-3.pem")).unwrap();
+        let second = x509_parser::pem::Pem::iter_from_buffer(&pem)
+            .nth(1)
+            .unwrap()
+            .unwrap();
+        second.contents
+    }
+
+    #[test]
+    fn quando_san_multi_deve_listar_dns_ip_email_uri() {
+        let s = summary("san-multi");
+        assert_eq!(
+            s.subject_alt_names,
+            vec![
+                SubjectAltName::Dns("san-multi.example.test".to_owned()),
+                SubjectAltName::Dns("*.example.test".to_owned()),
+                SubjectAltName::Ip("192.0.2.10".parse().unwrap()),
+                SubjectAltName::Ip("2001:db8::10".parse().unwrap()),
+                SubjectAltName::Email("admin@example.test".to_owned()),
+                SubjectAltName::Uri("https://example.test/path".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn quando_cert_sem_san_deve_dar_lista_vazia() {
+        // The chain-3 intermediate CA carries no SAN extension.
+        let s = parse_der_cert(&chain_intermediate(), &Limits::default()).unwrap();
+        assert_eq!(s.subject_alt_names, Vec::new());
+    }
+
+    #[test]
+    fn quando_intermediario_deve_ter_ca_true_e_path_len() {
+        let s = parse_der_cert(&chain_intermediate(), &Limits::default()).unwrap();
+        assert_eq!(
+            s.basic_constraints,
+            Some(BasicConstraints {
+                ca: true,
+                path_len: Some(0)
+            })
+        );
+        let ku = s.key_usage.unwrap();
+        assert!(ku.key_cert_sign && ku.crl_sign);
+        assert!(!ku.digital_signature);
+    }
+
+    #[test]
+    fn quando_leaf_tem_ca_false_deve_dar_basic_constraints_sem_path_len() {
+        let s = summary("chain-3");
+        assert_eq!(
+            s.basic_constraints,
+            Some(BasicConstraints {
+                ca: false,
+                path_len: None
+            })
+        );
+    }
+
+    #[test]
+    fn quando_eku_tem_server_auth_deve_listar() {
+        assert_eq!(
+            summary("rsa2048-leaf").extended_key_usage,
+            vec![ExtendedKeyUsage::ServerAuth]
+        );
+        assert_eq!(
+            summary("ec-p256-leaf").extended_key_usage,
+            vec![ExtendedKeyUsage::ServerAuth, ExtendedKeyUsage::ClientAuth]
+        );
+        assert_eq!(summary("expired").extended_key_usage, Vec::new());
+    }
+
+    #[test]
+    fn quando_key_usage_presente_deve_marcar_so_os_bits_setados() {
+        let ku = summary("rsa2048-leaf").key_usage.unwrap();
+        assert!(ku.digital_signature && ku.key_encipherment);
+        assert!(!ku.non_repudiation && !ku.data_encipherment && !ku.key_agreement);
+        assert!(!ku.key_cert_sign && !ku.crl_sign && !ku.encipher_only && !ku.decipher_only);
+        assert_eq!(summary("expired").key_usage, None);
+    }
+
+    #[test]
+    fn quando_cert_tem_key_ids_deve_expor_ski_e_aki() {
+        let s = summary("rsa2048-leaf");
+        assert_eq!(
+            s.subject_key_id.unwrap().to_hex(),
+            "43CA132B8B8B0E385ED2AF58319439A34031446D"
+        );
+        assert_eq!(
+            s.authority_key_id.unwrap().to_hex(),
+            "43CA132B8B8B0E385ED2AF58319439A34031446D"
+        );
+        let public = summary("public-leaf-with-sct");
+        assert_eq!(public.subject_key_id, None);
+        assert_eq!(
+            public.authority_key_id.unwrap().to_hex(),
+            "8303FDE7F6F54A4D1541F4ED2216D3320A3ECA66"
+        );
+    }
+
+    #[test]
+    fn quando_aia_deve_separar_ocsp_de_ca_issuers() {
+        let s = summary("public-leaf-with-sct");
+        assert_eq!(s.aia.ocsp, vec!["http://o.cf-i.ssl.com".to_owned()]);
+        assert_eq!(
+            s.aia.ca_issuers,
+            vec!["http://i.cf-i.ssl.com/Cloudflare-TLS-I-E3.cer".to_owned()]
+        );
+        assert_eq!(summary("rsa2048-leaf").aia, AuthorityInfoAccess::default());
+    }
+
+    #[test]
+    fn quando_cert_tem_crl_dp_deve_listar_urls() {
+        assert_eq!(
+            summary("public-leaf-with-sct").crl_distribution_points,
+            vec!["http://c.cf-i.ssl.com/ae801ed1c55bb579d79208b0d772acfb8cc3a208.crl".to_owned()]
+        );
+        assert_eq!(
+            summary("rsa2048-leaf").crl_distribution_points,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn quando_cert_publico_tem_sct_deve_listar_log_id_e_timestamp() {
+        let s = summary("public-leaf-with-sct");
+        assert_eq!(s.embedded_scts.len(), 2);
+        let first = s.embedded_scts.first().unwrap();
+        assert_eq!(first.version, 1);
+        assert_eq!(
+            join_hex(&first.log_id, "", true),
+            "944E4387FAECC1EF81F3192426A8186501C7D35F3802013F72677D55372E19D8"
+        );
+        // Sep 26 22:59:12.866 2026 GMT (milliseconds are dropped).
+        assert_eq!(first.timestamp.unix(), 1_790_463_552);
+        let second = s.embedded_scts.get(1).unwrap();
+        assert_eq!(
+            join_hex(&second.log_id, "", true),
+            "CB38F715897C84A1445F5BC1DDFBC96EF29A59CD470A690585B0CB14C31458E7"
+        );
+        assert_eq!(second.timestamp.unix(), 1_790_463_552);
+        assert_eq!(summary("rsa2048-leaf").embedded_scts, Vec::new());
+    }
+
+    #[test]
+    fn quando_extensao_desconhecida_deve_listar_oid_como_nome() {
+        let s = summary("public-leaf-with-sct");
+        let unknown = s
+            .extensions
+            .iter()
+            .find(|e| e.oid == "1.3.6.1.4.1.44363.44")
+            .unwrap();
+        assert_eq!(unknown.name, "1.3.6.1.4.1.44363.44");
+        assert!(!unknown.critical);
+    }
+
+    #[test]
+    fn quando_extensoes_conhecidas_deve_listar_na_ordem_do_cert_com_critical() {
+        let s = summary("rsa2048-leaf");
+        let rows: Vec<(&str, bool, &str)> = s
+            .extensions
+            .iter()
+            .map(|e| (e.oid.as_str(), e.critical, e.name.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("2.5.29.14", false, "Subject Key Identifier"),
+                ("2.5.29.35", false, "Authority Key Identifier"),
+                ("2.5.29.19", true, "Basic Constraints"),
+                ("2.5.29.17", false, "Subject Alternative Name"),
+                ("2.5.29.15", true, "Key Usage"),
+                ("2.5.29.37", false, "Extended Key Usage"),
+            ]
+        );
+    }
+
+    /// Splits one DER TLV into (tag, content, rest). Test helper: short and
+    /// 0x81/0x82 long length forms only.
+    fn split_tlv(data: &[u8]) -> (u8, &[u8], &[u8]) {
+        let (len, header) = match data[1] {
+            n if n < 0x80 => (usize::from(n), 2),
+            0x81 => (usize::from(data[2]), 3),
+            0x82 => (usize::from(data[2]) << 8 | usize::from(data[3]), 4),
+            other => panic!("unsupported length form {other:#x}"),
+        };
+        (data[0], &data[header..header + len], &data[header + len..])
+    }
+
+    /// The leaf of `chain-3` re-encoded with its extension list repeated
+    /// after its first extension (every OID appears twice).
+    fn der_with_duplicate_extension() -> Vec<u8> {
+        let der = fixture("chain-3");
+        let (_, cert, _) = split_tlv(&der);
+        let (_, tbs, after_tbs) = split_tlv(cert);
+        // TBS fields are back to back; the [3] extensions wrapper is last.
+        let mut raw_fields = Vec::new();
+        let mut rest = tbs;
+        while !rest.is_empty() {
+            let (_, _, next) = split_tlv(rest);
+            raw_fields.push(&rest[..rest.len() - next.len()]);
+            rest = next;
+        }
+        let wrapper = raw_fields.pop().unwrap();
+        let (_, wrapper_content, _) = split_tlv(wrapper);
+        let (_, ext_list, _) = split_tlv(wrapper_content);
+        let first_len = ext_list.len() - split_tlv(ext_list).2.len();
+        let doubled = tlv(0x30, &[&ext_list[..first_len], ext_list].concat());
+        let mut new_tbs = raw_fields.concat();
+        new_tbs.extend(tlv(0xA3, &doubled));
+        let mut new_cert = tlv(0x30, &new_tbs);
+        new_cert.extend_from_slice(after_tbs);
+        tlv(0x30, &new_cert)
+    }
+
+    #[test]
+    fn quando_extensao_duplicada_deve_dar_malformed() {
+        let der = der_with_duplicate_extension();
+        let result = parse_der_cert(&der, &Limits::default());
+        assert!(
+            matches!(&result, Err(ParseError::Malformed(m)) if m.contains("duplicate")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn quando_ip_do_san_tem_tamanho_invalido_deve_virar_other() {
+        assert_eq!(
+            ip_address(&[10, 0, 0, 1]),
+            Some("10.0.0.1".parse().unwrap())
+        );
+        assert_eq!(ip_address(&[0; 16]), Some("::".parse().unwrap()));
+        assert_eq!(ip_address(&[1, 2, 3]), None);
+        assert_eq!(
+            subject_alt_name(&GeneralName::IPAddress(&[1, 2, 3])),
+            SubjectAltName::Other {
+                kind: "iPAddress (invalid length)".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn quando_general_name_e_de_outro_tipo_deve_dar_other_com_o_tipo() {
+        assert_eq!(
+            subject_alt_name(&GeneralName::Invalid(Tag::Sequence, &[])),
+            SubjectAltName::Other {
+                kind: "invalid".to_owned()
+            }
+        );
+    }
+
+    fn sct(timestamp: u64, version: u8) -> SignedCertificateTimestamp<'static> {
+        use x509_parser::extensions::{CtExtensions, CtLogID, CtVersion, DigitallySigned};
+        SignedCertificateTimestamp {
+            version: CtVersion(version),
+            id: CtLogID { key_id: &[7; 32] },
+            timestamp,
+            extensions: CtExtensions(&[]),
+            signature: DigitallySigned {
+                hash_alg_id: 4,
+                sign_alg_id: 3,
+                data: &[],
+            },
+        }
+    }
+
+    #[test]
+    fn quando_sct_tem_timestamp_em_ms_deve_converter_para_segundos() {
+        let entry = sct_entry(&sct(1_790_463_552_866, 0));
+        assert_eq!(entry.version, 1);
+        assert_eq!(entry.log_id, [7; 32]);
+        assert_eq!(entry.timestamp.unix(), 1_790_463_552);
+    }
+
+    #[test]
+    fn quando_sct_tem_timestamp_absurdo_deve_saturar() {
+        assert_eq!(sct_entry(&sct(u64::MAX, 0)).timestamp, Timestamp::MAX);
+        assert_eq!(sct_entry(&sct(0, 255)).version, 255);
+    }
+
+    #[test]
+    fn quando_ha_scts_demais_deve_limitar_ao_maximo() {
+        let many: Vec<_> = (0..MAX_SCT_ENTRIES + 5).map(|_| sct(0, 0)).collect();
+        assert_eq!(sct_entries(&many).len(), MAX_SCT_ENTRIES);
     }
 
     /// DER TLV with a definite length (up to 65535 bytes).
