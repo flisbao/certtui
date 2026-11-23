@@ -30,7 +30,6 @@ fn is_unsafe_for_display(c: char) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)] // Justificativa: código de teste.
 mod tests {
     use super::*;
 
@@ -63,5 +62,24 @@ mod tests {
         // U+202E (RLO) permite spoofing/homograph em CN: "evil\u{202E}moc.com".
         assert_eq!(sanitize_display("evil\u{202E}moc.com"), "evilmoc.com");
         assert_eq!(sanitize_display("a\u{2066}b\u{2069}c"), "abc");
+    }
+
+    #[test]
+    fn quando_tem_limites_do_bidi_deve_remover_dentro_e_manter_fora() {
+        for c in ('\u{202A}'..='\u{202E}').chain('\u{2066}'..='\u{2069}') {
+            let input = format!("a{c}b");
+            assert_eq!(sanitize_display(&input), "ab", "U+{:04X}", c as u32);
+        }
+        // Imediatamente fora dos intervalos: U+2029 e U+202F.
+        for c in ['\u{2029}', '\u{202F}'] {
+            let input = format!("a{c}b");
+            assert!(matches!(sanitize_display(&input), Cow::Borrowed(_)));
+            assert_eq!(sanitize_display(&input), input);
+        }
+    }
+
+    #[test]
+    fn quando_tem_del_e_bordas_c1_deve_remover() {
+        assert_eq!(sanitize_display("a\u{7F}b\u{80}c\u{9F}d"), "abcd");
     }
 }
