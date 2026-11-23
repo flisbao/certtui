@@ -75,4 +75,16 @@ mod tests {
             r#"{"kind":"rejected","offset":12,"reason":"invalid_base64"}"#
         );
     }
+
+    #[test]
+    fn quando_variantes_multi_palavra_serializam_deve_ser_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&RejectReason::NestingTooDeep).unwrap(),
+            "\"nesting_too_deep\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadNote::PrivateKeyBlocksIgnored { count: 2 }).unwrap(),
+            r#"{"kind":"private_key_blocks_ignored","count":2}"#
+        );
+    }
 }

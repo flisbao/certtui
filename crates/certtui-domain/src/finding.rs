@@ -86,6 +86,40 @@ pub enum FindingCode {
 }
 
 impl FindingCode {
+    /// The stable `SCREAMING_SNAKE_CASE` identifier, identical to the serde
+    /// form. The `match` is exhaustive: adding a variant fails to compile
+    /// until it is listed here.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            FindingCode::TrustUntrusted => "TRUST_UNTRUSTED",
+            FindingCode::HostnameMismatch => "HOSTNAME_MISMATCH",
+            FindingCode::Expired => "EXPIRED",
+            FindingCode::NotYetValid => "NOT_YET_VALID",
+            FindingCode::ExpiresSoonCritical => "EXPIRES_SOON_CRITICAL",
+            FindingCode::ExpiresSoon => "EXPIRES_SOON",
+            FindingCode::ChainIncomplete => "CHAIN_INCOMPLETE",
+            FindingCode::ChainOrderWrong => "CHAIN_ORDER_WRONG",
+            FindingCode::ChainDuplicateCert => "CHAIN_DUPLICATE_CERT",
+            FindingCode::ChainRootSent => "CHAIN_ROOT_SENT",
+            FindingCode::ChainExtraCert => "CHAIN_EXTRA_CERT",
+            FindingCode::SelfSignedLeaf => "SELF_SIGNED_LEAF",
+            FindingCode::WeakSignature => "WEAK_SIGNATURE",
+            FindingCode::WeakKey => "WEAK_KEY",
+            FindingCode::MissingSan => "MISSING_SAN",
+            FindingCode::LeafMissingServerAuth => "LEAF_MISSING_SERVER_AUTH",
+            FindingCode::BasicConstraintsViolation => "BASIC_CONSTRAINTS_VIOLATION",
+            FindingCode::ValidityTooLong => "VALIDITY_TOO_LONG",
+            FindingCode::Revoked => "REVOKED",
+            FindingCode::RevocationUnknown => "REVOCATION_UNKNOWN",
+            FindingCode::OcspStapleInvalid => "OCSP_STAPLE_INVALID",
+            FindingCode::OcspStapleMissing => "OCSP_STAPLE_MISSING",
+            FindingCode::NoEmbeddedSct => "NO_EMBEDDED_SCT",
+            FindingCode::AiaFetched => "AIA_FETCHED",
+            FindingCode::KeystoreIntegrityUnverified => "KEYSTORE_INTEGRITY_UNVERIFIED",
+        }
+    }
+
     /// Every code, in the order of the spec section 7 table.
     pub const ALL: [FindingCode; 25] = [
         FindingCode::TrustUntrusted,
@@ -184,6 +218,7 @@ mod tests {
         ];
         assert_eq!(table.len(), FindingCode::ALL.len());
         for (code, expected) in table {
+            assert_eq!(code.as_str(), expected);
             assert_eq!(
                 serde_json::to_string(&code).unwrap(),
                 format!("\"{expected}\"")
@@ -193,5 +228,32 @@ mod tests {
                 "{expected} missing from ALL"
             );
         }
+    }
+
+    #[test]
+    fn quando_severity_e_categoria_serializam_deve_ser_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Severity::Warning).unwrap(),
+            "\"warning\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FindingCategory::Presentation).unwrap(),
+            "\"presentation\""
+        );
+    }
+
+    #[test]
+    fn quando_finding_serializa_deve_usar_campos_estaveis() {
+        let f = Finding {
+            code: FindingCode::ExpiresSoon,
+            severity: Severity::Warning,
+            category: FindingCategory::Quality,
+            cert_index: Some(0),
+            message: "expires in 3 days".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&f).unwrap(),
+            r#"{"code":"EXPIRES_SOON","severity":"warning","category":"quality","cert_index":0,"message":"expires in 3 days"}"#
+        );
     }
 }
