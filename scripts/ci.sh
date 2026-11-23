@@ -42,13 +42,13 @@ echo "== fmt =="
 cargo fmt --all -- --check
 
 echo "== clippy =="
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 echo "== layers =="
 bash scripts/check_layers.sh
 
 echo "== test =="
-cargo test --workspace --all-features
+cargo test --locked --workspace --all-features
 
 echo "== deny =="
 cargo deny check
@@ -62,15 +62,16 @@ coverage_gate 90 -p certtui-domain
 coverage_gate 90 -p certtui-app
 
 echo "== msrv =="
+# Keep this sed in sync with the MSRV step in .github/workflows/ci.yml.
 msrv="$(sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n 1)"
 if [ -z "$msrv" ]; then
     echo "rust-version not found in Cargo.toml" >&2
     exit 1
 fi
-cargo "+${msrv}" check --workspace
+cargo "+${msrv}" check --locked --workspace --all-targets --all-features
 
 echo "== release build + rss =="
-cargo build --release --workspace
+cargo build --locked --release --workspace
 if [ -x scripts/rss_check.sh ]; then
     scripts/rss_check.sh
 fi
