@@ -28,7 +28,10 @@ confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+# Registry deps must pin a version; path deps (workspace crates) have no
+# version requirement and are exempt.
+wildcards = "deny"
+allow-wildcard-paths = true
 deny = [
     # Zero OpenSSL: TLS and crypto stay in pure Rust.
     { name = "openssl" },

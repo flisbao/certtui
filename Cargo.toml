@@ -7,6 +7,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/flisbao/certtui"
 rust-version = "1.97.0"
+# Not published yet; also lets cargo-deny exempt internal path deps (bans.wildcards).
+publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
