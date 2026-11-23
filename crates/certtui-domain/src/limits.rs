@@ -157,13 +157,44 @@ impl Limits {
         let caps = Self::HARD_CAPS;
         let mut out = self;
         let mut w = Vec::new();
+        // Exhaustive destructuring (no `..`): adding a field to
+        // `LimitsOverrides` without wiring it here fails to compile.
+        let LimitsOverrides {
+            max_cert_der_bytes,
+            max_chain_len,
+            max_input_file_bytes,
+            max_keystore_bytes,
+            max_certs_per_source,
+            max_stdin_bytes,
+            max_dir_entries,
+            max_dir_depth,
+            max_ca_file_certs,
+            max_scan_diagnostics,
+            dns_timeout_secs,
+            connect_timeout_secs,
+            handshake_timeout_secs,
+            target_total_timeout_secs,
+            max_handshake_bytes,
+            http_timeout_secs,
+            max_ocsp_response_bytes,
+            max_crl_bytes,
+            max_aia_cert_bytes,
+            max_http_redirects,
+            max_revocation_cache_bytes,
+            batch_concurrency,
+            max_batch_targets,
+            channel_capacity,
+            history_entries,
+            max_clipboard_bytes,
+            clipboard_timeout_secs,
+        } = *o;
 
         // Counts/sizes: the override field has the same name as the limit.
         macro_rules! counts {
             ($($f:ident),* $(,)?) => {$(
                 apply_count(
                     stringify!($f),
-                    o.$f,
+                    $f,
                     caps.$f,
                     &mut out.$f,
                     &mut w,
@@ -175,7 +206,7 @@ impl Limits {
             ($($f:ident => $o:ident),* $(,)?) => {$(
                 apply_secs(
                     stringify!($o),
-                    o.$o,
+                    $o,
                     caps.$f,
                     &mut out.$f,
                     &mut w,
@@ -374,6 +405,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    // Independent oracle: deliberately not shared with the implementation's
+    // own `KIB`/`MIB` (`use super::*` would otherwise shadow-import them).
     const KIB: usize = 1024;
     const MIB: usize = 1024 * KIB;
 
@@ -638,5 +671,161 @@ mod tests {
         assert_eq!(o.max_chain_len, Some(12));
         assert_eq!(o.dns_timeout_secs, Some(4));
         assert_eq!(o.max_cert_der_bytes, None);
+    }
+
+    /// Independent oracle (not shared with the implementation): every
+    /// override set to a distinct value strictly below its hard cap.
+    fn overrides_distintos_abaixo_do_teto() -> LimitsOverrides {
+        LimitsOverrides {
+            max_cert_der_bytes: Some(1_001),
+            max_chain_len: Some(2),
+            max_input_file_bytes: Some(1_003),
+            max_keystore_bytes: Some(1_004),
+            max_certs_per_source: Some(1_005),
+            max_stdin_bytes: Some(1_006),
+            max_dir_entries: Some(1_007),
+            max_dir_depth: Some(1),
+            max_ca_file_certs: Some(1_009),
+            max_scan_diagnostics: Some(990),
+            dns_timeout_secs: Some(11),
+            connect_timeout_secs: Some(12),
+            handshake_timeout_secs: Some(13),
+            target_total_timeout_secs: Some(14),
+            max_handshake_bytes: Some(1_015),
+            http_timeout_secs: Some(16),
+            max_ocsp_response_bytes: Some(1_017),
+            max_crl_bytes: Some(1_018),
+            max_aia_cert_bytes: Some(1_019),
+            max_http_redirects: Some(4),
+            max_revocation_cache_bytes: Some(1_021),
+            batch_concurrency: Some(22),
+            max_batch_targets: Some(1_023),
+            channel_capacity: Some(24),
+            history_entries: Some(25),
+            max_clipboard_bytes: Some(1_026),
+            clipboard_timeout_secs: Some(9),
+        }
+    }
+
+    #[test]
+    fn quando_todos_os_overrides_tem_valor_distinto_dentro_do_teto_deve_aplicar_em_todos_os_campos()
+    {
+        let (l, warnings) = Limits::default()
+            .with_overrides(&overrides_distintos_abaixo_do_teto())
+            .unwrap();
+        let esperado = Limits {
+            max_cert_der_bytes: 1_001,
+            max_chain_len: 2,
+            max_input_file_bytes: 1_003,
+            max_keystore_bytes: 1_004,
+            max_certs_per_source: 1_005,
+            max_stdin_bytes: 1_006,
+            max_dir_entries: 1_007,
+            max_dir_depth: 1,
+            max_ca_file_certs: 1_009,
+            max_scan_diagnostics: 990,
+            dns_timeout: Duration::from_secs(11),
+            connect_timeout: Duration::from_secs(12),
+            handshake_timeout: Duration::from_secs(13),
+            target_total_timeout: Duration::from_secs(14),
+            max_handshake_bytes: 1_015,
+            http_timeout: Duration::from_secs(16),
+            max_ocsp_response_bytes: 1_017,
+            max_crl_bytes: 1_018,
+            max_aia_cert_bytes: 1_019,
+            max_http_redirects: 4,
+            max_revocation_cache_bytes: 1_021,
+            batch_concurrency: 22,
+            max_batch_targets: 1_023,
+            channel_capacity: 24,
+            history_entries: 25,
+            max_clipboard_bytes: 1_026,
+            clipboard_timeout: Duration::from_secs(9),
+        };
+        assert_eq!(l, esperado);
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn quando_todos_os_overrides_passam_do_teto_deve_dar_hard_caps_e_27_avisos() {
+        let far = Some(u64::MAX);
+        let o = LimitsOverrides {
+            max_cert_der_bytes: far,
+            max_chain_len: far,
+            max_input_file_bytes: far,
+            max_keystore_bytes: far,
+            max_certs_per_source: far,
+            max_stdin_bytes: far,
+            max_dir_entries: far,
+            max_dir_depth: far,
+            max_ca_file_certs: far,
+            max_scan_diagnostics: far,
+            dns_timeout_secs: far,
+            connect_timeout_secs: far,
+            handshake_timeout_secs: far,
+            target_total_timeout_secs: far,
+            max_handshake_bytes: far,
+            http_timeout_secs: far,
+            max_ocsp_response_bytes: far,
+            max_crl_bytes: far,
+            max_aia_cert_bytes: far,
+            max_http_redirects: far,
+            max_revocation_cache_bytes: far,
+            batch_concurrency: far,
+            max_batch_targets: far,
+            channel_capacity: far,
+            history_entries: far,
+            max_clipboard_bytes: far,
+            clipboard_timeout_secs: far,
+        };
+        let (l, warnings) = Limits::default().with_overrides(&o).unwrap();
+        assert_eq!(l, Limits::HARD_CAPS);
+        let campos: Vec<&str> = warnings.iter().map(|w| w.field).collect();
+        assert_eq!(
+            campos,
+            [
+                "max_cert_der_bytes",
+                "max_chain_len",
+                "max_input_file_bytes",
+                "max_keystore_bytes",
+                "max_certs_per_source",
+                "max_stdin_bytes",
+                "max_dir_entries",
+                "max_dir_depth",
+                "max_ca_file_certs",
+                "max_scan_diagnostics",
+                "max_handshake_bytes",
+                "max_ocsp_response_bytes",
+                "max_crl_bytes",
+                "max_aia_cert_bytes",
+                "max_http_redirects",
+                "max_revocation_cache_bytes",
+                "batch_concurrency",
+                "max_batch_targets",
+                "channel_capacity",
+                "history_entries",
+                "max_clipboard_bytes",
+                "dns_timeout_secs",
+                "connect_timeout_secs",
+                "handshake_timeout_secs",
+                "target_total_timeout_secs",
+                "http_timeout_secs",
+                "clipboard_timeout_secs",
+            ]
+        );
+        assert!(warnings.iter().all(|w| w.requested == u64::MAX));
+    }
+
+    #[test]
+    fn quando_override_igual_ao_teto_deve_aplicar_sem_aviso() {
+        let o = LimitsOverrides {
+            max_chain_len: Some(16),
+            dns_timeout_secs: Some(30),
+            ..LimitsOverrides::default()
+        };
+        let (l, warnings) = Limits::default().with_overrides(&o).unwrap();
+        assert_eq!(l.max_chain_len, 16);
+        assert_eq!(l.dns_timeout, Duration::from_secs(30));
+        assert_eq!(warnings, Vec::new());
     }
 }
