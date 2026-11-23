@@ -1,9 +1,10 @@
 //! DER certificate parsing into a [`CertificateSummary`] (spec D1, section 9).
 
+use x509_parser::asn1_rs::Tag;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::parse_x509_certificate;
 use x509_parser::public_key::PublicKey;
-use x509_parser::x509::{SubjectPublicKeyInfo, X509Name};
+use x509_parser::x509::{AttributeTypeAndValue, SubjectPublicKeyInfo, X509Name};
 
 use crate::error::ParseError;
 use crate::limits::Limits;
@@ -123,8 +124,106 @@ fn escape_rfc4514(value: &str) -> String {
     out
 }
 
+/// Decodes the text of a string-typed attribute value, or `None` when the
+/// type is not a supported string type or the bytes are invalid for it.
+///
+/// Supported: `NumericString`, `PrintableString`, `UTF8String`, `IA5String`;
+/// `TeletexString` (T61) and `VisibleString` read as Latin-1; `BMPString` as
+/// UTF-16BE; `UniversalString` as UTF-32BE.
+fn decode_attribute_text(attr: &AttributeTypeAndValue<'_>) -> Option<String> {
+    let value = attr.attr_value();
+    if value.header.is_constructed() {
+        return None;
+    }
+    match value.tag() {
+        Tag::NumericString | Tag::PrintableString | Tag::Utf8String | Tag::Ia5String => {
+            attr.as_str().ok().map(str::to_owned)
+        }
+        Tag::TeletexString | Tag::VisibleString => {
+            Some(value.data.iter().map(|b| char::from(*b)).collect())
+        }
+        Tag::BmpString => {
+            let (pairs, rest) = value.data.as_chunks::<2>();
+            if !rest.is_empty() {
+                return None;
+            }
+            char::decode_utf16(pairs.iter().map(|c| u16::from_be_bytes(*c)))
+                .collect::<Result<String, _>>()
+                .ok()
+        }
+        Tag::UniversalString => {
+            let (quads, rest) = value.data.as_chunks::<4>();
+            if !rest.is_empty() {
+                return None;
+            }
+            quads
+                .iter()
+                .map(|c| char::from_u32(u32::from_be_bytes(*c)))
+                .collect()
+        }
+        _ => None,
+    }
+}
+
+/// The full BER/DER encoding (tag, length, content) of an attribute value,
+/// as RFC 4514 section 2.4 requires for values without a string form.
+fn full_encoding(attr: &AttributeTypeAndValue<'_>) -> Vec<u8> {
+    let value = attr.attr_value();
+    let mut out = Vec::new();
+    let class = u8::try_from(value.header.class() as u32).unwrap_or(0);
+    let constructed = u8::from(value.header.is_constructed());
+    let lead = (class << 6) | (constructed << 5);
+    let tag = value.tag().0;
+    if tag < 31 {
+        out.push(lead | u8::try_from(tag).unwrap_or(0));
+    } else {
+        out.push(lead | 0x1F);
+        // High tag number form: base-128 digits, most significant first.
+        let mut digits = Vec::new();
+        let mut rest = tag;
+        loop {
+            digits.push(u8::try_from(rest & 0x7F).unwrap_or(0));
+            rest >>= 7;
+            if rest == 0 {
+                break;
+            }
+        }
+        for (i, d) in digits.iter().rev().enumerate() {
+            let more = i + 1 < digits.len();
+            out.push(if more { d | 0x80 } else { *d });
+        }
+    }
+    let len = value.data.len();
+    if len < 0x80 {
+        out.push(u8::try_from(len).unwrap_or(0));
+    } else {
+        let bytes = len.to_be_bytes();
+        let start = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
+        let significant = bytes.get(start..).unwrap_or_default();
+        out.push(0x80 | u8::try_from(significant.len()).unwrap_or(0));
+        out.extend_from_slice(significant);
+    }
+    out.extend_from_slice(value.data);
+    out
+}
+
+/// RFC 4514 value of one attribute: escaped text when the type decodes to a
+/// string, otherwise `#` plus the hex of the full BER encoding.
+fn attribute_value_rfc4514(attr: &AttributeTypeAndValue<'_>) -> String {
+    decode_attribute_text(attr).map_or_else(
+        || format!("#{}", join_hex(&full_encoding(attr), "", false)),
+        |text| escape_rfc4514(&text),
+    )
+}
+
 /// Renders a DN in RFC 4514 order (last RDN first, multi-valued RDNs joined
-/// with `+`) and extracts the first common name.
+/// with `+`) and extracts the common name.
+///
+/// With several `commonName` attributes, `common_name` is the **most
+/// specific** one: the last in the certificate's encoding, which is also the
+/// first `CN=` in the RFC 4514 text (same attribute a reader sees first, and
+/// the one RFC 2818 legacy hostname matching prefers). If that attribute has
+/// no decodable text, `common_name` is `None` rather than another CN.
 fn distinguished_name(name: &X509Name<'_>) -> DistinguishedName {
     let mut rdns: Vec<String> = name
         .iter_rdn()
@@ -132,13 +231,11 @@ fn distinguished_name(name: &X509Name<'_>) -> DistinguishedName {
             rdn.iter()
                 .map(|attr| {
                     let oid = attr.attr_type().to_id_string();
-                    // Non-UTF-8-compatible string types fall back to the hex of
-                    // the content.
-                    let value = attr.as_str().map_or_else(
-                        |_| format!("#{}", join_hex(attr.attr_value().data, "", false)),
-                        escape_rfc4514,
-                    );
-                    format!("{}={value}", attribute_label(&oid))
+                    format!(
+                        "{}={}",
+                        attribute_label(&oid),
+                        attribute_value_rfc4514(attr)
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("+")
@@ -147,9 +244,8 @@ fn distinguished_name(name: &X509Name<'_>) -> DistinguishedName {
     rdns.reverse();
     let common_name = name
         .iter_common_name()
-        .next()
-        .and_then(|attr| attr.as_str().ok())
-        .map(str::to_owned);
+        .last()
+        .and_then(decode_attribute_text);
     DistinguishedName {
         rfc4514: rdns.join(","),
         common_name,
@@ -236,6 +332,7 @@ mod tests {
     use super::*;
     use crate::model::{HashAlgorithm, PublicKeyAlgorithm};
     use crate::time::Timestamp;
+    use x509_parser::prelude::FromDer;
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures");
 
@@ -387,5 +484,186 @@ mod tests {
             let result = parse_der_cert(&fixture(name), &Limits::default());
             assert!(result.is_ok(), "{name}: {result:?}");
         }
+    }
+
+    /// DER TLV with a definite length (up to 65535 bytes).
+    fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        match content.len() {
+            n if n < 0x80 => out.push(u8::try_from(n).unwrap()),
+            n if n < 0x100 => out.extend([0x81, u8::try_from(n).unwrap()]),
+            n => out.extend([
+                0x82,
+                u8::try_from(n >> 8).unwrap(),
+                u8::try_from(n & 0xFF).unwrap(),
+            ]),
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    const OID_CN: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x03];
+    const OID_O: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x0A];
+
+    /// One single-attribute RDN: SET { SEQUENCE { oid, value } }.
+    fn rdn(oid: &[u8], value_tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut seq = oid.to_vec();
+        seq.extend(tlv(value_tag, value));
+        tlv(0x31, &tlv(0x30, &seq))
+    }
+
+    fn dn_from(rdns: &[Vec<u8>]) -> DistinguishedName {
+        let der = tlv(0x30, &rdns.concat());
+        let (rest, name) = X509Name::from_der(&der).unwrap();
+        assert_eq!(rest, &[] as &[u8]);
+        distinguished_name(&name)
+    }
+
+    fn utf16be(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_be_bytes).collect()
+    }
+
+    #[test]
+    fn quando_cn_e_teletex_deve_ler_como_latin1() {
+        let dn = dn_from(&[rdn(&OID_CN, 0x14, b"Caf\xE9, Ltda")]);
+        assert_eq!(dn.rfc4514, "CN=Café\\, Ltda");
+        assert_eq!(dn.common_name.as_deref(), Some("Café, Ltda"));
+    }
+
+    #[test]
+    fn quando_cn_e_bmpstring_deve_decodificar_utf16be() {
+        let dn = dn_from(&[rdn(&OID_CN, 0x1E, &utf16be("Ação 😀"))]);
+        assert_eq!(dn.rfc4514, "CN=Ação 😀");
+        assert_eq!(dn.common_name.as_deref(), Some("Ação 😀"));
+    }
+
+    #[test]
+    fn quando_cn_e_universalstring_deve_decodificar_utf32be() {
+        let bytes: Vec<u8> = "日本a"
+            .chars()
+            .flat_map(|c| u32::from(c).to_be_bytes())
+            .collect();
+        let dn = dn_from(&[rdn(&OID_CN, 0x1C, &bytes)]);
+        assert_eq!(dn.rfc4514, "CN=日本a");
+        assert_eq!(dn.common_name.as_deref(), Some("日本a"));
+    }
+
+    #[test]
+    fn quando_tag_de_string_desconhecida_deve_usar_hex_do_ber_completo() {
+        // GeneralString (0x1B) is not decoded: RFC 4514 wants '#' + full BER.
+        let dn = dn_from(&[rdn(&OID_CN, 0x1B, b"ab")]);
+        assert_eq!(dn.rfc4514, "CN=#1b026162");
+        assert_eq!(dn.common_name, None);
+    }
+
+    #[test]
+    fn quando_bmpstring_invalida_deve_usar_hex_do_ber_completo() {
+        // Odd length and a lone high surrogate are both invalid UTF-16BE.
+        let odd = dn_from(&[rdn(&OID_CN, 0x1E, &[0x00, 0x41, 0x00])]);
+        assert_eq!(odd.rfc4514, "CN=#1e03004100");
+        let lone = dn_from(&[rdn(&OID_CN, 0x1E, &[0xD8, 0x3D])]);
+        assert_eq!(lone.rfc4514, "CN=#1e02d83d");
+        assert_eq!(lone.common_name, None);
+    }
+
+    #[test]
+    fn quando_valor_desconhecido_e_longo_deve_codificar_tamanho_longo() {
+        let dn = dn_from(&[rdn(&OID_CN, 0x1B, &[0x61; 200])]);
+        assert!(dn.rfc4514.starts_with("CN=#1b81c8"), "{}", dn.rfc4514);
+        assert_eq!(dn.rfc4514.len(), "CN=#1b81c8".len() + 400);
+    }
+
+    #[test]
+    fn quando_ha_varios_cn_deve_usar_o_mais_especifico_como_common_name() {
+        // Encoding order: CN=geral, O=Org, CN=especifico.
+        let dn = dn_from(&[
+            rdn(&OID_CN, 0x0C, b"geral"),
+            rdn(&OID_O, 0x0C, b"Org"),
+            rdn(&OID_CN, 0x0C, b"especifico"),
+        ]);
+        assert_eq!(dn.rfc4514, "CN=especifico,O=Org,CN=geral");
+        assert_eq!(dn.common_name.as_deref(), Some("especifico"));
+    }
+
+    #[test]
+    fn quando_cn_mais_especifico_nao_decodifica_nao_deve_cair_em_outro_cn() {
+        let dn = dn_from(&[rdn(&OID_CN, 0x0C, b"geral"), rdn(&OID_CN, 0x1B, b"x")]);
+        assert_eq!(dn.common_name, None);
+    }
+
+    /// `SubjectPublicKeyInfo` with the given algorithm OID TLVs and key bytes.
+    fn spki(algorithm: &[&[u8]], key: &[u8]) -> Vec<u8> {
+        let mut bits = vec![0x00];
+        bits.extend_from_slice(key);
+        let mut seq = tlv(0x30, &algorithm.concat());
+        seq.extend(tlv(0x03, &bits));
+        tlv(0x30, &seq)
+    }
+
+    fn key_info(der: &[u8]) -> PublicKeyInfo {
+        let (rest, info) = SubjectPublicKeyInfo::from_der(der).unwrap();
+        assert_eq!(rest, &[] as &[u8]);
+        public_key_info(&info)
+    }
+
+    const OID_EC: [u8; 9] = [0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+
+    fn ec_point(coord_len: usize) -> Vec<u8> {
+        let mut key = vec![0x04];
+        key.extend(vec![0x11; coord_len * 2]);
+        key
+    }
+
+    #[test]
+    fn quando_chave_ec_p384_ou_p521_deve_informar_algoritmo_bits_e_curva() {
+        let p384 = key_info(&spki(
+            &[&OID_EC, &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22]],
+            &ec_point(48),
+        ));
+        assert_eq!(p384.algorithm, PublicKeyAlgorithm::EcP384);
+        assert_eq!((p384.bits, p384.curve.as_deref()), (384, Some("secp384r1")));
+        let p521 = key_info(&spki(
+            &[&OID_EC, &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23]],
+            &ec_point(66),
+        ));
+        assert_eq!(p521.algorithm, PublicKeyAlgorithm::EcP521);
+        assert_eq!((p521.bits, p521.curve.as_deref()), (521, Some("secp521r1")));
+    }
+
+    #[test]
+    fn quando_curva_ec_desconhecida_deve_dar_other_com_oid() {
+        // secp256k1, 1.3.132.0.10
+        let info = key_info(&spki(
+            &[&OID_EC, &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x0A]],
+            &ec_point(32),
+        ));
+        assert_eq!(
+            info.algorithm,
+            PublicKeyAlgorithm::Other("1.3.132.0.10".to_owned())
+        );
+        assert_eq!(
+            (info.bits, info.curve.as_deref()),
+            (256, Some("1.3.132.0.10"))
+        );
+    }
+
+    #[test]
+    fn quando_chave_ed25519_ou_ed448_deve_informar_algoritmo_e_bits() {
+        let ed25519 = key_info(&spki(&[&[0x06, 0x03, 0x2B, 0x65, 0x70]], &[0x22; 32]));
+        assert_eq!(ed25519.algorithm, PublicKeyAlgorithm::Ed25519);
+        assert_eq!((ed25519.bits, ed25519.curve), (256, None));
+        let ed448 = key_info(&spki(&[&[0x06, 0x03, 0x2B, 0x65, 0x71]], &[0x22; 57]));
+        assert_eq!(ed448.algorithm, PublicKeyAlgorithm::Ed448);
+        assert_eq!((ed448.bits, ed448.curve), (456, None));
+    }
+
+    #[test]
+    fn quando_algoritmo_de_chave_desconhecido_deve_dar_other_com_bits_do_bitstring() {
+        let info = key_info(&spki(&[&[0x06, 0x03, 0x2A, 0x03, 0x04]], &[0x33; 10]));
+        assert_eq!(
+            info.algorithm,
+            PublicKeyAlgorithm::Other("1.2.3.4".to_owned())
+        );
+        assert_eq!((info.bits, info.curve), (80, None));
     }
 }
