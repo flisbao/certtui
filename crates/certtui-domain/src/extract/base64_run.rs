@@ -29,6 +29,10 @@ const MIN_FIRST_TOKEN_CHARS: usize = 16;
 /// this module accepts (`30 84 xx xx xx xx`).
 const HEADER_CHARS: usize = 8;
 
+// The first token must hold the whole header, so a bad header condemns that
+// token only (see `try_run`).
+const _: () = assert!(MIN_FIRST_TOKEN_CHARS > HEADER_CHARS);
+
 /// Character of the standard or URL-safe alphabet, or padding.
 const fn is_alphabet(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_' | b'=')

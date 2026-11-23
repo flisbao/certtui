@@ -263,6 +263,23 @@ fn scan_flat(input: &[u8], limits: &Limits, det: &mut Detections) {
 /// for the ones `finish` drops; when they hit that bound, the nested results
 /// kept are the first found (detection order), not the first in text order,
 /// and `truncated` is set.
+///
+/// # Known limitations
+///
+/// - An uppercase identifier of 16 or more characters that starts with `MI`
+///   followed by `E`-`T` (for example `MINIMUMVIABLEPRODUCT`) looks like the
+///   start of a Base64 DER header and can hide a bare Base64 certificate that
+///   follows it.
+/// - Bare (unarmored) certificates after more than `max_certs_per_source`
+///   structural failures are dropped unparsed, and the scan reports
+///   `truncated`; PEM certificates and PKCS#7 blocks are still kept.
+/// - Hexdump columns (offset and ASCII gutters around the hex) are not
+///   supported; only plain hex with the usual separators is.
+/// - A bare Base64 certificate inside a Base64 layer (a Secret) is only found
+///   when it is alone in the decoded text; a comment line before or after it
+///   hides it (PEM blocks and hex in decoded text are not affected).
+/// - JSON `\uXXXX` escapes are not decoded; only `\n` and `\r` escapes are
+///   treated as line breaks.
 #[must_use]
 pub fn scan_text(input: &[u8], limits: &Limits) -> ScanOutcome {
     let mut detections = Detections::new(limits);
