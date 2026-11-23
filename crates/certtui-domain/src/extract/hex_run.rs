@@ -7,6 +7,13 @@
 //! must start with `30 82` or `30 81` (a DER `SEQUENCE` with a long length);
 //! it is cut at the length that header declares. A run may span lines.
 //!
+//! Known limit: a hex certificate that is truncated, with another hex
+//! certificate on the following line(s), is read as one run. The first header
+//! declares more bytes than the truncated text holds, so the cut falls inside
+//! the second certificate and the result is garbage. The garbage is a
+//! `Candidate` like any other and is rejected downstream (the X.509 parse, and
+//! the structural check of the deduplication step).
+//!
 //! Not supported: hexdumps with an offset column or an ASCII column
 //! (`00000000: 3082 02ee ...  0...`); those extra columns end the run.
 //!

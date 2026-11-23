@@ -1188,9 +1188,12 @@ fn quando_hex_atravessa_linhas_e_separadores_deve_juntar() {
         .chunks(64)
         .map(|c| String::from_utf8_lossy(c).into_owned())
         .collect();
-    for (sep, name) in [("\n", "lf"), ("\r\n", "crlf"), ("\n  ", "indentado?")] {
-        // Indented continuation lines are not supported: the indentation is
-        // made of spaces, which ARE separators, so it works too.
+    // Indentation is made of spaces, which are separators too.
+    for (sep, name) in [
+        ("\n", "lf"),
+        ("\r\n", "crlf"),
+        ("\n  ", "lf com indentacao"),
+    ] {
         let text = format!("hex:\n{}\nfim", wrapped.join(sep));
         let out = scan(text.as_bytes());
         assert_eq!(ders(&out), vec![&leaf], "{name}");
@@ -1321,11 +1324,141 @@ fn quando_hex_passa_do_limite_de_certs_deve_marcar_truncado() {
 }
 
 #[test]
-fn quando_pem_contem_hex_dentro_do_corpo_deve_nao_reler_o_range_do_pem() {
-    // The PEM body is claimed whole; hex-looking Base64 inside it is not read.
+fn quando_corpo_de_bloco_pem_tem_hex_de_certificado_deve_nao_ser_relido_como_hex() {
+    // If the claimed range of a block were not respected, the hex certificate
+    // inside the body would come out as a candidate.
+    let leaf = reference_chain().remove(0);
+    let hex_line = hex_of(&leaf, ":");
+    for (label, key_count) in [("CERTIFICATE REQUEST", 0), ("PRIVATE KEY", 1)] {
+        let text = format!(
+            "antes\n{}depois\n",
+            pem(label, std::slice::from_ref(&hex_line))
+        );
+        let out = scan(text.as_bytes());
+        assert_eq!(out.candidates.len(), 0, "{label}");
+        assert_eq!(out.private_key_blocks_ignored, key_count, "{label}");
+    }
+    // And the hex after the block is still found, exactly once.
+    let text = format!(
+        "{}{hex_line}\n",
+        pem("CERTIFICATE REQUEST", std::slice::from_ref(&hex_line))
+    );
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    assert_eq!(out.candidates[0].offset, text.rfind(&hex_line).unwrap());
+    assert_eq!(reasons(&out), vec![RejectReason::UnsupportedLabel]);
+}
+
+#[test]
+fn quando_pem_valido_tem_corpo_base64_deve_dar_so_os_candidatos_do_pem() {
     let out = scan(&read("chain-3.pem"));
     assert_eq!(out.candidates.len(), 3);
     assert_eq!(out.diagnostics.len(), 0);
+}
+
+/// `0x30 0x81 len` followed by `len` filler bytes: `3 + len` bytes in total.
+fn der_3081(len: u8) -> Vec<u8> {
+    let mut der = vec![0x30, 0x81, len];
+    der.extend(std::iter::repeat_n(0x05, usize::from(len)));
+    der
+}
+
+#[test]
+fn quando_hex_declara_menos_de_100_bytes_deve_ignorar_sem_diagnostico() {
+    // 99 bytes declared: not a certificate, even with plenty of hex after it.
+    let mut small = der_3081(96);
+    assert_eq!(small.len(), 99);
+    small.extend(std::iter::repeat_n(0x00, 50));
+    let out = scan(hex_of(&small, "").as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
+    // 100 bytes declared is the smallest that is reported.
+    let exact = der_3081(97);
+    assert_eq!(exact.len(), 100);
+    let out = scan(hex_of(&exact, "").as_bytes());
+    assert_eq!(ders(&out), vec![&exact]);
+}
+
+#[test]
+fn quando_hex_truncado_tem_199_ou_200_digitos_deve_diagnosticar_so_a_partir_de_200() {
+    // `30 82 04 00` declares 1028 bytes; the run has `digits` hex digits and
+    // ends at `!`.
+    let run = |digits: usize| {
+        let body: String = "ab".repeat(digits).chars().take(digits - 8).collect();
+        scan(format!("x 30820400{body}!").as_bytes())
+    };
+    let short = run(199);
+    assert_eq!(short.candidates.len(), 0);
+    assert_eq!(short.diagnostics.len(), 0, "{:?}", short.diagnostics);
+    let long = run(200);
+    assert_eq!(long.candidates.len(), 0);
+    assert_eq!(reasons(&long), vec![RejectReason::LengthMismatch]);
+    assert_eq!(long.diagnostics[0].offset, 2);
+}
+
+// ---- order of nested candidates -------------------------------------------
+
+/// PEM of an arbitrary DER, wrapped at 64 columns.
+fn pem_of_der(der: &[u8]) -> String {
+    let lines: Vec<String> = STANDARD
+        .encode(der)
+        .as_bytes()
+        .chunks(64)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect();
+    pem("CERTIFICATE", &lines)
+}
+
+#[test]
+fn quando_secret_decodifica_para_hex_e_depois_pem_deve_seguir_a_ordem_do_texto() {
+    let chain = reference_chain();
+    let decoded = format!("{}\n{}", hex_of(&chain[0], ":"), pem_of_der(&chain[1]));
+    let out = scan(secret_with(&b64(decoded)).as_bytes());
+    assert_eq!(ders(&out), vec![&chain[0], &chain[1]]);
+}
+
+#[test]
+fn quando_secret_decodifica_para_pem_e_depois_hex_deve_seguir_a_ordem_do_texto() {
+    let chain = reference_chain();
+    let decoded = format!("{}\n{}\n", pem_of_der(&chain[1]), hex_of(&chain[0], ":"));
+    let out = scan(secret_with(&b64(decoded)).as_bytes());
+    assert_eq!(ders(&out), vec![&chain[1], &chain[0]]);
+}
+
+#[test]
+fn quando_camada_filha_esta_no_meio_do_texto_decodificado_deve_ficar_no_meio() {
+    let chain = reference_chain();
+    // PEM B, then a Base64 layer that decodes to PEM A, then PEM C.
+    let decoded = format!(
+        "{}{}\n{}",
+        pem_of_der(&chain[1]),
+        b64(pem_of_der(&chain[0])),
+        pem_of_der(&chain[2])
+    );
+    let out = scan(secret_with(&b64(decoded)).as_bytes());
+    assert_eq!(ders(&out), vec![&chain[1], &chain[0], &chain[2]]);
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
+    // All three inherit the offset of the one top-level run.
+    let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
+    assert!(offsets.windows(2).all(|w| w[0] == w[1]));
+}
+
+#[test]
+fn quando_ha_dois_secrets_deve_manter_a_ordem_dos_runs_de_topo() {
+    let chain = reference_chain();
+    // The first run holds hex B then PEM C (detector order would give C, B).
+    let first = b64(format!(
+        "{}\n{}",
+        hex_of(&chain[1], ":"),
+        pem_of_der(&chain[2])
+    ));
+    let second = b64(pem_of_der(&chain[0]));
+    let text = format!("data:\n  a: {first}\n  b: {second}\n");
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&chain[1], &chain[2], &chain[0]]);
+    let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
+    assert_eq!(offsets[0], offsets[1]);
+    assert!(offsets[1] < offsets[2]);
 }
 
 #[test]

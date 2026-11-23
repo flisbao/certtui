@@ -241,7 +241,9 @@ fn scan_flat(input: &[u8], limits: &Limits, det: &mut Detections) {
 /// private keys (skipped and counted), bare Base64, hex, and finally Base64
 /// that decodes to text which is scanned again (see the `nested` module).
 /// Candidates found inside decoded text carry the offset of the Base64 run
-/// they came from. Candidates and diagnostics are sorted by offset (stable).
+/// they came from. Candidates and diagnostics are sorted by offset (stable);
+/// among those of one decoded run the order is the order in the decoded text,
+/// and a layer decoded from a run sits where that run is.
 #[must_use]
 pub fn scan_text(input: &[u8], limits: &Limits) -> ScanOutcome {
     let mut detections = Detections::new(limits);

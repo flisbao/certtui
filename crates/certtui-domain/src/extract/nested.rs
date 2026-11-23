@@ -16,9 +16,10 @@
 //! everywhere (hashes, tokens, identifiers).
 //!
 //! Cost: every run is read once, a run that is not decoded costs `O(first
-//! token)`, and the bytes decoded across the whole queue never exceed twice the
-//! input (an explicit budget on top of the depth limit), so the scan stays
-//! linear. Candidates and diagnostics found inside decoded text carry the
+//! token)`, and the bytes decoded across the whole queue stay near 1.75 times
+//! the input (each layer is at most 3/4 of the one before, and there are at
+//! most three), so the scan stays linear. A budget of twice the input is
+//! enforced anyway, as defence in depth. Candidates and diagnostics found inside decoded text carry the
 //! offset of the top-level run they came from; they never carry content.
 //!
 //! A run may continue across lines (wrapped Base64, YAML block scalars), but a
@@ -176,6 +177,26 @@ struct Work {
     offset: usize,
     /// Depth of `text`.
     depth: u8,
+    /// Where `text` sits inside its parent decoded text: the offsets of the
+    /// runs that led here, below the top-level run (empty for depth 1).
+    path: Vec<usize>,
+}
+
+/// Something found in decoded text, with its place in the final order: the
+/// top-level run it came from, then the offsets inside each decoded layer
+/// (`path`), so a child spawned by a run at inner offset `k` sorts at `k`
+/// among its siblings. The key lives here, not in the public types.
+struct Placed<T> {
+    top: usize,
+    key: Vec<usize>,
+    item: T,
+}
+
+/// Everything the queue found, waiting to be put in text order.
+#[derive(Default)]
+struct Found {
+    candidates: Vec<Placed<Candidate>>,
+    diagnostics: Vec<Placed<RejectReason>>,
 }
 
 /// The work queue and the decoding budget.
@@ -189,15 +210,15 @@ struct Queue {
 
 impl Queue {
     /// Decodes the Base64 runs of `text` (found outside `consumed`) and queues
-    /// the ones worth scanning, one level deeper than `depth`. `inherited` is
-    /// the offset of the top-level run `text` came from; for the input itself
-    /// each run is its own offset. Rejections go to `det`.
+    /// the ones worth scanning, one level deeper than `depth`. `parent` is
+    /// `None` for the input itself (each run is its own top-level offset) and
+    /// otherwise the work item `text` came from. Rejections go to `det` at the
+    /// run's offset inside `text`.
     fn enqueue_runs(
         &mut self,
         text: &[u8],
         consumed: &[Range<usize>],
-        depth: u8,
-        inherited: Option<usize>,
+        parent: Option<&Work>,
         det: &mut Detections,
     ) {
         for region in free_regions(text.len(), consumed) {
@@ -222,8 +243,14 @@ impl Queue {
                 let run = collect_run(text, i, first_end, region.end);
                 let end = run.end;
                 if run.chars.len() >= MIN_RUN_CHARS {
-                    let offset = inherited.unwrap_or(i);
-                    if self.decode(run.chars, offset, depth, det) {
+                    let (top, depth, mut path) = parent.map_or_else(
+                        || (i, 0, Vec::new()),
+                        |w| (w.offset, w.depth, w.path.clone()),
+                    );
+                    if parent.is_some() {
+                        path.push(i);
+                    }
+                    if self.decode(run.chars, (i, top, depth, path), det) {
                         det.consumed.push(i..end);
                     }
                     i = end;
@@ -239,8 +266,7 @@ impl Queue {
     fn decode(
         &mut self,
         mut chars: Vec<u8>,
-        offset: usize,
-        depth: u8,
+        (at, offset, depth, path): (usize, usize, u8, Vec<usize>),
         det: &mut Detections,
     ) -> bool {
         if chars.len() % 4 == 1 {
@@ -249,7 +275,7 @@ impl Queue {
         }
         let estimate = (chars.len() / 4 + 1).saturating_mul(3);
         if self.decoded.saturating_add(estimate) > self.budget {
-            det.reject(offset, RejectReason::TooLarge);
+            det.reject(at, RejectReason::TooLarge);
             return false;
         }
         let Ok(text) = LENIENT.decode(&chars) else {
@@ -264,54 +290,96 @@ impl Queue {
             return false;
         };
         if next_depth > MAX_NESTED_DECODE_DEPTH {
-            det.reject(offset, RejectReason::NestingTooDeep);
+            det.reject(at, RejectReason::NestingTooDeep);
             return false;
         }
         self.items.push_back(Work {
             text,
             offset,
             depth: next_depth,
+            path,
         });
         true
     }
 }
 
-/// Adds what was found in decoded text to the outer detections: every
-/// candidate and diagnostic gets the offset of the top-level run.
-fn merge(det: &mut Detections, inner: Detections, offset: usize) {
+/// Collects what was found in the decoded text of `work` (keeping its place
+/// in the final order) and folds the counters into `det`. Stops at the
+/// per-source candidate limit.
+fn collect(det: &mut Detections, found: &mut Found, inner: Detections, work: &Work) {
+    let key_of = |at: usize| {
+        let mut key = work.path.clone();
+        key.push(at);
+        key
+    };
     for d in inner.diagnostics {
-        det.reject(offset, d.reason);
+        if found.diagnostics.len() >= det.max_diagnostics {
+            det.diagnostics_truncated = true;
+            break;
+        }
+        found.diagnostics.push(Placed {
+            top: work.offset,
+            key: key_of(d.offset),
+            item: d.reason,
+        });
     }
     det.diagnostics_truncated |= inner.diagnostics_truncated;
     det.private_key_blocks_ignored = det
         .private_key_blocks_ignored
         .saturating_add(inner.private_key_blocks_ignored);
     det.truncated |= inner.truncated;
+    let room = det.max_candidates.saturating_sub(det.candidates.len());
     for c in inner.candidates {
-        let candidate = Candidate { offset, ..c };
-        if !det.push_candidate(candidate) {
+        if found.candidates.len() >= room {
+            det.truncated = true;
             break;
         }
+        found.candidates.push(Placed {
+            top: work.offset,
+            key: key_of(c.offset),
+            item: c,
+        });
     }
 }
 
 /// Finds Base64 runs outside the `consumed` ranges that decode to text
 /// holding certificates, scans that text (and, to a bounded depth, the text
 /// decoded from it) with the other detectors, and records everything in
-/// `det`. Returns the number of bytes decoded, which never exceeds twice
-/// `input.len()`.
+/// `det`. Returns the number of bytes decoded.
+///
+/// Results from decoded text are appended in text order: by the offset of the
+/// top-level run, then by position inside each decoded layer, so a child
+/// spawned by a run sits where that run is among its siblings. Each candidate
+/// and diagnostic carries the offset of its top-level run.
 pub(crate) fn find_nested_base64(
     input: &[u8],
     consumed: &[Range<usize>],
     limits: &Limits,
     det: &mut Detections,
 ) -> usize {
+    drain_queue(input, consumed, limits, det, input.len().saturating_mul(2))
+}
+
+/// [`find_nested_base64`] with an explicit decoding budget (bytes).
+///
+/// The budget is defence in depth: with the depth limit the bytes decoded stay
+/// near 1.75 times the input (each layer is at most 3/4 of the previous one),
+/// so it is not reached by any input; it only guards against a future change
+/// to the depth limit or to the queueing rules.
+fn drain_queue(
+    input: &[u8],
+    consumed: &[Range<usize>],
+    limits: &Limits,
+    det: &mut Detections,
+    budget: usize,
+) -> usize {
     let mut queue = Queue {
         items: VecDeque::new(),
         decoded: 0,
-        budget: input.len().saturating_mul(2),
+        budget,
     };
-    queue.enqueue_runs(input, consumed, 0, None, det);
+    let mut found = Found::default();
+    queue.enqueue_runs(input, consumed, None, det);
     while let Some(work) = queue.items.pop_front() {
         if det.truncated {
             break;
@@ -319,14 +387,26 @@ pub(crate) fn find_nested_base64(
         let mut inner = Detections::new(limits);
         super::scan_flat(&work.text, limits, &mut inner);
         let claimed = inner.consumed.as_slice().to_vec();
-        queue.enqueue_runs(
-            &work.text,
-            &claimed,
-            work.depth,
-            Some(work.offset),
-            &mut inner,
-        );
-        merge(det, inner, work.offset);
+        queue.enqueue_runs(&work.text, &claimed, Some(&work), &mut inner);
+        collect(det, &mut found, inner, &work);
+    }
+    found
+        .candidates
+        .sort_by(|a, b| a.top.cmp(&b.top).then_with(|| a.key.cmp(&b.key)));
+    found
+        .diagnostics
+        .sort_by(|a, b| a.top.cmp(&b.top).then_with(|| a.key.cmp(&b.key)));
+    for p in found.diagnostics {
+        det.reject(p.top, p.item);
+    }
+    for p in found.candidates {
+        let candidate = Candidate {
+            offset: p.top,
+            ..p.item
+        };
+        if !det.push_candidate(candidate) {
+            break;
+        }
     }
     queue.decoded
 }
@@ -403,7 +483,26 @@ mod tests {
     }
 
     #[test]
+    fn quando_orcamento_de_decodificacao_acaba_deve_dar_too_large_sem_decodificar() {
+        // The budget is defence in depth (the depth limit keeps decoding near
+        // 1.75x the input), so force it with a tiny value.
+        let text = format!("tls.crt: {}\n", STANDARD.encode(leaf_pem()));
+        let mut det = Detections::new(&Limits::default());
+        let decoded = drain_queue(text.as_bytes(), &[], &Limits::default(), &mut det, 10);
+        assert_eq!(decoded, 0);
+        assert_eq!(det.candidates.len(), 0);
+        let found: Vec<(usize, RejectReason)> = det
+            .diagnostics
+            .iter()
+            .map(|d| (d.offset, d.reason))
+            .collect();
+        assert_eq!(found, vec![("tls.crt: ".len(), RejectReason::TooLarge)]);
+    }
+
+    #[test]
     fn quando_ha_bomba_de_base64_aninhado_deve_decodificar_no_maximo_o_dobro_da_entrada() {
+        // Three layers of Base64 over 1.7 MB of `A`: about 4 MiB. The queue
+        // decodes about 1.7x the input (3 + 2.25 + 1.7 MB), under the budget.
         let mut layer = "A".repeat(1_769_472).into_bytes();
         for _ in 0..3 {
             layer = STANDARD.encode(&layer).into_bytes();
