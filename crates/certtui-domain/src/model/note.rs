@@ -53,6 +53,11 @@ pub enum LoadNote {
         /// The limit that was hit.
         limit: usize,
     },
+    /// Some scan diagnostics were dropped at the diagnostics limit.
+    DiagnosticsTruncated {
+        /// The limit that was hit.
+        limit: usize,
+    },
     /// A directory scan stopped at the entry limit.
     DirectoryTruncated {
         /// The limit that was hit.
@@ -85,6 +90,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&LoadNote::PrivateKeyBlocksIgnored { count: 2 }).unwrap(),
             r#"{"kind":"private_key_blocks_ignored","count":2}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadNote::DiagnosticsTruncated { limit: 100 }).unwrap(),
+            r#"{"kind":"diagnostics_truncated","limit":100}"#
         );
     }
 }

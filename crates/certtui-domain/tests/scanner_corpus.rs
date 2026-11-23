@@ -1,8 +1,9 @@
 //! PEM and bare-Base64 detectors of `scan_text` over the messy-text corpus and
 //! edge cases.
 //!
-//! Counts here are RAW candidates (before deduplication, done in a later
-//! task), so they can differ from `messy/expected.tsv`, which is post-dedupe.
+//! Candidates are the final ones: deduplicated by DER, in text order, and
+//! (when not from a PEM block) structurally checked as certificates, so the
+//! counts match `messy/expected.tsv`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -78,9 +79,7 @@ fn expected_row(file: &str) -> Result<(usize, Vec<RejectReason>), String> {
 
 #[test]
 fn quando_arquivo_de_pem_sujo_deve_contar_candidatos_brutos_e_motivos() {
-    // expected.tsv counts are post-dedupe; for these files they equal the raw
-    // PEM count, except s_client-output, which prints the leaf twice (4 raw
-    // blocks for 3 certificates).
+    // s_client-output prints the leaf twice (4 raw blocks): 3 after dedupe.
     for file in [
         "pem-indented.txt",
         "pem-email-quoted.txt",
@@ -92,11 +91,7 @@ fn quando_arquivo_de_pem_sujo_deve_contar_candidatos_brutos_e_motivos() {
         "truncated.txt",
         "garbage-between.txt",
     ] {
-        let (mut count, expected_reasons) = expected_row(file).unwrap();
-        if file == "s_client-output.txt" {
-            assert_eq!(count, 3, "expected.tsv still says 3 after dedupe");
-            count = 4;
-        }
+        let (count, expected_reasons) = expected_row(file).unwrap();
         let out = scan(&read(&format!("messy/{file}")));
         assert_eq!(out.candidates.len(), count, "{file}: candidatos");
         assert_eq!(reasons(&out), expected_reasons, "{file}: motivos");
@@ -137,15 +132,12 @@ fn quando_arquivo_sujo_deve_extrair_os_mesmos_der_da_cadeia_de_referencia() {
 
 #[test]
 fn quando_s_client_tem_4_blocos_deve_preservar_ordem_do_texto() {
-    // The brief says 3 certs; the output has 4 raw blocks because the leaf
-    // is printed again at the end. Dedupe is a later task.
+    // The output has 4 raw blocks because the leaf is printed again at the
+    // end; the repeat is dropped and the first occurrence stays in place.
     let reference = reference_chain();
     let out = scan(&read("messy/s_client-output.txt"));
     let ders: Vec<&Vec<u8>> = out.candidates.iter().map(|c| &c.der).collect();
-    assert_eq!(
-        ders,
-        vec![&reference[0], &reference[1], &reference[2], &reference[0]]
-    );
+    assert_eq!(ders, vec![&reference[0], &reference[1], &reference[2]]);
     let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
     assert!(offsets.windows(2).all(|w| w[0] < w[1]));
 }
@@ -516,10 +508,11 @@ fn quando_base64_passa_do_limite_de_tamanho_deve_dar_too_large() {
 #[test]
 fn quando_corrida_ja_foi_consumida_por_pem_deve_nao_duplicar_base64() {
     // The PEM bodies are claimed by the PEM detector and must not be read
-    // again as bare Base64. `s_client-output.txt` prints the leaf twice.
+    // again as bare Base64 (that would add diagnostics or candidates).
+    // `s_client-output.txt` prints the leaf twice (deduplicated to 3).
     let expected = [
         ("chain-3.pem", 3),
-        ("messy/s_client-output.txt", 4),
+        ("messy/s_client-output.txt", 3),
         ("messy/pem-indented.txt", 3),
     ];
     for (file, count) in expected {
@@ -528,11 +521,8 @@ fn quando_corrida_ja_foi_consumida_por_pem_deve_nao_duplicar_base64() {
         assert_eq!(out.diagnostics.len(), 0, "{file}");
     }
     let body = leaf_body_lines();
-    let text = format!(
-        "{}\nsolto: {}\n",
-        pem("CERTIFICATE", &body),
-        body.join("\n")
-    );
+    let other = STANDARD.encode(&reference_chain()[1]);
+    let text = format!("{}\nsolto: {other}\n", pem("CERTIFICATE", &body));
     let out = scan(text.as_bytes());
     assert_eq!(
         out.candidates.len(),
@@ -624,7 +614,8 @@ fn quando_ha_muitos_certs_colados_deve_terminar_em_tempo_linear_base64() {
     let leaf = leaf_base64();
     let input = format!("{leaf}\n").repeat(FOUR_MIB / (leaf.len() + 1));
     let out = assert_fast(input.as_bytes());
-    assert_eq!(out.candidates.len(), Limits::default().max_certs_per_source);
+    // The detectors stop at their own bound (truncated); all copies are one.
+    assert_eq!(out.candidates.len(), 1);
     assert!(out.truncated);
 }
 
@@ -695,31 +686,8 @@ fn quando_quebra_literal_vem_logo_depois_de_barra_deve_achar_o_certificado_base6
     }
 }
 
-/// A DER `SEQUENCE` of `total` bytes (`total >= 260`), as a Base64 string.
-fn synthetic_b64(total: usize) -> String {
-    let content = total - 4;
-    let len = u16::try_from(content).unwrap_or(u16::MAX).to_be_bytes();
-    let mut der = vec![0x30, 0x82, len[0], len[1]];
-    der.extend(std::iter::repeat_n(0x05, content));
-    STANDARD.encode(der)
-}
-
 #[test]
-fn quando_base64_tem_padding_colado_no_proximo_deve_reclamar_o_padding_com_o_certificado() {
-    for (total, pad) in [(301, "=="), (302, "="), (300, "")] {
-        let one = synthetic_b64(total);
-        assert!(
-            one.ends_with(pad) && !one.ends_with(&format!("{pad}=")),
-            "{total}"
-        );
-        let out = scan(format!("{one}{one}{one}").as_bytes());
-        let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
-        assert_eq!(offsets, vec![0, one.len(), 2 * one.len()], "{total}");
-    }
-}
-
-#[test]
-fn quando_ha_muitos_certs_base64_colados_sem_separador_deve_ser_linear_e_truncar() {
+fn quando_ha_muitos_certs_base64_colados_sem_separador_deve_ser_linear_e_deduplicar() {
     let limits = Limits {
         max_certs_per_source: 5000,
         ..Limits::default()
@@ -734,8 +702,8 @@ fn quando_ha_muitos_certs_base64_colados_sem_separador_deve_ser_linear_e_truncar
         "demorou {:?}",
         started.elapsed()
     );
-    assert_eq!(out.candidates.len(), 5000);
-    assert!(out.truncated);
+    assert_eq!(out.candidates.len(), 1, "6000 copias do mesmo certificado");
+    assert!(!out.truncated);
 }
 
 #[test]
@@ -1216,17 +1184,6 @@ fn quando_hex_nao_comeca_com_3082_ou_3081_deve_ignorar() {
 }
 
 #[test]
-fn quando_hex_comeca_com_3081_deve_cortar_no_tamanho_declarado() {
-    // 30 81 80 + 128 bytes: the short long-form (one length byte).
-    let mut der = vec![0x30, 0x81, 0x80];
-    der.extend(std::iter::repeat_n(0x05, 0x80));
-    for sep in ["", ":", " "] {
-        let text = format!("k={}\n", hex_of(&der, sep));
-        assert_eq!(ders(&scan(text.as_bytes())), vec![&der], "{sep:?}");
-    }
-}
-
-#[test]
 fn quando_ha_bytes_depois_do_der_em_hex_deve_cortar_no_tamanho_declarado() {
     let leaf = reference_chain().remove(0);
     let mut padded = leaf.clone();
@@ -1356,29 +1313,6 @@ fn quando_pem_valido_tem_corpo_base64_deve_dar_so_os_candidatos_do_pem() {
     assert_eq!(out.diagnostics.len(), 0);
 }
 
-/// `0x30 0x81 len` followed by `len` filler bytes: `3 + len` bytes in total.
-fn der_3081(len: u8) -> Vec<u8> {
-    let mut der = vec![0x30, 0x81, len];
-    der.extend(std::iter::repeat_n(0x05, usize::from(len)));
-    der
-}
-
-#[test]
-fn quando_hex_declara_menos_de_100_bytes_deve_ignorar_sem_diagnostico() {
-    // 99 bytes declared: not a certificate, even with plenty of hex after it.
-    let mut small = der_3081(96);
-    assert_eq!(small.len(), 99);
-    small.extend(std::iter::repeat_n(0x00, 50));
-    let out = scan(hex_of(&small, "").as_bytes());
-    assert_eq!(out.candidates.len(), 0);
-    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
-    // 100 bytes declared is the smallest that is reported.
-    let exact = der_3081(97);
-    assert_eq!(exact.len(), 100);
-    let out = scan(hex_of(&exact, "").as_bytes());
-    assert_eq!(ders(&out), vec![&exact]);
-}
-
 #[test]
 fn quando_hex_truncado_tem_199_ou_200_digitos_deve_diagnosticar_so_a_partir_de_200() {
     // `30 82 04 00` declares 1028 bytes; the run has `digits` hex digits and
@@ -1461,6 +1395,12 @@ fn quando_camada_filha_esta_em_qualquer_posicao_do_texto_decodificado_deve_ficar
 fn quando_dois_secrets_tem_camada_filha_no_meio_deve_manter_a_ordem_dos_runs_de_topo() {
     let chain = reference_chain();
     let (a, b, c) = (&chain[0], &chain[1], &chain[2]);
+    // Other certificates for the second run (deduplication would hide it).
+    let (rsa, ec, san) = (
+        read("rsa2048-leaf.der"),
+        read("ec-p256-leaf.der"),
+        read("san-multi.der"),
+    );
     let secret = |first: &[u8], child: &[u8], last: &[u8]| {
         b64(format!(
             "# header\n{}\n{}\n{}",
@@ -1469,14 +1409,14 @@ fn quando_dois_secrets_tem_camada_filha_no_meio_deve_manter_a_ordem_dos_runs_de_
             pem_of_der(last)
         ))
     };
-    // First run: [B, A, C]; second run: [C, B, A].
+    // First run: [B, A, C]; second run: [SAN, EC, RSA].
     let text = format!(
         "data:\n  x: {}\n  y: {}\n",
         secret(b, a, c),
-        secret(c, b, a)
+        secret(&san, &ec, &rsa)
     );
     let out = scan(text.as_bytes());
-    assert_eq!(ders(&out), vec![b, a, c, c, b, a]);
+    assert_eq!(ders(&out), vec![b, a, c, &san, &ec, &rsa]);
     let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
     assert!(offsets[..3].iter().all(|&o| o == offsets[0]));
     assert!(offsets[3..].iter().all(|&o| o == offsets[3]));
@@ -1512,11 +1452,10 @@ fn quando_arquivo_mistura_pem_base64_e_hex_deve_achar_os_tres_em_ordem() {
 }
 
 #[test]
-fn quando_arquivo_repete_o_certificado_em_pem_e_hex_deve_achar_os_dois_brutos() {
-    // Deduplication is a later task: two raw candidates, same DER.
+fn quando_mesmo_cert_em_pem_e_hex_deve_aparecer_uma_vez() {
     let leaf = reference_chain().remove(0);
     let out = scan(&read("messy/duplicates.txt"));
-    assert_eq!(ders(&out), vec![&leaf, &leaf]);
+    assert_eq!(ders(&out), vec![&leaf]);
     assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
 }
 
@@ -1569,15 +1508,15 @@ fn secret_with(value: &str) -> String {
 }
 
 #[test]
-fn quando_secret_k8s_deve_extrair_os_certificados_brutos_dos_dois_campos() {
-    // tls.crt holds the 3-cert chain and ca.crt the root: 4 RAW candidates
-    // (the root twice); expected.tsv says 3 because deduplication is Task 11.
+fn quando_secret_k8s_deve_extrair_os_certificados_dos_dois_campos_sem_repetir() {
+    // tls.crt holds the 3-cert chain and ca.crt the root: 4 raw candidates
+    // (the root twice), 3 after deduplication (the first root stays).
     let reference = reference_chain();
     let input = read("messy/k8s-secret.yaml");
     let out = scan(&input);
     assert_eq!(
         ders(&out),
-        vec![&reference[0], &reference[1], &reference[2], &reference[2]]
+        vec![&reference[0], &reference[1], &reference[2]]
     );
     assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
     assert_eq!(out.private_key_blocks_ignored, 0);
@@ -1586,7 +1525,8 @@ fn quando_secret_k8s_deve_extrair_os_certificados_brutos_dos_dois_campos() {
     let tls = text.find("tls.crt: ").unwrap() + "tls.crt: ".len();
     let ca = text.find("ca.crt: ").unwrap() + "ca.crt: ".len();
     let offsets: Vec<usize> = out.candidates.iter().map(|c| c.offset).collect();
-    assert_eq!(offsets, vec![tls, tls, tls, ca]);
+    assert_eq!(offsets, vec![tls, tls, tls]);
+    assert!(tls < ca);
 }
 
 #[test]
@@ -1780,5 +1720,404 @@ fn quando_ha_muitas_corridas_aninhadas_pequenas_deve_terminar_em_tempo_linear() 
         format!("{pem_inner}\n")
             .repeat(FOUR_MIB / (pem_inner.len() + 1))
             .as_bytes(),
+    );
+}
+
+// ---- final pass: corpus, dedupe, caps, notes, structural check --------------
+
+use certtui_domain::extract::ScanOutcome;
+use certtui_domain::model::LoadNote;
+
+/// The note kinds of `out` as named in `expected.tsv`, sorted.
+fn note_kinds(out: &ScanOutcome) -> Vec<String> {
+    let mut kinds: Vec<String> = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{:?}", d.reason))
+        .collect();
+    if out.private_key_blocks_ignored > 0 {
+        kinds.push("PrivateKeyBlocksIgnored".to_owned());
+    }
+    kinds.sort();
+    kinds.dedup();
+    kinds
+}
+
+/// What the file loader hands to `scan_text`: UTF-16 (with BOM) transcoded to
+/// UTF-8, as the loader does before scanning.
+fn as_loader_text(bytes: Vec<u8>) -> Vec<u8> {
+    let big_endian = bytes.starts_with(&[0xFE, 0xFF]);
+    if !big_endian && !bytes.starts_with(&[0xFF, 0xFE]) {
+        return bytes;
+    }
+    let units = bytes
+        .get(2..)
+        .unwrap_or_default()
+        .chunks(2)
+        .filter_map(|p| <[u8; 2]>::try_from(p).ok())
+        .map(|p| {
+            if big_endian {
+                u16::from_be_bytes(p)
+            } else {
+                u16::from_le_bytes(p)
+            }
+        });
+    char::decode_utf16(units)
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect::<String>()
+        .into_bytes()
+}
+
+#[test]
+fn quando_bundle_mixed_deve_bater_com_expected_tsv() {
+    let tsv = String::from_utf8(read("messy/expected.tsv")).unwrap();
+    let mut rows = 0;
+    for line in tsv.lines().filter(|l| !l.trim().is_empty()) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        let (file, count, kinds) = (cols[0], cols[1], cols[2]);
+        let mut expected: Vec<String> = if kinds == "-" {
+            vec![]
+        } else {
+            kinds.split(',').map(str::to_owned).collect()
+        };
+        expected.sort();
+        let out = scan(&as_loader_text(read(&format!("messy/{file}"))));
+        assert_eq!(
+            out.candidates.len(),
+            count.parse::<usize>().unwrap(),
+            "{file}: candidatos"
+        );
+        assert_eq!(note_kinds(&out), expected, "{file}: tipos de nota");
+        assert!(!out.truncated && !out.diagnostics_truncated, "{file}");
+        rows += 1;
+    }
+    assert_eq!(rows, 20, "todas as linhas de expected.tsv");
+}
+
+#[test]
+fn quando_arquivo_tem_repeticao_deve_dar_a_contagem_pos_dedupe() {
+    let cases = [
+        ("messy/duplicates.txt", 1),
+        ("messy/k8s-secret.yaml", 3),
+        ("messy/s_client-output.txt", 3),
+    ];
+    for (file, count) in cases {
+        let out = scan(&read(file));
+        assert_eq!(out.candidates.len(), count, "{file}");
+    }
+}
+
+#[test]
+fn quando_entrada_vazia_deve_dar_outcome_vazio() {
+    let limits = Limits::default();
+    let out = scan_text(b"", &limits);
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(out.diagnostics.len(), 0);
+    assert_eq!(out.private_key_blocks_ignored, 0);
+    assert!(!out.truncated && !out.diagnostics_truncated);
+    assert_eq!(Vec::<LoadNote>::from(&out), vec![]);
+}
+
+#[test]
+fn quando_candidatos_passam_do_limite_deve_truncar_e_marcar() {
+    let reference = reference_chain();
+    for (name, text) in [
+        ("pem", String::from_utf8(read("chain-3.pem")).unwrap()),
+        (
+            "base64 solto",
+            reference
+                .iter()
+                .map(|d| STANDARD.encode(d))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    ] {
+        let limits = Limits {
+            max_certs_per_source: 2,
+            ..Limits::default()
+        };
+        let out = scan_text(text.as_bytes(), &limits);
+        assert_eq!(ders(&out), vec![&reference[0], &reference[1]], "{name}");
+        assert!(out.truncated, "{name}");
+        assert_eq!(
+            Vec::<LoadNote>::from(&out),
+            vec![LoadNote::TruncatedAtCertLimit { limit: 2 }],
+            "{name}"
+        );
+        // Exactly at the limit nothing is lost, so nothing is flagged.
+        let limits = Limits {
+            max_certs_per_source: 3,
+            ..Limits::default()
+        };
+        let out = scan_text(text.as_bytes(), &limits);
+        assert_eq!(out.candidates.len(), 3, "{name}");
+        assert!(!out.truncated, "{name}");
+    }
+}
+
+#[test]
+fn quando_excesso_do_limite_e_repeticao_nao_deve_marcar_truncado() {
+    let leaf = leaf_base64();
+    let limits = Limits {
+        max_certs_per_source: 2,
+        ..Limits::default()
+    };
+    let text = format!(
+        "{}\n{leaf}\n{leaf}\n",
+        pem("CERTIFICATE", &leaf_body_lines())
+    );
+    let out = scan_text(text.as_bytes(), &limits);
+    assert_eq!(out.candidates.len(), 1);
+    assert!(!out.truncated);
+}
+
+#[test]
+fn quando_diagnosticos_passam_do_limite_deve_cortar() {
+    let text = "-----BEGIN CERTIFICATE-----\nAAAA\n".repeat(10);
+    let limits = Limits {
+        max_scan_diagnostics: 3,
+        ..Limits::default()
+    };
+    let out = scan_text(text.as_bytes(), &limits);
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(out.diagnostics.len(), 3);
+    assert!(out.diagnostics_truncated);
+    assert!(
+        out.diagnostics
+            .windows(2)
+            .all(|w| w[0].offset <= w[1].offset)
+    );
+    let notes = Vec::<LoadNote>::from(&out);
+    assert_eq!(notes.len(), 4);
+    assert_eq!(notes[3], LoadNote::DiagnosticsTruncated { limit: 3 });
+}
+
+#[test]
+fn quando_scan_gera_notas_deve_converter_sem_conteudo() {
+    let out = scan(&read("messy/with-private-key.txt"));
+    assert_eq!(
+        Vec::<LoadNote>::from(&out),
+        vec![LoadNote::PrivateKeyBlocksIgnored { count: 1 }]
+    );
+    let out = scan(&read("messy/truncated.txt"));
+    let notes = Vec::<LoadNote>::from(&out);
+    assert_eq!(notes.len(), 1);
+    assert!(matches!(
+        notes[0],
+        LoadNote::Rejected {
+            reason: RejectReason::UnterminatedPem,
+            ..
+        }
+    ));
+    assert_eq!(Vec::<LoadNote>::from(&scan(&read("chain-3.pem"))), vec![]);
+}
+
+// -- structural check of unarmored candidates (private keys, CSRs) --
+
+/// A PKCS#8-shaped DER (`SEQUENCE { INTEGER 0, SEQUENCE { rsaEncryption, NULL
+/// }, OCTET STRING }`): well-formed DER, starts with `30 82` (`MII` in
+/// Base64) like a certificate, but is not a certificate.
+fn pkcs8_like_der() -> Vec<u8> {
+    let mut der = vec![0x30, 0x82, 0x01, 0x16, 0x02, 0x01, 0x00];
+    der.extend([
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+    ]);
+    der.extend([0x05, 0x00, 0x04, 0x82, 0x01, 0x00]);
+    let mut x: u32 = 0x9e37_79b9;
+    for _ in 0..256 {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        der.push(x.to_be_bytes()[2]);
+    }
+    der
+}
+
+fn wrapped_b64(der: &[u8]) -> String {
+    STANDARD
+        .encode(der)
+        .as_bytes()
+        .chunks(64)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Nothing of `key` may be left in what the scan returned.
+fn assert_key_not_in(out: &ScanOutcome, key: &[u8]) {
+    let shown = format!("{out:?}");
+    let needles = [
+        STANDARD.encode(key),
+        wrapped_b64(key)
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .to_owned(),
+        hex_of(key.get(8..40).unwrap_or_default(), ""),
+        hex_of(key.get(8..40).unwrap_or_default(), ":"),
+        format!("{:?}", key.get(8..40).unwrap_or_default()),
+    ];
+    for needle in needles {
+        assert!(!needle.is_empty() && !shown.contains(&needle), "{needle}");
+    }
+    assert!(
+        out.candidates
+            .iter()
+            .all(|c| !c.der.windows(32).any(|w| key.windows(32).any(|k| k == w)))
+    );
+}
+
+#[test]
+fn quando_chave_tem_cabecalho_mutilado_deve_dar_so_not_der_sequence_e_nao_vazar() {
+    let key = pkcs8_like_der();
+    let body = wrapped_b64(&key);
+    for begin in [
+        "----BEGIN PRIVATE KEY-----",
+        "-----BEGIN\tPRIVATE KEY-----",
+        "BEGIN PRIVATE KEY",
+    ] {
+        let text = format!("antes\n{begin}\n{body}\n-----END PRIVATE KEY-----\ndepois\n");
+        let out = scan(text.as_bytes());
+        assert_eq!(out.candidates.len(), 0, "{begin:?}");
+        assert_eq!(
+            reasons(&out),
+            vec![RejectReason::NotDerSequence],
+            "{begin:?}"
+        );
+        assert_key_not_in(&out, &key);
+    }
+    // Other mangled headers are claimed by the PEM or key detectors (as an
+    // unsupported label or a counted key); either way, no candidate and no
+    // key bytes.
+    let text = format!("-----BEGIN  PRIVATE  KEY-----\n{body}\n-----END PRIVATE KEY-----\n");
+    let out = scan(text.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_key_not_in(&out, &key);
+    let text = format!("-----BEGIN PRIVATE KEY----\n{body}\n-----END PRIVATE KEY-----\n");
+    let out = scan(text.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(out.private_key_blocks_ignored, 1);
+    assert_key_not_in(&out, &key);
+}
+
+#[test]
+fn quando_corpo_da_chave_vem_em_hex_deve_dar_so_not_der_sequence_e_nao_vazar() {
+    let key = pkcs8_like_der();
+    for sep in ["", ":", " "] {
+        let text = format!("key = {}\n", hex_of(&key, sep));
+        let out = scan(text.as_bytes());
+        assert_eq!(out.candidates.len(), 0, "{sep:?}");
+        assert_eq!(reasons(&out), vec![RejectReason::NotDerSequence], "{sep:?}");
+        assert_key_not_in(&out, &key);
+    }
+}
+
+#[test]
+fn quando_corpo_da_chave_esta_dentro_de_secret_deve_dar_so_not_der_sequence() {
+    let key = pkcs8_like_der();
+    let inner = format!("----BEGIN PRIVATE KEY-----\n{}\n", wrapped_b64(&key));
+    let out = scan(secret_with(&STANDARD.encode(inner)).as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![RejectReason::NotDerSequence]);
+    assert_key_not_in(&out, &key);
+}
+
+#[test]
+fn quando_chave_mutilada_e_certificado_reais_estao_no_mesmo_texto_deve_achar_os_certificados() {
+    let chain = reference_chain();
+    let key = pkcs8_like_der();
+    let text = format!(
+        "----BEGIN PRIVATE KEY-----\n{}\n\n{}\nkey={}\n{}",
+        wrapped_b64(&key),
+        STANDARD.encode(&chain[1]),
+        hex_of(&key, ":"),
+        pem("CERTIFICATE", &leaf_body_lines()),
+    );
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&chain[1], &chain[0]]);
+    assert_eq!(
+        reasons(&out),
+        vec![RejectReason::NotDerSequence, RejectReason::NotDerSequence]
+    );
+    assert_key_not_in(&out, &key);
+}
+
+#[test]
+fn quando_chave_tem_cabecalho_correto_deve_continuar_so_contada() {
+    let key = pkcs8_like_der();
+    let text = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        wrapped_b64(&key)
+    );
+    let out = scan(text.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(out.private_key_blocks_ignored, 1);
+    assert_eq!(reasons(&out), vec![]);
+}
+
+#[test]
+fn quando_pem_certificate_tem_corpo_que_nao_e_cert_deve_manter_o_comportamento_anterior() {
+    // Labelled PEM certificates are validated downstream (app parse).
+    let key = pkcs8_like_der();
+    let text = pem(
+        "CERTIFICATE",
+        &wrapped_b64(&key)
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+    );
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&key]);
+    assert_eq!(reasons(&out), vec![]);
+}
+
+/// Many `MII...` runs shaped like DER but not certificates, as Base64.
+fn garbage_runs_b64(total: usize, der_len: usize) -> String {
+    let content = der_len - 4;
+    let len = u16::try_from(content).unwrap_or(u16::MAX).to_be_bytes();
+    let mut der = vec![0x30, 0x82, len[0], len[1]];
+    der.extend(std::iter::repeat_n(0x05, content));
+    let one = format!("{}\n", STANDARD.encode(der));
+    one.repeat(total / one.len())
+}
+
+#[test]
+fn quando_ha_4_mib_de_corridas_mii_que_nao_sao_certificado_deve_terminar_em_tempo_linear() {
+    for der_len in [300, 4000, 60_000] {
+        let input = garbage_runs_b64(FOUR_MIB, der_len);
+        let out = assert_fast(input.as_bytes());
+        assert_eq!(out.candidates.len(), 0, "{der_len}");
+        // 500 failures is the bound; only the small runs reach it in 4 MiB.
+        assert_eq!(out.truncated, der_len <= 4000, "{der_len}");
+        assert!(out.diagnostics.len() <= Limits::default().max_scan_diagnostics);
+        assert!(
+            out.diagnostics
+                .iter()
+                .all(|d| d.reason == RejectReason::NotDerSequence)
+        );
+    }
+}
+
+#[test]
+fn quando_ha_4_mib_de_hex_der_que_nao_e_certificado_deve_terminar_em_tempo_linear() {
+    let mut der = vec![0x30, 0x82, 0x01, 0x00];
+    der.extend(std::iter::repeat_n(0x05, 0x100));
+    let one = format!("{}\n", hex_of(&der, ""));
+    let input = one.repeat(FOUR_MIB / one.len());
+    let out = assert_fast(input.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert!(out.truncated);
+}
+
+#[test]
+fn quando_lixo_precede_o_certificado_dentro_do_limite_deve_achar_o_certificado() {
+    let leaf = reference_chain().remove(0);
+    let garbage = garbage_runs_b64(20_000, 300);
+    let text = format!("{garbage}{}", pem("CERTIFICATE", &leaf_body_lines()));
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    assert!(!out.truncated);
+    assert!(
+        out.diagnostics
+            .iter()
+            .all(|d| d.reason == RejectReason::NotDerSequence)
     );
 }

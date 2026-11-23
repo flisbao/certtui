@@ -323,4 +323,40 @@ mod tests {
         assert_eq!(det.candidates.len(), 0);
         assert_eq!(det.diagnostics.len(), 0);
     }
+
+    /// `0x30 0x81 len` followed by `len` filler bytes: `3 + len` bytes in total.
+    fn der_3081(len: u8) -> Vec<u8> {
+        let mut der = vec![0x30, 0x81, len];
+        der.extend(std::iter::repeat_n(0x05, usize::from(len)));
+        der
+    }
+
+    #[test]
+    fn quando_hex_comeca_com_3081_deve_cortar_no_tamanho_declarado() {
+        // 30 81 80 + 128 bytes: the short long-form (one length byte).
+        let der = der_3081(0x80);
+        for sep in ["", ":", " "] {
+            let text = format!("k={}\n", hex(&der, sep));
+            let det = run(text.as_bytes(), &[]);
+            let ders: Vec<&Vec<u8>> = det.candidates.iter().map(|c| &c.der).collect();
+            assert_eq!(ders, vec![&der], "{sep:?}");
+        }
+    }
+
+    #[test]
+    fn quando_hex_declara_menos_de_100_bytes_deve_ignorar_sem_diagnostico() {
+        // 99 bytes declared: not a certificate, even with plenty of hex after it.
+        let mut small = der_3081(96);
+        assert_eq!(small.len(), 99);
+        small.extend(std::iter::repeat_n(0x00, 50));
+        let det = run(hex(&small, "").as_bytes(), &[]);
+        assert_eq!(det.candidates.len(), 0);
+        assert_eq!(det.diagnostics.len(), 0, "{:?}", det.diagnostics);
+        // 100 bytes declared is the smallest that is reported.
+        let exact = der_3081(97);
+        assert_eq!(exact.len(), 100);
+        let det = run(hex(&exact, "").as_bytes(), &[]);
+        let ders: Vec<&Vec<u8>> = det.candidates.iter().map(|c| &c.der).collect();
+        assert_eq!(ders, vec![&exact]);
+    }
 }

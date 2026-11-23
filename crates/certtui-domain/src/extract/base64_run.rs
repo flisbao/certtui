@@ -328,4 +328,27 @@ mod tests {
         assert_eq!(det.candidates.len(), 2);
         assert_eq!(det.candidates[1].offset, b64.len());
     }
+
+    /// A DER `SEQUENCE` of `total` bytes (`total >= 260`), as a Base64 string.
+    fn synthetic_b64(total: usize) -> String {
+        let content = total - 4;
+        let len = u16::try_from(content).unwrap_or(u16::MAX).to_be_bytes();
+        let mut der = vec![0x30, 0x82, len[0], len[1]];
+        der.extend(std::iter::repeat_n(0x05, content));
+        base64::engine::general_purpose::STANDARD.encode(der)
+    }
+
+    #[test]
+    fn quando_base64_tem_padding_colado_no_proximo_deve_reclamar_o_padding_com_o_certificado() {
+        for (total, pad) in [(301, "=="), (302, "="), (300, "")] {
+            let one = synthetic_b64(total);
+            assert!(
+                one.ends_with(pad) && !one.ends_with(&format!("{pad}=")),
+                "{total}"
+            );
+            let det = run(format!("{one}{one}{one}").as_bytes(), &[]);
+            let offsets: Vec<usize> = det.candidates.iter().map(|c| c.offset).collect();
+            assert_eq!(offsets, vec![0, one.len(), 2 * one.len()], "{total}");
+        }
+    }
 }

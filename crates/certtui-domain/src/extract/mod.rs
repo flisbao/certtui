@@ -7,6 +7,7 @@
 
 mod base64_run;
 mod der_len;
+mod finish;
 mod hex_run;
 mod lines;
 mod nested;
@@ -73,11 +74,16 @@ pub struct ScanOutcome {
     /// next `BEGIN` or the end of the input. A certificate inside a broken,
     /// unterminated key block (no `BEGIN` of its own) is therefore not found.
     pub private_key_blocks_ignored: usize,
-    /// `true` when extraction stopped at `Limits::max_certs_per_source`.
+    /// `true` when extraction stopped at, or candidates were dropped because
+    /// of, `Limits::max_certs_per_source`.
     pub truncated: bool,
     /// `true` when at least one diagnostic was dropped because
     /// `Limits::max_scan_diagnostics` was reached.
     pub diagnostics_truncated: bool,
+    /// The `Limits::max_certs_per_source` this scan ran with.
+    pub cert_limit: usize,
+    /// The `Limits::max_scan_diagnostics` this scan ran with.
+    pub diagnostics_limit: usize,
 }
 
 /// Sorted, non-overlapping byte ranges already claimed by a detector, so the
@@ -147,6 +153,10 @@ pub(crate) struct Detections {
     pub(crate) truncated: bool,
     pub(crate) diagnostics_truncated: bool,
     pub(crate) consumed: ConsumedRanges,
+    /// How many of the first `candidates` came from armored PEM blocks (set
+    /// by [`scan_flat`] right after the PEM detector, before anything else
+    /// pushes). The others are subject to the structural check of `finish`.
+    pub(crate) pem_candidates: usize,
     max_candidates: usize,
     max_diagnostics: usize,
 }
@@ -160,7 +170,8 @@ impl Detections {
             truncated: false,
             diagnostics_truncated: false,
             consumed: ConsumedRanges::default(),
-            max_candidates: limits.max_certs_per_source,
+            pem_candidates: 0,
+            max_candidates: finish::detection_cap(limits),
             max_diagnostics: limits.max_scan_diagnostics,
         }
     }
@@ -183,16 +194,6 @@ impl Detections {
             self.diagnostics.push(ScanDiagnostic { offset, reason });
         } else {
             self.diagnostics_truncated = true;
-        }
-    }
-
-    fn into_outcome(self) -> ScanOutcome {
-        ScanOutcome {
-            candidates: self.candidates,
-            diagnostics: self.diagnostics,
-            private_key_blocks_ignored: self.private_key_blocks_ignored,
-            truncated: self.truncated,
-            diagnostics_truncated: self.diagnostics_truncated,
         }
     }
 }
@@ -228,6 +229,7 @@ pub(crate) fn free_regions(
 /// each one only on what the previous ones did not claim.
 fn scan_flat(input: &[u8], limits: &Limits, det: &mut Detections) {
     pem::detect(input, limits, det);
+    det.pem_candidates = det.candidates.len();
     let claimed = det.consumed.as_slice().to_vec();
     base64_run::find_bare_base64(input, &claimed, limits, det);
     let claimed = det.consumed.as_slice().to_vec();
@@ -241,21 +243,25 @@ fn scan_flat(input: &[u8], limits: &Limits, det: &mut Detections) {
 /// private keys (skipped and counted), bare Base64, hex, and finally Base64
 /// that decodes to text which is scanned again (see the `nested` module).
 /// Candidates found inside decoded text carry the offset of the Base64 run
-/// they came from. Candidates and diagnostics are sorted by offset (stable);
-/// among those of one decoded run the order is the order in the decoded text,
-/// and a layer decoded from a run sits where that run is. When
-/// `max_certs_per_source` truncates, the nested results kept are the first
-/// found (detection order), not the first in text order, and `truncated` is
-/// set.
+/// they came from. The detectors' results then go through `finish`:
+/// candidates and diagnostics are sorted by offset (stable; among those of one
+/// decoded run the order is the order in the decoded text, and a layer decoded
+/// from a run sits where that run is); candidates that did not come from a
+/// PEM block must parse as X.509 certificates (the others are dropped with a
+/// `NotDerSequence` diagnostic); duplicates (same SHA-256) are removed, first
+/// one kept; and `max_certs_per_source` / `max_scan_diagnostics` cap the
+/// result (`truncated` / `diagnostics_truncated`). The detectors themselves
+/// may collect up to twice `max_certs_per_source` candidates, to leave room
+/// for the ones `finish` drops; when they hit that bound, the nested results
+/// kept are the first found (detection order), not the first in text order,
+/// and `truncated` is set.
 #[must_use]
 pub fn scan_text(input: &[u8], limits: &Limits) -> ScanOutcome {
     let mut detections = Detections::new(limits);
     scan_flat(input, limits, &mut detections);
     let claimed = detections.consumed.as_slice().to_vec();
     let _decoded = nested::find_nested_base64(input, &claimed, limits, &mut detections);
-    detections.candidates.sort_by_key(|c| c.offset);
-    detections.diagnostics.sort_by_key(|d| d.offset);
-    detections.into_outcome()
+    finish::finish(detections, limits)
 }
 
 #[cfg(test)]
@@ -315,6 +321,8 @@ mod tests {
 
     #[test]
     fn quando_candidatos_passam_do_limite_deve_marcar_truncado() {
+        // The detectors collect twice the final cap, leaving room for the
+        // candidates `finish` drops.
         let limits = Limits {
             max_certs_per_source: 1,
             ..Limits::default()
@@ -326,6 +334,8 @@ mod tests {
             der: vec![0x30, 0x00],
         };
         assert!(d.push_candidate(cand()));
+        assert!(d.push_candidate(cand()));
+        assert!(!d.truncated);
         assert!(!d.push_candidate(cand()));
         assert!(d.truncated);
     }
