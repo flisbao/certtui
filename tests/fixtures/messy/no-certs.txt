@@ -1,0 +1,6 @@
+Este arquivo nao contem nenhum certificado.
+Apenas prosa, um token curto (abc123XYZ) e algo como MIAAAA que e curto demais.
+Hash curto: deadbeef cafebabe 0123456789abcdef.
+Linha vazia a seguir.
+
+Fim.

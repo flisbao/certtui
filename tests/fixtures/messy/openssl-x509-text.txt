@@ -1,0 +1,110 @@
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number:
+            37:c4:8f:f0:e5:8f:ab:99:f2:96:87:f5:f6:21:98:48:21:5a:fa:4a
+        Signature Algorithm: ecdsa-with-SHA256
+        Issuer: C=BR, O=CertTui Test, CN=CertTui Test Intermediate CA
+        Validity
+            Not Before: Nov 23 21:05:35 2026 GMT
+            Not After : Nov 22 21:05:35 2031 GMT
+        Subject: C=BR, O=CertTui Test, CN=chain.example.test
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                Public-Key: (2048 bit)
+                Modulus:
+                    00:cd:c0:1a:37:83:08:df:14:61:ef:3e:7e:f8:94:
+                    d5:f7:e7:79:4e:14:b5:62:93:54:9f:fc:ee:96:17:
+                    a3:b2:d8:b7:7a:b8:2f:10:01:fc:c8:9b:8c:f9:2d:
+                    8c:79:2a:0f:54:d5:89:e4:9a:17:a6:c2:05:c1:fe:
+                    0f:4a:36:80:60:ac:96:0b:e0:24:cd:ee:a1:e4:28:
+                    87:11:63:e4:60:73:15:31:7e:ce:53:e1:7f:b1:37:
+                    ea:3d:ec:f7:bd:aa:0c:fc:fa:8e:0c:f5:5f:ca:ed:
+                    ba:45:19:fa:3c:f9:fd:ba:77:b5:28:da:ea:61:3e:
+                    3d:3e:a4:4c:bf:21:9c:f4:e3:f8:fb:d6:d8:f7:e2:
+                    28:31:b5:73:08:ca:ba:4b:92:0c:84:8e:02:5d:73:
+                    93:dc:a1:9f:56:6a:06:70:17:cb:0d:86:09:ea:0f:
+                    fe:e0:b7:24:23:6e:14:79:74:67:e1:72:93:da:fb:
+                    1c:9f:95:b4:a5:0e:a2:23:7d:f9:e7:e3:ac:c2:04:
+                    57:ad:38:f1:67:ff:4f:39:04:8e:5d:a0:24:29:e3:
+                    84:9a:8e:ee:51:57:93:3d:fd:62:9f:67:fc:60:e4:
+                    6a:64:cb:29:07:94:b3:c6:c2:81:de:b0:bf:6d:25:
+                    a0:cb:cd:bb:44:01:8e:01:3d:62:1c:5e:46:ce:38:
+                    c4:17
+                Exponent: 65537 (0x10001)
+        X509v3 extensions:
+            X509v3 Basic Constraints: critical
+                CA:FALSE
+            X509v3 Key Usage: critical
+                Digital Signature, Key Encipherment
+            X509v3 Extended Key Usage: 
+                TLS Web Server Authentication
+            X509v3 Subject Alternative Name: 
+                DNS:chain.example.test
+            X509v3 Subject Key Identifier: 
+                DE:3E:BE:90:24:C7:DD:7B:53:27:76:79:47:D2:87:55:6F:8F:22:6F
+            X509v3 Authority Key Identifier: 
+                72:00:59:1B:8E:3A:AF:1C:EE:E2:45:60:51:69:C5:A7:B8:41:B1:13
+-----BEGIN CERTIFICATE-----
+MIIC7jCCApWgAwIBAgIUN8SP8OWPq5nylof19iGYSCFa+kowCgYIKoZIzj0EAwIw
+SzELMAkGA1UEBhMCQlIxFTATBgNVBAoMDENlcnRUdWkgVGVzdDElMCMGA1UEAwwc
+Q2VydFR1aSBUZXN0IEludGVybWVkaWF0ZSBDQTAeFw0yNjExMjMyMTA1MzVaFw0z
+MTExMjIyMTA1MzVaMEExCzAJBgNVBAYTAkJSMRUwEwYDVQQKDAxDZXJ0VHVpIFRl
+c3QxGzAZBgNVBAMMEmNoYWluLmV4YW1wbGUudGVzdDCCASIwDQYJKoZIhvcNAQEB
+BQADggEPADCCAQoCggEBAM3AGjeDCN8UYe8+fviU1ffneU4UtWKTVJ/87pYXo7LY
+t3q4LxAB/MibjPktjHkqD1TVieSaF6bCBcH+D0o2gGCslgvgJM3uoeQohxFj5GBz
+FTF+zlPhf7E36j3s972qDPz6jgz1X8rtukUZ+jz5/bp3tSja6mE+PT6kTL8hnPTj
++PvW2PfiKDG1cwjKukuSDISOAl1zk9yhn1ZqBnAXyw2GCeoP/uC3JCNuFHl0Z+Fy
+k9r7HJ+VtKUOoiN9+efjrMIEV6048Wf/TzkEjl2gJCnjhJqO7lFXkz39Yp9n/GDk
+amTLKQeUs8bCgd6wv20loMvNu0QBjgE9YhxeRs44xBcCAwEAAaOBlTCBkjAMBgNV
+HRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAd
+BgNVHREEFjAUghJjaGFpbi5leGFtcGxlLnRlc3QwHQYDVR0OBBYEFN4+vpAkx917
+Uyd2eUfSh1VvjyJvMB8GA1UdIwQYMBaAFHIAWRuOOq8c7uJFYFFpxae4QbETMAoG
+CCqGSM49BAMCA0cAMEQCIEhDd1HPyQBjg0Jrvb+L1859jMGts8WP7DYrLBIP6/nP
+AiAQ5o2xa041LprfhKMMarn5I0AnzthbtJg1G+RQSFN/rg==
+-----END CERTIFICATE-----
+
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number:
+            37:c4:8f:f0:e5:8f:ab:99:f2:96:87:f5:f6:21:98:48:21:5a:fa:49
+        Signature Algorithm: ecdsa-with-SHA256
+        Issuer: C=BR, O=CertTui Test, CN=CertTui Test Root CA
+        Validity
+            Not Before: Nov 23 21:05:35 2026 GMT
+            Not After : Nov 20 21:05:35 2036 GMT
+        Subject: C=BR, O=CertTui Test, CN=CertTui Test Intermediate CA
+        Subject Public Key Info:
+            Public Key Algorithm: id-ecPublicKey
+                Public-Key: (256 bit)
+                pub:
+                    04:aa:82:92:0b:fc:f2:e2:e3:8f:df:56:f4:d8:58:
+                    fa:69:d8:66:0f:d7:d6:8f:6b:76:cb:8a:f2:b5:c0:
+                    de:3f:67:9c:56:56:2a:24:ab:80:41:9d:c9:69:b9:
+                    53:60:60:8a:16:b8:25:fa:3f:3d:72:f5:51:7c:b6:
+                    63:32:95:28:0a
+                ASN1 OID: prime256v1
+                NIST CURVE: P-256
+        X509v3 extensions:
+            X509v3 Basic Constraints: critical
+                CA:TRUE, pathlen:0
+            X509v3 Key Usage: critical
+                Certificate Sign, CRL Sign
+            X509v3 Subject Key Identifier: 
+                72:00:59:1B:8E:3A:AF:1C:EE:E2:45:60:51:69:C5:A7:B8:41:B1:13
+            X509v3 Authority Key Identifier: 
+                4D:C6:15:38:8B:ED:D1:AB:35:3C:53:2A:2D:2D:F3:01:8D:F2:14:5D
+-----BEGIN CERTIFICATE-----
+MIIB9jCCAZygAwIBAgIUN8SP8OWPq5nylof19iGYSCFa+kkwCgYIKoZIzj0EAwIw
+QzELMAkGA1UEBhMCQlIxFTATBgNVBAoMDENlcnRUdWkgVGVzdDEdMBsGA1UEAwwU
+Q2VydFR1aSBUZXN0IFJvb3QgQ0EwHhcNMjYxMTIzMjEwNTM1WhcNMzYxMTIwMjEw
+NTM1WjBLMQswCQYDVQQGEwJCUjEVMBMGA1UECgwMQ2VydFR1aSBUZXN0MSUwIwYD
+VQQDDBxDZXJ0VHVpIFRlc3QgSW50ZXJtZWRpYXRlIENBMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAEqoKSC/zy4uOP31b02Fj6adhmD9fWj2t2y4rytcDeP2ecVlYq
+JKuAQZ3JablTYGCKFrgl+j89cvVRfLZjMpUoCqNmMGQwEgYDVR0TAQH/BAgwBgEB
+/wIBADAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFHIAWRuOOq8c7uJFYFFpxae4
+QbETMB8GA1UdIwQYMBaAFE3GFTiL7dGrNTxTKi0t8wGN8hRdMAoGCCqGSM49BAMC
+A0gAMEUCIGY2CGb9mfRkIJJ7ute93wJmQpFbe3w5V4PaWamoMkVpAiEA9feHpyiE
+38CQdwA2VG+WCbCJTuiXG/yYO8xEl1+dyZw=
+-----END CERTIFICATE-----
