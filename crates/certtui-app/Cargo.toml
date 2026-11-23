@@ -9,5 +9,9 @@ rust-version.workspace = true
 [dependencies]
 certtui-domain = { path = "../certtui-domain" }
 
+[features]
+# Exposes test doubles (e.g. `FixedClock`) to downstream crates' tests.
+testing = []
+
 [lints]
 workspace = true
