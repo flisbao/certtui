@@ -63,8 +63,8 @@ pub struct ScanOutcome {
     pub candidates: Vec<Candidate>,
     /// Rejected blocks, limited by `Limits::max_scan_diagnostics`.
     pub diagnostics: Vec<ScanDiagnostic>,
-    /// Number of private key blocks skipped without being decoded. Filled by
-    /// the private-key detector; zero until that detector exists.
+    /// Number of private key blocks skipped without being decoded. Their
+    /// content is never read, kept or reported; only this count remains.
     pub private_key_blocks_ignored: usize,
     /// `true` when extraction stopped at `Limits::max_certs_per_source`.
     pub truncated: bool,

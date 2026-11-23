@@ -2,7 +2,8 @@
 //!
 //! One forward pass over the input: the cursor always advances, a `BEGIN`
 //! looks for its `END` only up to the next `BEGIN` or the end of the input,
-//! and no consumed byte is read again, so the cost is linear.
+//! and no consumed byte is read again, so the cost is linear. Private key
+//! blocks are skipped without decoding (see `is_private_key_label`).
 
 use base64::Engine as _;
 use base64::alphabet::STANDARD as STANDARD_ALPHABET;
@@ -65,6 +66,12 @@ fn parse_label(input: &[u8], label_start: usize) -> Option<(&[u8], usize)> {
     tail.get(len..)?
         .starts_with(DASHES)
         .then(|| (label, label_start + len + DASHES.len()))
+}
+
+/// Whether `label` names a private key (`PRIVATE KEY`, `RSA PRIVATE KEY`,
+/// `ENCRYPTED PRIVATE KEY`, ...). Such blocks are skipped, never decoded.
+fn is_private_key_label(label: &[u8]) -> bool {
+    label == b"PRIVATE KEY" || label.ends_with(b" PRIVATE KEY")
 }
 
 fn kind_for(label: &[u8]) -> Option<CandidateKind> {
@@ -210,6 +217,7 @@ pub(super) fn detect(input: &[u8], limits: &Limits, det: &mut Detections) {
             cursor = begin + BEGIN.len();
             continue;
         };
+        let private_key = is_private_key_label(label);
         let kind = kind_for(label);
 
         // Look for the matching END, stopping at the next BEGIN or at EOF.
@@ -244,6 +252,14 @@ pub(super) fn detect(input: &[u8], limits: &Limits, det: &mut Detections) {
         det.consumed.push(begin..claimed.max(body_start));
         cursor = resume;
 
+        // Principle 6: a private key is never extracted, shown or logged. Its
+        // range is claimed above, and the body is not collected or decoded,
+        // so no byte of it reaches a candidate, a diagnostic or a note. Only
+        // the counter changes, and no rejection is recorded either.
+        if private_key {
+            det.private_key_blocks_ignored = det.private_key_blocks_ignored.saturating_add(1);
+            continue;
+        }
         let Some(kind) = kind else {
             det.reject(begin, RejectReason::UnsupportedLabel);
             continue;
@@ -313,6 +329,7 @@ mod tests {
         assert_eq!(det.consumed.as_slice(), expected.as_slice());
         assert_eq!(det.candidates.len(), 1);
         assert_eq!(det.candidates[0].offset, v);
+        assert_eq!(det.private_key_blocks_ignored, 1);
         let diags: Vec<(usize, RejectReason)> = det
             .diagnostics
             .iter()
@@ -321,7 +338,6 @@ mod tests {
         assert_eq!(
             diags,
             vec![
-                (k, RejectReason::UnsupportedLabel),
                 (m, RejectReason::LabelMismatch),
                 (o, RejectReason::UnterminatedPem),
             ]
