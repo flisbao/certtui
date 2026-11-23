@@ -2,7 +2,8 @@
 //!
 //! [`scan_text`] works on raw bytes (the input may be invalid UTF-8), runs in
 //! linear time, uses no regular expressions and no recursion. It never keeps
-//! file content in its diagnostics, only offsets and reasons.
+//! file content in its diagnostics, only offsets and reasons. Private key
+//! blocks are skipped whole and counted, never decoded.
 
 mod base64_run;
 mod der_len;
@@ -64,7 +65,11 @@ pub struct ScanOutcome {
     /// Rejected blocks, limited by `Limits::max_scan_diagnostics`.
     pub diagnostics: Vec<ScanDiagnostic>,
     /// Number of private key blocks skipped without being decoded. Their
-    /// content is never read, kept or reported; only this count remains.
+    /// content is never read, kept or reported; only this count remains. It
+    /// counts `BEGIN` lines (once per line, even when repeated), and each
+    /// block is claimed whole: through its `END` or, without one, through the
+    /// next `BEGIN` or the end of the input. A certificate inside a broken,
+    /// unterminated key block (no `BEGIN` of its own) is therefore not found.
     pub private_key_blocks_ignored: usize,
     /// `true` when extraction stopped at `Limits::max_certs_per_source`.
     pub truncated: bool,

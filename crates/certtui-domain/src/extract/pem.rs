@@ -2,8 +2,16 @@
 //!
 //! One forward pass over the input: the cursor always advances, a `BEGIN`
 //! looks for its `END` only up to the next `BEGIN` or the end of the input,
-//! and no consumed byte is read again, so the cost is linear. Private key
-//! blocks are skipped without decoding (see `is_private_key_label`).
+//! and no consumed byte is read again, so the cost is linear.
+//!
+//! Private key blocks are skipped whole and never decoded (see
+//! `is_private_key_label`). Their range is claimed through the matching `END`
+//! or, when there is none, through the next `BEGIN` or the end of the input,
+//! whatever the body looks like: a body interrupted by headers, blank lines or
+//! prose is still the key. The price is deliberate: a certificate that sits
+//! inside a broken (unterminated) key block, without a `BEGIN` line of its
+//! own, is not found. A `BEGIN` line whose label is not upper case but names a
+//! private key (`private key`, `RSA-PRIVATE-KEY`) is treated the same way.
 
 use base64::Engine as _;
 use base64::alphabet::STANDARD as STANDARD_ALPHABET;
@@ -71,7 +79,30 @@ fn parse_label(input: &[u8], label_start: usize) -> Option<(&[u8], usize)> {
 /// Whether `label` names a private key (`PRIVATE KEY`, `RSA PRIVATE KEY`,
 /// `ENCRYPTED PRIVATE KEY`, ...). Such blocks are skipped, never decoded.
 fn is_private_key_label(label: &[u8]) -> bool {
+    let label = label.trim_ascii_end();
     label == b"PRIVATE KEY" || label.ends_with(b" PRIVATE KEY")
+}
+
+/// How far past `BEGIN ` the fallback looks for a private key label.
+const FALLBACK_WINDOW: usize = 100;
+
+/// Defense in depth for a `BEGIN` line whose label [`parse_label`] rejects
+/// (lower case, `-` instead of a space, ...): when `PRIVATE` appears, in any
+/// case, before the closing dashes within [`FALLBACK_WINDOW`] bytes of the
+/// same line, the block is a private key. Returns where its body starts.
+fn private_key_fallback(input: &[u8], label_start: usize) -> Option<usize> {
+    let tail = input.get(label_start..)?;
+    let line_len = tail
+        .iter()
+        .take(FALLBACK_WINDOW)
+        .take_while(|&&b| b != b'\n' && b != b'\r')
+        .count();
+    let line = tail.get(..line_len)?;
+    let dashes = line.windows(DASHES.len()).position(|w| w == DASHES);
+    let head = line.get(..dashes.unwrap_or(line_len))?;
+    head.windows(b"PRIVATE".len())
+        .any(|w| w.eq_ignore_ascii_case(b"PRIVATE"))
+        .then(|| label_start + dashes.map_or(line_len, |p| p + DASHES.len()))
 }
 
 fn kind_for(label: &[u8]) -> Option<CandidateKind> {
@@ -213,11 +244,16 @@ pub(super) fn detect(input: &[u8], limits: &Limits, det: &mut Detections) {
             cursor = begin + END.len();
             continue;
         }
-        let Some((label, body_start)) = parse_label(input, begin + BEGIN.len()) else {
-            cursor = begin + BEGIN.len();
-            continue;
-        };
-        let private_key = is_private_key_label(label);
+        let label_start = begin + BEGIN.len();
+        let (label, body_start, private_key) =
+            if let Some((label, after)) = parse_label(input, label_start) {
+                (label, after, is_private_key_label(label))
+            } else if let Some(after) = private_key_fallback(input, label_start) {
+                (&b""[..], after, true)
+            } else {
+                cursor = label_start;
+                continue;
+            };
         let kind = kind_for(label);
 
         // Look for the matching END, stopping at the next BEGIN or at EOF.
@@ -249,11 +285,18 @@ pub(super) fn detect(input: &[u8], limits: &Limits, det: &mut Detections) {
                 Err(RejectReason::UnterminatedPem),
             ),
         };
+        // A private key is claimed whole, up to the END or the next BEGIN/EOF,
+        // so no detector can read any part of its body.
+        let claimed = if private_key {
+            claimed.max(body_end)
+        } else {
+            claimed
+        };
         det.consumed.push(begin..claimed.max(body_start));
         cursor = resume;
 
         // Principle 6: a private key is never extracted, shown or logged. Its
-        // range is claimed above, and the body is not collected or decoded,
+        // whole range is claimed above, and the body is not collected or decoded,
         // so no byte of it reaches a candidate, a diagnostic or a note. Only
         // the counter changes, and no rejection is recorded either.
         if private_key {
@@ -342,6 +385,23 @@ mod tests {
                 (o, RejectReason::UnterminatedPem),
             ]
         );
+    }
+
+    #[test]
+    fn quando_chave_privada_nao_tem_end_deve_consumir_ate_o_proximo_begin_ou_o_fim() {
+        let key = "-----BEGIN PRIVATE KEY-----\nAAAA\nprosa qualquer\nBBBB\n";
+        let cert = format!("-----BEGIN CERTIFICATE-----\n{TINY}\n-----END CERTIFICATE-----\n");
+        let text = format!("{key}{cert}");
+        let det = run(text.as_bytes(), &Limits::default());
+        assert_eq!(det.consumed.as_slice()[0], 0..key.len());
+        assert_eq!(det.candidates.len(), 1);
+        assert_eq!(det.candidates[0].offset, key.len());
+        assert_eq!(det.private_key_blocks_ignored, 1);
+        assert_eq!(det.diagnostics.len(), 0);
+
+        let det = run(key.as_bytes(), &Limits::default());
+        assert_eq!(det.consumed.as_slice().len(), 1);
+        assert_eq!(det.consumed.as_slice()[0], 0..key.len());
     }
 
     #[test]

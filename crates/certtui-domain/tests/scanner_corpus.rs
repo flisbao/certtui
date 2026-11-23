@@ -833,7 +833,12 @@ fn quando_ha_varias_chaves_privadas_deve_contar_cada_uma() {
 
 #[test]
 fn quando_label_so_parece_chave_privada_deve_continuar_nao_suportado() {
-    for label in ["PUBLIC KEY", "PRIVATE KEYS", "PRIVATE"] {
+    for label in [
+        "PUBLIC KEY",
+        "PRIVATE KEYS",
+        "PRIVATE",
+        "CERTIFICATE REQUEST",
+    ] {
         let out = scan(pem(label, &lines_of(&FAKE_KEY_A)).as_bytes());
         assert_eq!(out.private_key_blocks_ignored, 0, "{label}");
         assert_eq!(
@@ -844,10 +849,67 @@ fn quando_label_so_parece_chave_privada_deve_continuar_nao_suportado() {
     }
 }
 
+/// A fake private key that IS valid DER (`30 82 01 2c` + 300 pseudo-random
+/// bytes), so its Base64 starts with `MII` and the bare-Base64 detector would
+/// turn it into a candidate if any part of it were exposed. THROWAWAY FAKE
+/// DATA, not a key.
+fn fake_key_der() -> Vec<u8> {
+    let mut der = vec![0x30, 0x82, 0x01, 0x2c];
+    let mut x: u32 = 0x1234_5678;
+    for _ in 0..300 {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        der.push(x.to_be_bytes()[1]);
+    }
+    der
+}
+
+fn fake_key_lines() -> Vec<String> {
+    STANDARD
+        .encode(fake_key_der())
+        .as_bytes()
+        .chunks(64)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect()
+}
+
+/// The ways a key block can be laid out in a text. `body` has at least 3 lines.
+fn key_layouts(label: &str, body: &[String]) -> Vec<(&'static str, String)> {
+    let begin = format!("-----BEGIN {label}-----\n");
+    let end = format!("-----END {label}-----\n");
+    let (first, rest) = body.split_at(1);
+    vec![
+        ("terminado", format!("{begin}{}\n{end}", body.join("\n"))),
+        ("sem END", format!("{begin}{}\n", body.join("\n"))),
+        (
+            "sem END com cabecalho",
+            format!(
+                "{begin}Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D\n\n{}\n",
+                body.join("\n")
+            ),
+        ),
+        (
+            "sem END com linha em branco e prosa",
+            format!(
+                "{begin}{}\n\nisto e prosa, nao base64.\n{}\n",
+                first.join("\n"),
+                rest.join("\n")
+            ),
+        ),
+        (
+            "sem END com continuacao por barra invertida",
+            format!(
+                "{begin}Proc-Type: 4,ENCRYPTED \\\n{}\n",
+                body.iter()
+                    .map(|l| format!("{l}\\"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        ),
+    ]
+}
+
 #[test]
 fn quando_chave_privada_deve_nao_aparecer_no_debug_do_outcome() {
-    let mut keys: Vec<Vec<String>> = vec![lines_of(&FAKE_KEY_A), lines_of(&FAKE_KEY_B)];
-    // The key of the fixture is also checked (the file marks it as throwaway).
     let fixture = String::from_utf8(read("messy/with-private-key.txt")).unwrap();
     let fixture_body: Vec<String> = fixture
         .split("-----BEGIN PRIVATE KEY-----")
@@ -859,30 +921,53 @@ fn quando_chave_privada_deve_nao_aparecer_no_debug_do_outcome() {
         .filter(|l| !l.is_empty())
         .map(str::to_owned)
         .collect();
-    assert!(fixture_body.len() > 1);
-    keys.push(fixture_body);
+    assert!(fixture_body.len() > 2);
+    let der = fake_key_der();
+    let key_b64 = STANDARD.encode(&der);
+    let bodies = [
+        lines_of(&FAKE_KEY_A),
+        lines_of(&FAKE_KEY_B),
+        fixture_body,
+        fake_key_lines(),
+    ];
 
-    for body in keys {
-        // The last block is unterminated: a diagnostic path that could echo
-        // content.
-        let text = format!(
-            "{}{}-----BEGIN RSA PRIVATE KEY-----\n{}\n",
-            pem("CERTIFICATE", &leaf_body_lines()),
-            pem("PRIVATE KEY", &body),
-            body.join("\n"),
-        );
-        let out = scan(text.as_bytes());
-        assert_eq!(out.private_key_blocks_ignored, 2);
-        let shown = format!("{out:?}\n{out:#?}\n{}", {
-            serde_json::to_string(&out.diagnostics).unwrap()
-        });
+    for body in bodies {
         let windows = windows_16(&body);
         assert!(windows.len() > 16);
-        for w in &windows {
-            assert!(!shown.contains(w.as_str()), "vazou um trecho da chave");
+        for label in ["PRIVATE KEY", "RSA PRIVATE KEY"] {
+            for (name, key_block) in key_layouts(label, &body) {
+                let text = format!("{}{key_block}", pem("CERTIFICATE", &leaf_body_lines()));
+                // The body really is in the input, so the checks are meaningful.
+                assert!(body.iter().all(|l| text.contains(l.as_str())), "{name}");
+                let out = scan(text.as_bytes());
+                assert_eq!(out.private_key_blocks_ignored, 1, "{name}");
+                // Only the real certificate comes out, never the key.
+                assert_eq!(out.candidates.len(), 1, "{name}");
+                assert_eq!(out.candidates[0].der, reference_chain().remove(0), "{name}");
+                assert_eq!(reasons(&out), vec![], "{name}");
+
+                let shown = format!(
+                    "{out:?}\n{out:#?}\n{}",
+                    serde_json::to_string(&out.diagnostics).unwrap()
+                );
+                for w in &windows {
+                    assert!(!shown.contains(w.as_str()), "{name}: vazou um trecho");
+                }
+                for c in &out.candidates {
+                    let c_b64 = STANDARD.encode(&c.der);
+                    for w in &windows {
+                        assert!(!c_b64.contains(w.as_str()), "{name}: der tem a chave");
+                    }
+                    for w in der.windows(16) {
+                        assert!(
+                            !c.der.windows(16).any(|d| d == w),
+                            "{name}: der tem a chave"
+                        );
+                    }
+                    assert!(!c_b64.contains(&key_b64[..32]), "{name}");
+                }
+            }
         }
-        // The body really is in the input, so the check above is meaningful.
-        assert!(body.iter().all(|l| text.contains(l.as_str())));
     }
 }
 
@@ -928,7 +1013,9 @@ fn quando_chave_privada_nao_tem_end_deve_pular_ate_o_proximo_begin() {
 }
 
 #[test]
-fn quando_chave_privada_nao_tem_end_e_certificado_vem_depois_da_prosa_deve_achar_o_certificado() {
+fn quando_chave_privada_nao_tem_end_deve_reivindicar_tudo_ate_o_fim_mesmo_depois_de_prosa() {
+    // Deliberate trade-off: a certificate that starts inside a broken key block
+    // (no BEGIN line of its own) is hidden together with the key.
     let text = format!(
         "-----BEGIN PRIVATE KEY-----\n{}\nfim da chave, obrigado.\n{}\n",
         FAKE_KEY_A.join("\n"),
@@ -936,9 +1023,84 @@ fn quando_chave_privada_nao_tem_end_e_certificado_vem_depois_da_prosa_deve_achar
     );
     let out = scan(text.as_bytes());
     assert_eq!(out.private_key_blocks_ignored, 1);
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![]);
+}
+
+#[test]
+fn quando_chave_privada_nao_tem_end_e_certificado_vem_depois_de_novo_begin_deve_achar_o_certificado()
+ {
+    let text = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\nfim da chave, obrigado.\n{}",
+        FAKE_KEY_A.join("\n"),
+        pem("CERTIFICATE", &leaf_body_lines()),
+    );
+    let out = scan(text.as_bytes());
+    assert_eq!(out.private_key_blocks_ignored, 1);
     assert_eq!(out.candidates.len(), 1);
     assert_eq!(reasons(&out), vec![]);
     assert_eq!(out.candidates[0].der, reference_chain().remove(0));
+}
+
+#[test]
+fn quando_chave_privada_sem_end_e_interrompida_deve_nao_devolver_candidato() {
+    for label in PRIVATE_KEY_LABELS {
+        for (name, block) in key_layouts(label, &fake_key_lines()) {
+            let text = format!("antes\n{block}");
+            let out = scan(text.as_bytes());
+            assert_eq!(out.private_key_blocks_ignored, 1, "{label} {name}");
+            assert_eq!(out.candidates.len(), 0, "{label} {name}");
+            assert_eq!(reasons(&out), vec![], "{label} {name}");
+        }
+    }
+}
+
+#[test]
+fn quando_label_da_chave_tem_espaco_no_fim_deve_contar_como_chave_privada() {
+    let text = format!(
+        "-----BEGIN PRIVATE KEY -----\n{}\n",
+        fake_key_lines().join("\n")
+    );
+    let out = scan(text.as_bytes());
+    assert_eq!(out.private_key_blocks_ignored, 1);
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![]);
+}
+
+#[test]
+fn quando_label_da_chave_nao_esta_em_maiusculas_deve_tratar_como_chave_privada() {
+    let body = fake_key_lines();
+    for (begin, end) in [
+        ("private key", "private key"),
+        ("Rsa Private Key", "Rsa Private Key"),
+        ("RSA-PRIVATE-KEY", "RSA-PRIVATE-KEY"),
+        ("PrIvAtE_kEy", "PrIvAtE_kEy"),
+    ] {
+        let terminated = format!(
+            "-----BEGIN {begin}-----\n{}\n-----END {end}-----\n{}",
+            body.join("\n"),
+            pem("CERTIFICATE", &leaf_body_lines()),
+        );
+        let out = scan(terminated.as_bytes());
+        assert_eq!(out.private_key_blocks_ignored, 1, "{begin}");
+        assert_eq!(out.candidates.len(), 1, "{begin}: so o cert depois do END");
+        assert_eq!(reasons(&out), vec![], "{begin}");
+
+        let open = format!("-----BEGIN {begin}-----\nX: y\n{}\n", body.join("\n"));
+        let out = scan(open.as_bytes());
+        assert_eq!(out.private_key_blocks_ignored, 1, "{begin}");
+        assert_eq!(out.candidates.len(), 0, "{begin}");
+        assert_eq!(reasons(&out), vec![], "{begin}");
+    }
+}
+
+#[test]
+fn quando_begin_com_label_estranho_sem_private_deve_continuar_ignorado_sem_contar() {
+    for label in ["certificate", "weird label!", "PUBLIC-KEY"] {
+        let out = scan(format!("-----BEGIN {label}-----\nAAAA\n").as_bytes());
+        assert_eq!(out.private_key_blocks_ignored, 0, "{label}");
+        assert_eq!(reasons(&out), vec![], "{label}");
+    }
 }
 
 #[test]
