@@ -20,6 +20,11 @@ use crate::limits::Limits;
 /// a certificate and is most likely an ordinary word or identifier.
 pub(crate) const MIN_BARE_BASE64_CHARS: usize = 200;
 
+/// A run is only attempted when its first token (up to the first whitespace,
+/// line break or non-alphabet byte) has at least this many characters; shorter
+/// `MI...` words ("MIT", "MIME", "MICROSOFT") are prose.
+const MIN_FIRST_TOKEN_CHARS: usize = 16;
+
 /// Base64 characters needed to decode the 6 bytes of the longest DER header
 /// this module accepts (`30 84 xx xx xx xx`).
 const HEADER_CHARS: usize = 8;
@@ -94,6 +99,19 @@ fn token_end(input: &[u8], from: usize, limit: usize) -> usize {
     j
 }
 
+/// Rejects only the first token of a run whose first bytes are not a DER
+/// header, so a real certificate on a following line is still found. Reported
+/// (and claimed) only when the token alone is long enough to be worth it.
+/// Returns where the scan resumes: the end of that token.
+fn reject_first_token(input: &[u8], start: usize, limit: usize, det: &mut Detections) -> usize {
+    let end = token_end(input, start, limit);
+    if end.saturating_sub(start) >= MIN_BARE_BASE64_CHARS {
+        det.reject(start, RejectReason::NotDerSequence);
+        det.consumed.push(start..end);
+    }
+    end
+}
+
 /// Characters of Base64 holding `total` bytes.
 fn chars_for(total: usize) -> usize {
     total.saturating_mul(8).div_ceil(6)
@@ -123,8 +141,8 @@ fn try_run(
     let mut chars = 0usize;
     let mut last_end = start;
     let mut capped = false;
-    // `Some(None)`: not a DER header; `Some(Some(n))`: needs `n` characters.
-    let mut header: Option<Option<usize>> = None;
+    // Characters the DER header declares, once its first bytes are known.
+    let mut header: Option<usize> = None;
 
     // Stop as soon as the outcome is settled and the run is long enough to be
     // reported, so a run followed by more certificates is not scanned again
@@ -140,17 +158,17 @@ fn try_run(
             if header.is_none()
                 && let Some(head) = buf.get(..HEADER_CHARS)
             {
-                header = Some(declared_chars(head));
+                // The first token has at least `MIN_FIRST_TOKEN_CHARS` > header
+                // characters, so a bad header condemns that token only.
+                let Some(needed) = declared_chars(head) else {
+                    return Some(reject_first_token(input, start, limit, det));
+                };
+                header = Some(needed);
             }
         } else {
             capped = true;
         }
-        let settled = capped
-            || match header {
-                Some(None) => true,
-                Some(Some(needed)) => buf.len() >= needed,
-                None => false,
-            };
+        let settled = capped || header.is_some_and(|needed| buf.len() >= needed);
         if settled && chars >= MIN_BARE_BASE64_CHARS {
             break;
         }
@@ -222,14 +240,20 @@ pub(crate) fn find_bare_base64(
         if is_literal_break(input, i) {
             i += 2;
         } else if is_alphabet(b) {
-            let end = token_end(input, i, limit);
-            if input.get(i..end).is_some_and(|t| t.starts_with(b"MI")) {
+            // Cheap tests first: a success that ends mid-token must resume in
+            // O(1), so the token is measured only when it is skipped.
+            let rest = input.get(i..limit).unwrap_or_default();
+            let attempt = rest.starts_with(b"MI")
+                && rest
+                    .get(..MIN_FIRST_TOKEN_CHARS)
+                    .is_some_and(|head| head.iter().all(|&c| is_alphabet(c)));
+            if attempt {
                 let Some(resume) = try_run(input, i, limit, limits, det) else {
                     return;
                 };
                 i = resume.max(i + 1);
             } else {
-                i = end;
+                i = token_end(input, i, limit).max(i + 1);
             }
         } else {
             i += 1;
