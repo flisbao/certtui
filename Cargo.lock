@@ -126,6 +126,7 @@ name = "certtui-app"
 version = "0.1.0"
 dependencies = [
  "certtui-domain",
+ "thiserror",
 ]
 
 [[package]]

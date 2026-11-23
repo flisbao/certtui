@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 certtui-domain = { path = "../certtui-domain" }
+thiserror = "2"
 
 [features]
 # Exposes test doubles (e.g. `FixedClock`) to downstream crates' tests.
