@@ -17,7 +17,6 @@ impl Clock for FixedClock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use certtui_domain::time::Timestamp;
 
     #[test]
     fn quando_fixed_clock_deve_devolver_o_mesmo_instante() {
