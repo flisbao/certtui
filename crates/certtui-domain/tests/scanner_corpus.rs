@@ -1,4 +1,5 @@
-//! PEM detector of `scan_text` over the messy-text corpus and edge cases.
+//! PEM and bare-Base64 detectors of `scan_text` over the messy-text corpus and
+//! edge cases.
 //!
 //! Counts here are RAW candidates (before deduplication, done in a later
 //! task), so they can differ from `messy/expected.tsv`, which is post-dedupe.
@@ -389,4 +390,242 @@ fn quando_candidato_e_formatado_com_debug_nao_deve_vazar_der() {
         format!("{c:?}"),
         "Candidate { offset: 3, kind: Certificate, der_len: 2 }"
     );
+}
+
+// ---- bare Base64 detector -------------------------------------------------
+
+/// Base64 (standard, padded) of the leaf of `chain-3.pem`, in one line.
+fn leaf_base64() -> String {
+    STANDARD.encode(reference_chain().remove(0))
+}
+
+fn ders(out: &certtui_domain::extract::ScanOutcome) -> Vec<&Vec<u8>> {
+    out.candidates.iter().map(|c| &c.der).collect()
+}
+
+#[test]
+fn quando_base64_solto_em_arquivo_sujo_deve_achar_os_tres_certificados() {
+    let reference = reference_chain();
+    for file in ["bare-base64-wrapped.txt", "jwk-x5c.json"] {
+        let out = scan(&read(&format!("messy/{file}")));
+        assert_eq!(out.candidates.len(), 3, "{file}");
+        assert_eq!(out.diagnostics.len(), 0, "{file}: {:?}", out.diagnostics);
+        for c in &out.candidates {
+            assert!(reference.contains(&c.der), "{file}");
+            assert_eq!(c.kind, CandidateKind::Certificate, "{file}");
+        }
+        let mut found: Vec<&Vec<u8>> = ders(&out);
+        found.sort();
+        found.dedup();
+        assert_eq!(found.len(), 3, "{file}: tres certificados distintos");
+    }
+}
+
+#[test]
+fn quando_base64_atravessa_linhas_deve_juntar() {
+    let leaf = reference_chain().remove(0);
+    let lines = leaf_body_lines();
+    let prefix = "texto antes\n";
+    let seps: [(&str, &str); 4] = [
+        ("\n", "lf"),
+        ("\r\n", "crlf"),
+        ("\\n", "literal"),
+        ("\n    ", "indented"),
+    ];
+    for (sep, name) in seps {
+        let text = format!("{prefix}{}\nfim\n", lines.join(sep));
+        let out = scan(text.as_bytes());
+        assert_eq!(ders(&out), vec![&leaf], "{name}");
+        assert_eq!(out.candidates[0].offset, prefix.len(), "{name}");
+        assert_eq!(out.diagnostics.len(), 0, "{name}");
+    }
+}
+
+#[test]
+fn quando_base64_url_safe_deve_decodificar() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let leaf = reference_chain().remove(0);
+    let encoded = URL_SAFE_NO_PAD.encode(&leaf);
+    assert!(encoded.contains(['-', '_']), "o fixture deve exercitar -/_");
+    let text = format!("{{\"x5c\": \"{encoded}\"}}");
+    let out = scan(text.as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+}
+
+#[test]
+fn quando_corrida_base64_tem_menos_de_200_chars_deve_ignorar_sem_diagnostico() {
+    let short = format!("\"MIA{}\"", "A".repeat(196));
+    let out = scan(short.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
+}
+
+#[test]
+fn quando_corrida_base64_comeca_com_mi_mas_nao_e_der_deve_dar_not_der_sequence() {
+    let text = format!("prosa\n\"MIA{}\"", "A".repeat(197));
+    let out = scan(text.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![RejectReason::NotDerSequence]);
+    assert_eq!(out.diagnostics[0].offset, "prosa\n\"".len());
+}
+
+#[test]
+fn quando_corrida_base64_nao_comeca_com_mi_deve_ignorar_sem_diagnostico() {
+    let text = format!("\"AAAA{}\"", "A".repeat(400));
+    let out = scan(text.as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(out.diagnostics.len(), 0);
+}
+
+#[test]
+fn quando_ha_lixo_depois_do_padding_base64_deve_cortar_no_tamanho_declarado() {
+    let leaf = reference_chain().remove(0);
+    // Trailing zero bytes inside the Base64 data.
+    let mut padded = leaf.clone();
+    padded.extend_from_slice(&[0, 0, 0, 0, 0]);
+    let out = scan(format!("[{}]", STANDARD.encode(&padded)).as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    // Text glued after the Base64, with and without padding.
+    let encoded = leaf_base64();
+    let out = scan(format!("{encoded}\nGARBAGEGARBAGE e mais lixo").as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+    let out = scan(format!("{encoded}GARBAGEGARBAGE e mais lixo").as_bytes());
+    assert_eq!(ders(&out), vec![&leaf]);
+}
+
+#[test]
+fn quando_base64_declara_mais_do_que_tem_deve_dar_length_mismatch() {
+    let encoded = leaf_base64();
+    let cut = &encoded[..encoded.len() / 2];
+    let out = scan(format!("\"{cut}\"").as_bytes());
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![RejectReason::LengthMismatch]);
+}
+
+#[test]
+fn quando_base64_passa_do_limite_de_tamanho_deve_dar_too_large() {
+    let limits = Limits {
+        max_cert_der_bytes: 100,
+        ..Limits::default()
+    };
+    let out = scan_text(format!("\"{}\"", leaf_base64()).as_bytes(), &limits);
+    assert_eq!(out.candidates.len(), 0);
+    assert_eq!(reasons(&out), vec![RejectReason::TooLarge]);
+}
+
+#[test]
+fn quando_corrida_ja_foi_consumida_por_pem_deve_nao_duplicar_base64() {
+    // The PEM bodies are claimed by the PEM detector and must not be read
+    // again as bare Base64.
+    for file in [
+        "chain-3.pem",
+        "messy/s_client-output.txt",
+        "messy/pem-indented.txt",
+    ] {
+        let input = read(file);
+        let with_both = scan(&input);
+        let pem_only = file != "messy/pem-indented.txt";
+        let expected = if pem_only {
+            3 + usize::from(file.contains("s_client"))
+        } else {
+            3
+        };
+        assert_eq!(with_both.candidates.len(), expected, "{file}");
+        assert_eq!(with_both.diagnostics.len(), 0, "{file}");
+    }
+    let body = leaf_body_lines();
+    let text = format!(
+        "{}\nsolto: {}\n",
+        pem("CERTIFICATE", &body),
+        body.join("\n")
+    );
+    let out = scan(text.as_bytes());
+    assert_eq!(
+        out.candidates.len(),
+        2,
+        "o PEM e o base64 solto, cada um uma vez"
+    );
+    assert_eq!(out.diagnostics.len(), 0);
+}
+
+#[test]
+fn quando_pem_sem_end_deixa_sobra_base64_nao_deve_dar_panico() {
+    // The unterminated PEM claims only its Base64-looking lines; whatever is
+    // left stays visible to this detector (deduplication is a later task).
+    let body = leaf_body_lines();
+    let text = format!(
+        "-----BEGIN CERTIFICATE-----\n{}\nfim da mensagem\n{}\n",
+        body.join("\n"),
+        body.join("\n")
+    );
+    let out = scan(text.as_bytes());
+    assert!(reasons(&out).contains(&RejectReason::UnterminatedPem));
+    assert_ne!(out.candidates.len(), 0);
+}
+
+#[test]
+fn quando_base64_solto_passa_do_limite_de_certs_deve_marcar_truncado() {
+    let limits = Limits {
+        max_certs_per_source: 2,
+        ..Limits::default()
+    };
+    let out = scan_text(&read("messy/jwk-x5c.json"), &limits);
+    assert_eq!(out.candidates.len(), 2);
+    assert!(out.truncated);
+}
+
+#[test]
+fn quando_diagnostico_base64_e_formatado_deve_ter_so_offset_e_motivo() {
+    let text = format!("\"MIA{}\"", "A".repeat(300));
+    let out = scan(text.as_bytes());
+    assert_eq!(
+        format!("{:?}", out.diagnostics),
+        "[ScanDiagnostic { offset: 1, reason: NotDerSequence }]"
+    );
+}
+
+fn assert_fast(input: &[u8]) -> certtui_domain::extract::ScanOutcome {
+    let started = std::time::Instant::now();
+    let out = scan(input);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "demorou {:?}",
+        started.elapsed()
+    );
+    out
+}
+
+const FOUR_MIB: usize = 4 * 1024 * 1024;
+
+#[test]
+fn quando_mi_repetido_por_4_mib_deve_terminar_em_tempo_linear_base64() {
+    let input = "MI".repeat(FOUR_MIB / 2);
+    let _ = assert_fast(input.as_bytes());
+}
+
+#[test]
+fn quando_alfabeto_base64_sem_mi_por_4_mib_deve_terminar_em_tempo_linear() {
+    let _ = assert_fast("AB+/ cd_-\n".repeat(FOUR_MIB / 10).as_bytes());
+    let _ = assert_fast("A".repeat(FOUR_MIB).as_bytes());
+}
+
+#[test]
+fn quando_ha_muitas_corridas_curtas_deve_terminar_em_tempo_linear_base64() {
+    let _ = assert_fast("\"MI\",".repeat(FOUR_MIB / 5).as_bytes());
+    let _ = assert_fast("MI ".repeat(FOUR_MIB / 3).as_bytes());
+    let _ = assert_fast("MI\\n".repeat(FOUR_MIB / 4).as_bytes());
+    let _ = assert_fast(
+        format!("\"MIA{}\"\n", "A".repeat(210))
+            .repeat(FOUR_MIB / 216)
+            .as_bytes(),
+    );
+}
+
+#[test]
+fn quando_ha_muitos_certs_colados_deve_terminar_em_tempo_linear_base64() {
+    let leaf = leaf_base64();
+    let input = format!("{leaf}\n").repeat(FOUR_MIB / (leaf.len() + 1));
+    let out = assert_fast(input.as_bytes());
+    assert_eq!(out.candidates.len(), Limits::default().max_certs_per_source);
+    assert!(out.truncated);
 }

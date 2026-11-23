@@ -4,6 +4,7 @@
 //! linear time, uses no regular expressions and no recursion. It never keeps
 //! file content in its diagnostics, only offsets and reasons.
 
+mod base64_run;
 mod der_len;
 mod lines;
 mod pem;
@@ -196,6 +197,8 @@ impl Detections {
 pub fn scan_text(input: &[u8], limits: &Limits) -> ScanOutcome {
     let mut detections = Detections::new(limits);
     pem::detect(input, limits, &mut detections);
+    let claimed = detections.consumed.as_slice().to_vec();
+    base64_run::find_bare_base64(input, &claimed, limits, &mut detections);
     detections.into_outcome()
 }
 

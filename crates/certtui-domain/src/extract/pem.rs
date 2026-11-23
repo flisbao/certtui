@@ -19,7 +19,7 @@ const DASHES: &[u8] = b"-----";
 const MAX_LABEL_LEN: usize = 64;
 
 /// Standard alphabet, padding optional, trailing bits tolerated.
-const LENIENT: GeneralPurpose = GeneralPurpose::new(
+pub(super) const LENIENT: GeneralPurpose = GeneralPurpose::new(
     &STANDARD_ALPHABET,
     GeneralPurposeConfig::new()
         .with_decode_padding_mode(DecodePaddingMode::Indifferent)
@@ -82,7 +82,7 @@ const fn is_b64(b: u8) -> bool {
 }
 
 /// Upper bound on the Base64 characters of a body for `kind`.
-fn body_bound(kind: CandidateKind, limits: &Limits) -> usize {
+pub(super) fn body_bound(kind: CandidateKind, limits: &Limits) -> usize {
     let max_der = match kind {
         CandidateKind::Certificate => limits.max_cert_der_bytes,
         CandidateKind::Pkcs7 => limits.max_input_file_bytes,
@@ -177,7 +177,11 @@ fn base64_run_end(input: &[u8], body_start: usize, body_end: usize) -> usize {
 }
 
 /// Decodes a collected body and cuts it at the DER length it declares.
-fn decode_der(b64: &[u8], kind: CandidateKind, limits: &Limits) -> Result<Vec<u8>, RejectReason> {
+pub(super) fn decode_der(
+    b64: &[u8],
+    kind: CandidateKind,
+    limits: &Limits,
+) -> Result<Vec<u8>, RejectReason> {
     let mut der = LENIENT
         .decode(b64)
         .map_err(|_| RejectReason::InvalidBase64)?;
