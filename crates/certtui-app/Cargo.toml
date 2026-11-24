@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 async-trait = "0.1.92"
 certtui-domain = { path = "../certtui-domain" }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tokio-util = { version = "0.7.20", default-features = false }
 

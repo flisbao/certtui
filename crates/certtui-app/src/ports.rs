@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::LoadError;
 use crate::fetch::{FetchError, FetchRequest, FetchedChain};
+use crate::trust::{TrustAnchors, TrustError, TrustSource};
 
 /// Source of the current time.
 ///
@@ -105,4 +106,14 @@ pub trait ChainFetcher: Send + Sync {
         req: &FetchRequest,
         cancel: CancellationToken,
     ) -> Result<FetchedChain, FetchError>;
+}
+
+/// Provider that loads root trust anchors from configured sources.
+pub trait TrustStoreProvider: Send + Sync {
+    /// Loads trust anchors from the given `sources`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustError`] if a required custom CA file cannot be read.
+    fn anchors(&self, sources: &[TrustSource]) -> Result<TrustAnchors, TrustError>;
 }
