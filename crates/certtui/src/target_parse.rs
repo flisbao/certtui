@@ -18,9 +18,6 @@ const FILE_EXTENSIONS: &[&str] = &[
 /// The `<alvo>` argument cannot be used as a target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageError {
-    /// The argument is a valid network target, but inspecting network
-    /// targets is not available yet.
-    NetworkTarget,
     /// The argument looks like a network target but is malformed. The inner
     /// error never carries the offending text, so credentials in the
     /// argument cannot leak through `Display` or `Debug`.
@@ -30,7 +27,6 @@ pub enum UsageError {
 impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            UsageError::NetworkTarget => f.write_str("network targets arrive in a later release"),
             UsageError::Target(error) => write!(f, "{error}"),
         }
     }
@@ -294,14 +290,6 @@ mod tests {
                 "{arg}"
             );
         }
-    }
-
-    #[test]
-    fn quando_erro_de_rede_deve_ter_a_mensagem_da_especificacao() {
-        assert_eq!(
-            UsageError::NetworkTarget.to_string(),
-            "network targets arrive in a later release"
-        );
     }
 
     #[test]

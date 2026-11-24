@@ -6,14 +6,17 @@
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
-use certtui_domain::model::{CertificateRecord, FingerprintAlgorithm, FingerprintFormat};
+use certtui_domain::model::{
+    CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport,
+};
 
 use super::{View, labels};
 
 const INDENT: &str = "    ";
 
-/// Writes the text report: one block per selected certificate, then a
-/// `Notes:` section when the load produced diagnostics.
+/// Writes the text report: one block per selected certificate, a `Notes:`
+/// section when the load produced diagnostics, and, for a network target, the
+/// TLS session footer.
 ///
 /// # Errors
 ///
@@ -32,7 +35,43 @@ pub fn write(out: &mut dyn Write, view: &View<'_>) -> io::Result<()> {
             writeln!(out, "  - {}", labels::note_text(note))?;
         }
     }
-    Ok(())
+    write_session(out, view.report)
+}
+
+/// Separator of the footer segments (U+00B7).
+const SEPARATOR: &str = " \u{b7} ";
+
+/// The TLS footer: `TLSv1.3 · <cipher> · <peer ip> · handshake <n>ms`, then
+/// an optional line with the key exchange group, ALPN protocol and OCSP
+/// staple. Nothing for targets without a TLS session.
+fn write_session(out: &mut dyn Write, report: &InspectionReport) -> io::Result<()> {
+    let Some(tls) = &report.tls else {
+        return Ok(());
+    };
+    let mut footer = vec![
+        tls.version.clone(),
+        tls.cipher_suite.clone(),
+        tls.peer_ip.to_string(),
+    ];
+    if let Some(handshake) = report.timings.handshake {
+        footer.push(format!("handshake {}ms", handshake.as_millis()));
+    }
+    writeln!(out)?;
+    writeln!(out, "{}", labels::single_line(&footer.join(SEPARATOR)))?;
+    let mut details = Vec::new();
+    if let Some(group) = &tls.key_exchange_group {
+        details.push(format!("key exchange {group}"));
+    }
+    if let Some(alpn) = &tls.alpn {
+        details.push(format!("ALPN {alpn}"));
+    }
+    if let Some(staple) = &report.ocsp_staple {
+        details.push(format!("OCSP staple {} bytes", staple.len()));
+    }
+    if details.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "{}", labels::single_line(&details.join(SEPARATOR)))
 }
 
 fn line(out: &mut dyn Write, label: &str, value: &str) -> io::Result<()> {
@@ -208,7 +247,7 @@ fn public_key_text(record: &CertificateRecord) -> String {
 mod tests {
     use certtui_domain::model::LoadNote;
 
-    use super::super::testing::{make_hostile, report, report_with};
+    use super::super::testing::{make_hostile, network_report, report, report_with};
     use super::*;
 
     fn render(view: &View<'_>) -> String {
@@ -364,5 +403,67 @@ mod tests {
         assert!(text.contains("CRL Distribution Points: http://a/b\n"));
         assert_layout_intact(&text, 1);
         assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+    }
+
+    #[test]
+    fn quando_alvo_de_rede_deve_fechar_com_o_rodape_de_tls() {
+        let report = network_report(&["rsa2048-leaf"]);
+        let text = render(&view(&report));
+        assert!(
+            text.ends_with(
+                "\nTLSv1.3 \u{b7} TLS_AES_256_GCM_SHA384 \u{b7} 93.184.216.34 \u{b7} handshake 41ms\n\
+                 key exchange X25519 \u{b7} ALPN h2\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn quando_alvo_de_rede_tem_staple_deve_citar_o_tamanho() {
+        let mut report = network_report(&["rsa2048-leaf"]);
+        report.ocsp_staple = Some(vec![0; 1500]);
+        assert!(render(&view(&report)).contains("ALPN h2 \u{b7} OCSP staple 1500 bytes\n"));
+    }
+
+    #[test]
+    fn quando_sem_handshake_nem_detalhes_deve_ter_so_tres_segmentos() {
+        let mut report = network_report(&["rsa2048-leaf"]);
+        report.timings.handshake = None;
+        if let Some(tls) = &mut report.tls {
+            tls.key_exchange_group = None;
+            tls.alpn = None;
+        }
+        let text = render(&view(&report));
+        assert!(
+            text.ends_with("\nTLSv1.3 \u{b7} TLS_AES_256_GCM_SHA384 \u{b7} 93.184.216.34\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn quando_rodape_vem_depois_das_notas() {
+        let mut report = network_report(&["rsa2048-leaf"]);
+        report.notes = vec![LoadNote::Unparsable { offset: None }];
+        let text = render(&view(&report));
+        let notes = text.find("Notes:").unwrap();
+        let footer = text.find("TLSv1.3 ").unwrap();
+        assert!(notes < footer, "{text}");
+    }
+
+    #[test]
+    fn quando_tls_tem_controles_deve_sair_em_uma_linha_so() {
+        let mut report = network_report(&["rsa2048-leaf"]);
+        if let Some(tls) = &mut report.tls {
+            tls.cipher_suite = "X\n[9] Subject: forged\t".to_owned();
+        }
+        let text = render(&view(&report));
+        assert!(!text.contains("\n[9]"), "{text}");
+        assert!(text.contains("X\\n[9] Subject: forged\\t"), "{text}");
+    }
+
+    #[test]
+    fn quando_alvo_local_nao_deve_ter_rodape() {
+        let text = render(&view(&report(&["rsa2048-leaf"], Vec::new())));
+        assert!(!text.contains("TLSv"), "{text}");
     }
 }

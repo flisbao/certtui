@@ -1,5 +1,6 @@
 //! The result of inspecting one target.
 
+use std::fmt;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -80,7 +81,9 @@ pub enum RevocationStatus {
 }
 
 /// Everything learned about one target.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` prints the length of the stapled OCSP response, not its bytes.
+#[derive(Clone, PartialEq, Eq)]
 pub struct InspectionReport {
     /// What was inspected.
     pub target: Target,
@@ -99,8 +102,25 @@ pub struct InspectionReport {
     pub findings: Vec<Finding>,
     /// Phase durations.
     pub timings: Timings,
-    /// Read and extraction diagnostics (empty for network targets).
+    /// Read and extraction diagnostics. For network targets: one note per
+    /// presented certificate that could not be parsed.
     pub notes: Vec<LoadNote>,
+}
+
+impl fmt::Debug for InspectionReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InspectionReport")
+            .field("target", &self.target)
+            .field("tls", &self.tls)
+            .field("ocsp_staple_len", &self.ocsp_staple.as_ref().map(Vec::len))
+            .field("chain", &self.chain)
+            .field("trust", &self.trust)
+            .field("revocation", &self.revocation)
+            .field("findings", &self.findings)
+            .field("timings", &self.timings)
+            .field("notes", &self.notes)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -167,5 +187,26 @@ mod tests {
             serde_json::to_string(&info).unwrap(),
             r#"{"version":"TLSv1.3","cipher_suite":"TLS_AES_128_GCM_SHA256","key_exchange_group":null,"alpn":"h2","peer_ip":"192.0.2.1"}"#
         );
+    }
+
+    #[test]
+    fn quando_report_vai_para_debug_deve_mostrar_so_o_tamanho_do_staple() {
+        use crate::limits::Limits;
+        let report = InspectionReport {
+            target: Target::Stdin,
+            tls: None,
+            ocsp_staple: Some(vec![0xAB, 0xCD, 0xEF, 0x12, 0x34]),
+            chain: Chain::new(Vec::new(), &Limits::default()).unwrap(),
+            trust: TrustVerdict::NotEvaluated,
+            revocation: Vec::new(),
+            findings: Vec::new(),
+            timings: Timings::default(),
+            notes: Vec::new(),
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("ocsp_staple_len: Some(5)"), "{dbg}");
+        assert!(!dbg.contains("171"), "{dbg}");
+        assert!(!dbg.contains("[0xAB"), "{dbg}");
+        assert!(!dbg.contains("AB, CD"), "{dbg}");
     }
 }

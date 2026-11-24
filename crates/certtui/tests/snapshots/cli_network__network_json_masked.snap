@@ -1,0 +1,169 @@
+---
+source: crates/certtui/tests/cli_network.rs
+expression: "serde_json::to_string_pretty(&json).unwrap()"
+---
+{
+  "certificates": [
+    {
+      "basic_constraints": null,
+      "index": 0,
+      "issuer": {
+        "common_name": "certtui test intermediate",
+        "rfc4514": "CN=certtui test intermediate"
+      },
+      "keys": [
+        "aia",
+        "authority_key_id",
+        "basic_constraints",
+        "crl_distribution_points",
+        "extended_key_usage",
+        "extensions",
+        "fingerprints",
+        "index",
+        "issuer",
+        "key_usage",
+        "not_after",
+        "not_before",
+        "origin",
+        "public_key",
+        "scts",
+        "serial",
+        "signature_algorithm",
+        "subject",
+        "subject_alt_names",
+        "subject_key_id",
+        "version"
+      ],
+      "origin": {
+        "kind": "presented",
+        "position": 0
+      },
+      "subject": {
+        "common_name": "certtui test leaf",
+        "rfc4514": "CN=certtui test leaf"
+      },
+      "subject_alt_names": [
+        {
+          "type": "dns",
+          "value": "localhost"
+        },
+        {
+          "type": "ip",
+          "value": "127.0.0.1"
+        }
+      ]
+    },
+    {
+      "basic_constraints": {
+        "ca": true,
+        "path_len": 0
+      },
+      "index": 1,
+      "issuer": {
+        "common_name": "certtui test CA",
+        "rfc4514": "CN=certtui test CA"
+      },
+      "keys": [
+        "aia",
+        "authority_key_id",
+        "basic_constraints",
+        "crl_distribution_points",
+        "extended_key_usage",
+        "extensions",
+        "fingerprints",
+        "index",
+        "issuer",
+        "key_usage",
+        "not_after",
+        "not_before",
+        "origin",
+        "public_key",
+        "scts",
+        "serial",
+        "signature_algorithm",
+        "subject",
+        "subject_alt_names",
+        "subject_key_id",
+        "version"
+      ],
+      "origin": {
+        "kind": "presented",
+        "position": 1
+      },
+      "subject": {
+        "common_name": "certtui test intermediate",
+        "rfc4514": "CN=certtui test intermediate"
+      },
+      "subject_alt_names": []
+    },
+    {
+      "basic_constraints": {
+        "ca": true,
+        "path_len": null
+      },
+      "index": 2,
+      "issuer": {
+        "common_name": "certtui test CA",
+        "rfc4514": "CN=certtui test CA"
+      },
+      "keys": [
+        "aia",
+        "authority_key_id",
+        "basic_constraints",
+        "crl_distribution_points",
+        "extended_key_usage",
+        "extensions",
+        "fingerprints",
+        "index",
+        "issuer",
+        "key_usage",
+        "not_after",
+        "not_before",
+        "origin",
+        "public_key",
+        "scts",
+        "serial",
+        "signature_algorithm",
+        "subject",
+        "subject_alt_names",
+        "subject_key_id",
+        "version"
+      ],
+      "origin": {
+        "kind": "presented",
+        "position": 2
+      },
+      "subject": {
+        "common_name": "certtui test CA",
+        "rfc4514": "CN=certtui test CA"
+      },
+      "subject_alt_names": []
+    }
+  ],
+  "notes": [],
+  "ocsp_staple": {
+    "bytes": 0,
+    "present": false
+  },
+  "schema_version": 1,
+  "target": {
+    "connect_to": "127.0.0.1:[port]",
+    "host": "localhost",
+    "kind": "network",
+    "port": "[port]",
+    "sni": "alt.example.test"
+  },
+  "timings": {
+    "connect": "[ms]",
+    "dns": null,
+    "handshake": "[ms]",
+    "total": "[ms]"
+  },
+  "tls": {
+    "alpn": "h2",
+    "cipher_suite": "TLS13_AES_256_GCM_SHA384",
+    "key_exchange_group": "X25519",
+    "peer_ip": "127.0.0.1",
+    "version": "TLSv1.3"
+  }
+}

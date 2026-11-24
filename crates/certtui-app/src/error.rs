@@ -3,6 +3,8 @@
 use certtui_domain::model::LoadNote;
 use thiserror::Error;
 
+use crate::fetch::FetchError;
+
 /// Error loading certificates from a local source (file, stdin, directory).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LoadError {
@@ -34,6 +36,29 @@ pub enum LoadError {
     #[error("found {len} certificates, above the limit of {max}")]
     TooManyCerts {
         /// Number of certificates found.
+        len: usize,
+        /// The configured maximum.
+        max: usize,
+    },
+}
+
+/// Error inspecting a network target.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum InspectError {
+    /// The chain could not be fetched (or the peer presented none).
+    #[error(transparent)]
+    Fetch(#[from] FetchError),
+    /// The peer presented certificates, but none of them parses. `notes`
+    /// holds one diagnostic per failure (never any content).
+    #[error("none of the presented certificates could be parsed")]
+    NoUsableCertificates {
+        /// Diagnostics collected while parsing.
+        notes: Vec<LoadNote>,
+    },
+    /// The peer presented more certificates than `Limits::max_chain_len`.
+    #[error("the peer presented {len} certificates, above the limit of {max}")]
+    ChainTooLong {
+        /// Number of certificates presented.
         len: usize,
         /// The configured maximum.
         max: usize,

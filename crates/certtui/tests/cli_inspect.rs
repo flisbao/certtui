@@ -121,16 +121,19 @@ fn quando_arquivo_inexistente_sem_barra_mas_com_extensao_de_cert_deve_sair_3() {
 }
 
 #[test]
-fn quando_alvo_e_dominio_deve_sair_2_com_mensagem() {
-    for target in ["example.com", "example.com:8443", "https://example.com/x"] {
+fn quando_alvo_de_rede_e_inalcancavel_deve_sair_3_com_mensagem_curta() {
+    // Syntactically valid network targets are no longer usage errors; a
+    // closed local port fails fast and offline.
+    for target in ["127.0.0.1:1", "localhost:1", "https://127.0.0.1:1/x"] {
         let out = certtui().args(["inspect", target]).output().unwrap();
-        assert_eq!(out.status.code(), Some(2), "{target}");
+        assert_eq!(out.status.code(), Some(3), "{target}");
         assert_eq!(out.stdout, Vec::<u8>::new(), "{target}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains("network targets arrive in a later release"),
+            stderr.starts_with("certtui: connection failed"),
             "{target}: {stderr}"
         );
+        assert_eq!(stderr.lines().count(), 1, "{target}: {stderr}");
     }
 }
 

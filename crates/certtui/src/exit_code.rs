@@ -1,6 +1,6 @@
 //! Process exit codes (spec section 8).
 
-use certtui_app::error::LoadError;
+use certtui_app::error::{InspectError, LoadError};
 
 /// Exit status of the CLI.
 #[repr(u8)]
@@ -24,6 +24,14 @@ impl From<&LoadError> for ExitCode {
     }
 }
 
+impl From<&InspectError> for ExitCode {
+    fn from(_error: &InspectError) -> Self {
+        // The target was valid but could not be reached, spoke no usable
+        // TLS or presented no usable certificate: an input problem.
+        ExitCode::Input
+    }
+}
+
 impl From<ExitCode> for std::process::ExitCode {
     fn from(code: ExitCode) -> Self {
         std::process::ExitCode::from(code as u8)
@@ -32,6 +40,8 @@ impl From<ExitCode> for std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use certtui_app::fetch::FetchError;
+
     use super::*;
 
     #[test]
@@ -51,6 +61,19 @@ mod tests {
             LoadError::Unsupported("x"),
             LoadError::Malformed("x".to_owned()),
             LoadError::TooManyCerts { len: 2, max: 1 },
+        ];
+        for error in &errors {
+            assert_eq!(ExitCode::from(error), ExitCode::Input, "{error}");
+        }
+    }
+
+    #[test]
+    fn quando_inspect_error_deve_virar_input() {
+        let errors = [
+            InspectError::Fetch(FetchError::EmptyChain),
+            InspectError::Fetch(FetchError::Cancelled),
+            InspectError::NoUsableCertificates { notes: Vec::new() },
+            InspectError::ChainTooLong { len: 3, max: 2 },
         ];
         for error in &errors {
             assert_eq!(ExitCode::from(error), ExitCode::Input, "{error}");

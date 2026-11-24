@@ -9,7 +9,7 @@ mod labels;
 pub mod pem;
 pub mod text;
 
-pub use labels::note_text;
+pub use labels::{note_text, single_line};
 
 /// What to render: a report, optionally narrowed to one certificate, with the
 /// fingerprint format to display.
@@ -100,6 +100,36 @@ pub(crate) mod testing {
             path: PathBuf::from(format!("dir/{forged}.pem")),
             index: 0,
         };
+    }
+
+    /// A report of a network target with a TLS session, as `inspect_network`
+    /// builds it.
+    pub(crate) fn network_report(names: &[&str]) -> InspectionReport {
+        use certtui_domain::model::TlsSessionInfo;
+        use certtui_domain::target::NetworkTarget;
+        use std::time::Duration;
+
+        let mut report = report(names, Vec::new());
+        report.target = Target::Network(NetworkTarget {
+            host: "example.test".to_owned(),
+            port: 8443,
+            sni: Some("alt.example.test".to_owned()),
+            connect_to: Some("127.0.0.1:9443".parse().unwrap()),
+        });
+        report.tls = Some(TlsSessionInfo {
+            version: "TLSv1.3".to_owned(),
+            cipher_suite: "TLS_AES_256_GCM_SHA384".to_owned(),
+            key_exchange_group: Some("X25519".to_owned()),
+            alpn: Some("h2".to_owned()),
+            peer_ip: "93.184.216.34".parse().unwrap(),
+        });
+        report.timings = Timings {
+            dns: None,
+            connect: Some(Duration::from_millis(12)),
+            handshake: Some(Duration::from_millis(41)),
+            total: Some(Duration::from_micros(60_900)),
+        };
+        report
     }
 
     pub(crate) fn report(names: &[&str], notes: Vec<LoadNote>) -> InspectionReport {

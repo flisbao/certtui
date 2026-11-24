@@ -6,6 +6,8 @@ pub mod fetch;
 
 pub mod inspect;
 
+pub mod inspect_network;
+
 pub mod ports;
 
 #[cfg(any(test, feature = "testing"))]

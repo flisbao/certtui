@@ -16,11 +16,26 @@ certtui-infra = { path = "../certtui-infra" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Runtime of the network commands: multi-threaded, built only for network
+# targets. No signal handling: the default SIGINT disposition ends the process.
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread"] }
+# `CancellationToken` of the `ChainFetcher` port (same version as `certtui-app`).
+tokio-util = { version = "0.7.20", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"
+async-trait = "0.1.92"
+# `FakeChainFetcher` and friends for the CLI unit tests.
+certtui-app = { path = "../certtui-app", features = ["testing"] }
 insta = "1"
 rcgen = "0.14"
+# The in-process TLS server of `certtui-infra/tests/support` is compiled into
+# `tests/cli_network.rs` with `#[path]`; these are the crates it needs. Provider
+# `ring` only, same as `certtui-infra` (no aws-lc).
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1.16.0", features = ["std"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "time"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 
 [lints]
 workspace = true

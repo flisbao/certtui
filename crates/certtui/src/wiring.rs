@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use certtui_infra::source::FsSourceLoader;
+use certtui_infra::tls::RustlsChainFetcher;
 
 use crate::cli;
 use crate::exit_code::ExitCode;
@@ -10,9 +11,15 @@ use crate::exit_code::ExitCode;
 /// Runs the CLI against the real process environment.
 pub fn run_process() -> std::process::ExitCode {
     let loader = FsSourceLoader::new();
+    // Cheap to build: the async runtime only starts for network targets.
+    let fetcher = RustlsChainFetcher::new();
+    let env = cli::Env {
+        loader: &loader,
+        fetcher: &fetcher,
+    };
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();
-    let result = cli::run(std::env::args_os(), &loader, &mut out, &mut err)
+    let result = cli::run(std::env::args_os(), &env, &mut out, &mut err)
         .and_then(|code| out.flush().map(|()| code).map_err(anyhow::Error::from));
     exit_code_for(result, &mut err).into()
 }

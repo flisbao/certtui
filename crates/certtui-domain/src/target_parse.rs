@@ -63,6 +63,27 @@ pub fn parse_network_target(arg: &str) -> Result<NetworkTarget, TargetError> {
     })
 }
 
+/// Validates and normalizes a `--sni` value: a DNS name (lowercased,
+/// punycode, one trailing dot removed) or an IP literal.
+///
+/// The rules are those of the host of [`parse_network_target`]; an IPv6
+/// literal is given without brackets. An IP literal is accepted because the
+/// TLS client then simply sends no SNI.
+///
+/// # Errors
+///
+/// [`TargetError::InvalidHost`] for an empty, over-long or malformed name
+/// (spaces, bad IDNA, empty labels, ...). The value is never echoed.
+pub fn parse_sni(name: &str) -> Result<String, TargetError> {
+    if name.len() > MAX_RAW_HOST_BYTES {
+        return Err(TargetError::InvalidHost);
+    }
+    match name.parse::<Ipv6Addr>() {
+        Ok(addr) => Ok(addr.to_string()),
+        Err(_) => normalize_host(name),
+    }
+}
+
 /// Removes an `https://` prefix; rejects any other scheme.
 fn strip_scheme(arg: &str) -> Result<&str, TargetError> {
     let Some((scheme, rest)) = arg.split_once("://") else {
@@ -363,5 +384,47 @@ mod tests {
             parse_network_target("1http://x"),
             Err(TargetError::InvalidHost)
         );
+    }
+
+    #[test]
+    fn quando_sni_e_nome_dns_deve_normalizar_para_minusculas_e_punycode() {
+        assert_eq!(parse_sni("Example.COM").as_deref(), Ok("example.com"));
+        assert_eq!(parse_sni("example.com.").as_deref(), Ok("example.com"));
+        assert_eq!(
+            parse_sni("b\u{fc}cher.example").as_deref(),
+            Ok("xn--bcher-kva.example")
+        );
+    }
+
+    #[test]
+    fn quando_sni_e_literal_ip_deve_aceitar() {
+        assert_eq!(parse_sni("127.0.0.1").as_deref(), Ok("127.0.0.1"));
+        assert_eq!(parse_sni("::1").as_deref(), Ok("::1"));
+        assert_eq!(parse_sni("2001:DB8::1").as_deref(), Ok("2001:db8::1"));
+    }
+
+    #[test]
+    fn quando_sni_invalido_deve_ser_invalid_host_sem_eco() {
+        let too_long_label = "a".repeat(64);
+        let too_long_name = format!("{}.com", "a.".repeat(130));
+        for name in [
+            "",
+            " ",
+            "a b.example",
+            "exa mple.com",
+            "-bad.example",
+            "bad_name.example",
+            "a..b",
+            ".",
+            "ex\u{0}ample.com",
+            "[::1]",
+            "example.com:443",
+            "xn--zz.example",
+            &too_long_label,
+            &too_long_name,
+        ] {
+            let err = parse_sni(name).unwrap_err();
+            assert_eq!(err, TargetError::InvalidHost, "{name:?}");
+        }
     }
 }

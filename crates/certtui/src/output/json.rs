@@ -1,6 +1,9 @@
 //! `--json`: the public, versioned machine-readable report.
 //!
 //! Contract: `schema_version` stays `1`; later milestones may only add fields.
+//! Network targets add `tls`, `timings` and `ocsp_staple` (and the `sni` and
+//! `connect_to` of the target); the documents of local targets do not carry
+//! them.
 //! Text taken from the certificate is passed through `sanitize_display` so the
 //! output is also safe to show in a terminal (JSON escaping alone leaves C1
 //! controls and bidi overrides untouched).
@@ -9,8 +12,11 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
+use std::time::Duration;
+
 use certtui_domain::model::{
-    CertOrigin, CertificateRecord, FingerprintAlgorithm, FingerprintFormat, KeyId, LoadNote,
+    CertOrigin, CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport,
+    KeyId, LoadNote, Timings, TlsSessionInfo,
 };
 use certtui_domain::sanitize::sanitize_display;
 use certtui_domain::target::Target;
@@ -29,6 +35,12 @@ fn clean(text: &str) -> Cow<'_, str> {
 struct Document<'a> {
     schema_version: u8,
     target: JsonTarget<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls: Option<JsonTls<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timings: Option<JsonTimings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ocsp_staple: Option<JsonStaple>,
     notes: &'a [LoadNote],
     certificates: Vec<JsonCertificate<'a>>,
 }
@@ -36,10 +48,44 @@ struct Document<'a> {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JsonTarget<'a> {
-    Network { host: Cow<'a, str>, port: u16 },
-    File { path: Cow<'a, str> },
-    Directory { path: Cow<'a, str>, recursive: bool },
+    Network {
+        host: Cow<'a, str>,
+        port: u16,
+        sni: Option<Cow<'a, str>>,
+        connect_to: Option<String>,
+    },
+    File {
+        path: Cow<'a, str>,
+    },
+    Directory {
+        path: Cow<'a, str>,
+        recursive: bool,
+    },
     Stdin,
+}
+
+#[derive(Serialize)]
+struct JsonTls<'a> {
+    version: Cow<'a, str>,
+    cipher_suite: Cow<'a, str>,
+    key_exchange_group: Option<Cow<'a, str>>,
+    alpn: Option<Cow<'a, str>>,
+    peer_ip: String,
+}
+
+/// Phase durations in whole milliseconds (`null` for a phase that did not run).
+#[derive(Serialize)]
+struct JsonTimings {
+    dns: Option<u64>,
+    connect: Option<u64>,
+    handshake: Option<u64>,
+    total: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct JsonStaple {
+    present: bool,
+    bytes: usize,
 }
 
 #[derive(Serialize)]
@@ -156,9 +202,14 @@ struct JsonCertificate<'a> {
 ///
 /// Any I/O error of `out`.
 pub fn write(out: &mut dyn Write, view: &View<'_>) -> io::Result<()> {
+    let report = view.report;
+    let is_network = matches!(report.target, Target::Network(_));
     let document = Document {
         schema_version: SCHEMA_VERSION,
-        target: target(&view.report.target),
+        target: target(&report.target),
+        tls: report.tls.as_ref().map(tls),
+        timings: is_network.then(|| timings(&report.timings)),
+        ocsp_staple: is_network.then(|| staple(report)),
         notes: &view.report.notes,
         certificates: view
             .certs()
@@ -169,11 +220,42 @@ pub fn write(out: &mut dyn Write, view: &View<'_>) -> io::Result<()> {
     writeln!(out)
 }
 
+fn tls(info: &TlsSessionInfo) -> JsonTls<'_> {
+    JsonTls {
+        version: clean(&info.version),
+        cipher_suite: clean(&info.cipher_suite),
+        key_exchange_group: info.key_exchange_group.as_deref().map(clean),
+        alpn: info.alpn.as_deref().map(clean),
+        peer_ip: info.peer_ip.to_string(),
+    }
+}
+
+fn timings(timings: &Timings) -> JsonTimings {
+    let millis = |duration: Option<Duration>| {
+        duration.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    };
+    JsonTimings {
+        dns: millis(timings.dns),
+        connect: millis(timings.connect),
+        handshake: millis(timings.handshake),
+        total: millis(timings.total),
+    }
+}
+
+fn staple(report: &InspectionReport) -> JsonStaple {
+    JsonStaple {
+        present: report.ocsp_staple.is_some(),
+        bytes: report.ocsp_staple.as_ref().map_or(0, Vec::len),
+    }
+}
+
 fn target(target: &Target) -> JsonTarget<'_> {
     match target {
         Target::Network(network) => JsonTarget::Network {
             host: clean(&network.host),
             port: network.port,
+            sni: network.sni.as_deref().map(clean),
+            connect_to: network.connect_to.map(|addr| addr.to_string()),
         },
         Target::File(path) => JsonTarget::File {
             path: lossy_path(path),
@@ -324,7 +406,7 @@ fn certificate(
 mod tests {
     use serde_json::Value;
 
-    use super::super::testing::report;
+    use super::super::testing::{network_report, report};
     use super::*;
 
     fn render(report: &certtui_domain::model::InspectionReport, only: Option<usize>) -> Value {
@@ -430,5 +512,75 @@ mod tests {
             render(&report, None)["target"],
             serde_json::json!({"kind": "directory", "path": "d", "recursive": true})
         );
+    }
+
+    #[test]
+    fn quando_alvo_de_rede_deve_ter_tls_timings_staple_e_target_completo() {
+        let mut report = network_report(&["rsa2048-leaf"]);
+        report.ocsp_staple = Some(vec![1, 2, 3]);
+        let json = render(&report, None);
+        assert_eq!(
+            json["target"],
+            serde_json::json!({
+                "kind": "network",
+                "host": "example.test",
+                "port": 8443,
+                "sni": "alt.example.test",
+                "connect_to": "127.0.0.1:9443",
+            })
+        );
+        assert_eq!(
+            json["tls"],
+            serde_json::json!({
+                "version": "TLSv1.3",
+                "cipher_suite": "TLS_AES_256_GCM_SHA384",
+                "key_exchange_group": "X25519",
+                "alpn": "h2",
+                "peer_ip": "93.184.216.34",
+            })
+        );
+        assert_eq!(
+            json["timings"],
+            serde_json::json!({"dns": null, "connect": 12, "handshake": 41, "total": 60})
+        );
+        assert_eq!(
+            json["ocsp_staple"],
+            serde_json::json!({"present": true, "bytes": 3})
+        );
+    }
+
+    #[test]
+    fn quando_alvo_de_rede_sem_staple_nem_sni_deve_ter_nulls_e_present_false() {
+        let mut report = network_report(&["rsa2048-leaf"]);
+        report.ocsp_staple = None;
+        if let Target::Network(network) = &mut report.target {
+            network.sni = None;
+            network.connect_to = None;
+        }
+        let json = render(&report, None);
+        assert_eq!(json["target"]["sni"], serde_json::Value::Null);
+        assert_eq!(json["target"]["connect_to"], serde_json::Value::Null);
+        assert_eq!(
+            json["ocsp_staple"],
+            serde_json::json!({"present": false, "bytes": 0})
+        );
+    }
+
+    #[test]
+    fn quando_alvo_local_nao_deve_ter_chaves_de_rede() {
+        let json = render(&report(&["rsa2048-leaf"], Vec::new()), None);
+        for key in ["tls", "timings", "ocsp_staple"] {
+            assert!(json.get(key).is_none(), "{key}");
+        }
+        assert!(json["target"].get("sni").is_none());
+    }
+
+    #[test]
+    fn quando_tls_tem_controles_deve_sair_sanitizado() {
+        let mut report = network_report(&["rsa2048-leaf"]);
+        if let Some(tls) = &mut report.tls {
+            tls.alpn = Some("h2\u{9b}\u{202E}x".to_owned());
+        }
+        assert_eq!(render(&report, None)["tls"]["alpn"], "h2x");
     }
 }
