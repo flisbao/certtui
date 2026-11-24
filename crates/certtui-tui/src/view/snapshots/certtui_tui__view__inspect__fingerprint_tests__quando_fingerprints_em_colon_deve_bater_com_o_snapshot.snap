@@ -1,0 +1,28 @@
+---
+source: crates/certtui-tui/src/view/inspect.rs
+expression: "text(&render(&fingerprints_state(), 80, 24))"
+---
+┌ Chain ──────────────────┐┌ Details ──────────────────────────────────────────┐
+│▸⚠ rsa2048.example.test  ││‹ Subject/Issuer  SANs  Extensions  Fingerprints  R│
+│    presented by server,…││SHA-1:           30:81:04:8E:0A:93:8E:48:1C:99:A9:1│
+│ ✔ ec-p256.example.test  ││                 A:E8:F4:D4:2C:64:AC:2B:67         │
+│    presented by server,…││SHA-256:         DD:DB:9B:86:33:47:FC:84:96:10:30:C│
+│ ✖ expired.example.test  ││                 3:F4:C5:7C:66:CA:BF:92:1E:D4:B4:3A│
+│    presented by server,…││                 :15:CE:41:B7:9F:39:A6:63:BB       │
+│                         ││SHA-512:         4B:9F:67:AB:41:81:D7:1E:97:44:4C:7│
+│                         ││                 F:48:F6:61:8E:77:B2:AE:9C:27:7C:28│
+│                         ││                 :47:5B:DA:60:A0:C3:09:22:F2:B4:3D:│
+│                         ││                 01:43:C7:C8:76:90:2C:AE:59:E8:D5:3│
+│                         ││                 5:33:FF:D4:E8:E1:19:4C:A0:CD:AA:74│
+│                         ││                 :45:3B:F6:CF:0C:90:ED             │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+└─────────────────────────┘└───────────────────────────────────────────────────┘
+TLSv1.3 · TLS_AES_256_GCM_SHA384 · 192.0.2.7 · handshake 42ms · total 120ms

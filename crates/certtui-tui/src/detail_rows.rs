@@ -461,3 +461,45 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use crate::test_fixtures::sample_report;
+
+    fn copy_text(format: FingerprintFormat, label: &str) -> String {
+        let report = sample_report();
+        rows_for_tab(&report, 0, Tab::Fingerprints, format)
+            .into_iter()
+            .find(|row| row.label == label)
+            .map(|row| row.copy_text)
+            .unwrap()
+    }
+
+    #[test]
+    fn quando_sha512_em_colon_deve_ter_191_caracteres_no_copy_text() {
+        assert_eq!(
+            copy_text(FingerprintFormat::ColonHexUpper, "SHA-512").len(),
+            191
+        );
+        assert_eq!(
+            copy_text(FingerprintFormat::ColonHexUpper, "SHA-256").len(),
+            95
+        );
+        assert_eq!(
+            copy_text(FingerprintFormat::ColonHexUpper, "SHA-1").len(),
+            59
+        );
+    }
+
+    #[test]
+    fn quando_hex_minusculo_e_base64_deve_ter_os_tamanhos_do_formato() {
+        assert_eq!(copy_text(FingerprintFormat::HexLower, "SHA-512").len(), 128);
+        assert!(
+            copy_text(FingerprintFormat::HexLower, "SHA-256")
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        );
+        assert_eq!(copy_text(FingerprintFormat::Base64, "SHA-512").len(), 88);
+    }
+}

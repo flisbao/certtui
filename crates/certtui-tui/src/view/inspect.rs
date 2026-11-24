@@ -7,8 +7,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::tabs::{fit, render_rows, render_tab_bar};
-use crate::app_state::{AppState, InspectState, Pane, Phase};
+use super::tabs::{RowsView, fit, render_rows, render_tab_bar};
+use crate::app_state::{AppState, InspectState, Pane, Phase, Tab};
 use crate::detail_rows::{CertStatus, cert_status, cert_title, rows_for_tab};
 use crate::theme::Theme;
 
@@ -90,15 +90,14 @@ fn render_ready(
         inspect.tab,
         state.fingerprint_format,
     );
-    render_rows(
-        frame,
-        rows_area,
-        &rows,
-        usize::from(inspect.scroll),
-        inspect.row_cursor,
-        inspect.pane,
-        theme,
-    );
+    let view = RowsView {
+        rows: &rows,
+        scroll: usize::from(inspect.scroll),
+        cursor: inspect.row_cursor,
+        focused: inspect.pane == Pane::Details,
+        wrap: inspect.tab == Tab::Fingerprints,
+    };
+    render_rows(frame, rows_area, &view, theme);
 }
 
 fn render_chain(
@@ -314,5 +313,86 @@ mod tests {
             inspect.selected_cert = 2;
         }
         insta::assert_snapshot!(text(&render(&state, 120, 40)));
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use certtui_domain::model::FingerprintFormat;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use crate::app_state::{Pane, Tab};
+    use crate::msg::Msg;
+    use crate::test_fixtures::{inspect_state, sample_report};
+    use crate::update::update;
+    use crate::update_inspect::current_rows;
+    use crate::view::test_support::{render, text};
+
+    fn fingerprints_state() -> crate::app_state::AppState {
+        let mut state = inspect_state(sample_report());
+        if let Some(inspect) = state.inspect.as_mut() {
+            inspect.tab = Tab::Fingerprints;
+            inspect.pane = Pane::Details;
+        }
+        state
+    }
+
+    fn key(c: char) -> Msg {
+        Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn quando_largura_nao_cabe_deve_quebrar_na_tela_mas_copy_text_continua_sem_quebra() {
+        let state = fingerprints_state();
+        let screen = text(&render(&state, 80, 24));
+        // The SHA-512 (191 characters) takes several screen lines.
+        let sha512 = current_rows(&state)
+            .into_iter()
+            .find(|row| row.label == "SHA-512")
+            .unwrap();
+        assert_eq!(sha512.copy_text.len(), 191);
+        assert!(!sha512.copy_text.contains('\n'));
+        assert!(!screen.contains(&sha512.value), "unwrapped value on screen");
+        // Every character of the digest is on screen, only split across lines.
+        let on_screen: String = screen
+            .lines()
+            .filter_map(|line| line.split('\u{2502}').nth(3))
+            .collect::<String>()
+            .replace([' ', ':'], "");
+        let digest_chars: String = sha512.copy_text.replace(':', "");
+        assert!(on_screen.contains(&digest_chars[..20]), "{screen}");
+    }
+
+    #[test]
+    fn quando_x_deve_mudar_formato_do_copy_text_para_hex_minusculo_e_depois_base64() {
+        let mut state = fingerprints_state();
+        let sha256 = |state: &crate::app_state::AppState| {
+            current_rows(state)
+                .into_iter()
+                .find(|row| row.label == "SHA-256")
+                .unwrap()
+                .copy_text
+        };
+        assert!(sha256(&state).contains(':'));
+        update(&mut state, key('x'));
+        assert_eq!(state.fingerprint_format, FingerprintFormat::HexLower);
+        assert_eq!(sha256(&state).len(), 64);
+        assert!(!sha256(&state).contains(':'));
+        update(&mut state, key('x'));
+        assert_eq!(sha256(&state).len(), 44);
+        assert!(sha256(&state).ends_with('='));
+    }
+
+    #[test]
+    fn quando_fingerprints_em_colon_deve_bater_com_o_snapshot() {
+        insta::assert_snapshot!(text(&render(&fingerprints_state(), 80, 24)));
+    }
+
+    #[test]
+    fn quando_fingerprints_em_base64_deve_bater_com_o_snapshot() {
+        let mut state = fingerprints_state();
+        update(&mut state, key('x'));
+        update(&mut state, key('x'));
+        insta::assert_snapshot!(text(&render(&state, 80, 24)));
     }
 }

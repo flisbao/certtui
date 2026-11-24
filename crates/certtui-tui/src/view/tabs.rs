@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app_state::{Pane, Tab};
+use crate::app_state::Tab;
 use crate::detail_rows::DetailRow;
 use crate::theme::Theme;
 
@@ -49,37 +49,52 @@ pub fn render_tab_bar(frame: &mut Frame, area: Rect, active: Tab, theme: &Theme)
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Draws `rows` from `scroll`, the one at `cursor` highlighted when `focused`.
-pub fn render_rows(
-    frame: &mut Frame,
-    area: Rect,
-    rows: &[DetailRow],
-    scroll: usize,
-    cursor: usize,
-    pane: Pane,
-    theme: &Theme,
-) {
+/// What [`render_rows`] draws.
+#[derive(Debug, Clone, Copy)]
+pub struct RowsView<'a> {
+    /// All the rows of the tab.
+    pub rows: &'a [DetailRow],
+    /// First row drawn.
+    pub scroll: usize,
+    /// Row under the cursor.
+    pub cursor: usize,
+    /// Whether the details pane has focus (the cursor row is highlighted).
+    pub focused: bool,
+    /// Break long values over several lines instead of cutting them.
+    ///
+    /// Only the drawing breaks: the copied text is never touched.
+    pub wrap: bool,
+}
+
+/// Draws the rows of `view` in `area`.
+pub fn render_rows(frame: &mut Frame, area: Rect, view: &RowsView<'_>, theme: &Theme) {
     let width = usize::from(area.width);
-    let lines: Vec<Line> = rows
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(usize::from(area.height))
-        .map(|(index, row)| {
-            let selected = pane == Pane::Details && index == cursor;
-            row_line(row, width, selected, theme)
-        })
-        .collect();
+    let height = usize::from(area.height);
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, row) in view.rows.iter().enumerate().skip(view.scroll) {
+        if lines.len() >= height {
+            break;
+        }
+        let selected = view.focused && index == view.cursor;
+        lines.extend(row_lines(row, width, selected, view.wrap, theme));
+    }
+    lines.truncate(height);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn row_line(row: &DetailRow, width: usize, selected: bool, theme: &Theme) -> Line<'static> {
-    let (label, value) = if row.label.is_empty() {
-        (String::from("  "), fit(&row.value, width.saturating_sub(2)))
+fn row_lines(
+    row: &DetailRow,
+    width: usize,
+    selected: bool,
+    wrap: bool,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let (label, value_width) = if row.label.is_empty() {
+        (String::from("  "), width.saturating_sub(2))
     } else {
         (
             format!("{:<LABEL_WIDTH$}", format!("{}:", row.label)),
-            fit(&row.value, width.saturating_sub(LABEL_WIDTH)),
+            width.saturating_sub(LABEL_WIDTH),
         )
     };
     let (label_style, value_style) = if selected {
@@ -87,10 +102,43 @@ fn row_line(row: &DetailRow, width: usize, selected: bool, theme: &Theme) -> Lin
     } else {
         (theme.dim, theme.base)
     };
-    Line::from(vec![
-        Span::styled(label, label_style),
-        Span::styled(value, value_style),
-    ])
+    let pieces = if wrap {
+        wrap_fixed(&row.value, value_width)
+    } else {
+        vec![fit(&row.value, value_width)]
+    };
+    let indent = " ".repeat(label.chars().count());
+    pieces
+        .into_iter()
+        .enumerate()
+        .map(|(i, piece)| {
+            let lead = if i == 0 {
+                label.clone()
+            } else {
+                indent.clone()
+            };
+            Line::from(vec![
+                Span::styled(lead, label_style),
+                Span::styled(piece, value_style),
+            ])
+        })
+        .collect()
+}
+
+/// `text` split into pieces of at most `width` characters (at least one piece).
+///
+/// Meant for ASCII values (hex and Base64 digests), where a character is one
+/// column.
+#[must_use]
+pub fn wrap_fixed(text: &str, width: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() || width == 0 {
+        return vec![String::new()];
+    }
+    chars
+        .chunks(width)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }
 
 /// `text` cut to at most `max` terminal columns, ending in `…` when cut.
