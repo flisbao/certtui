@@ -1,6 +1,6 @@
 //! Helpers shared by the lint tests.
 
-use rcgen::{CertificateParams, DnType, KeyPair};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use time::OffsetDateTime;
 
 use crate::chain_analysis::{ChainAnalysis, analyze_chain};
@@ -15,6 +15,8 @@ pub(crate) struct Fixture {
     pub analysis: ChainAnalysis,
     pub thresholds: Thresholds,
     pub trust: TrustVerdict,
+    /// Whether contexts report a network target.
+    pub network: bool,
 }
 
 /// A self-signed record valid between two Unix instants.
@@ -54,6 +56,7 @@ impl Fixture {
             analysis,
             thresholds: Thresholds::default(),
             trust: TrustVerdict::NotEvaluated,
+            network: false,
         }
     }
 
@@ -63,7 +66,7 @@ impl Fixture {
             chain: &self.chain,
             analysis: &self.analysis,
             hostname: None,
-            is_network_target: false,
+            is_network_target: self.network,
             now: ts(now),
             thresholds: &self.thresholds,
             trust: &self.trust,
@@ -71,4 +74,68 @@ impl Fixture {
             publicly_trusted,
         }
     }
+}
+
+/// DER certificates of a root -> intermediate -> leaf hierarchy.
+pub(crate) struct Pki {
+    pub root: Vec<u8>,
+    pub int: Vec<u8>,
+    pub leaf: Vec<u8>,
+}
+
+fn ca_params(cn: &str, ca: bool) -> CertificateParams {
+    let mut params = CertificateParams::new(Vec::new()).expect("params");
+    if ca {
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    }
+    params.distinguished_name.push(DnType::CommonName, cn);
+    params
+}
+
+/// A fresh hierarchy; every call yields unrelated keys.
+pub(crate) fn pki() -> Pki {
+    let root_key = KeyPair::generate().expect("key");
+    let root = ca_params("Root", true)
+        .self_signed(&root_key)
+        .expect("root");
+    let root_issuer = Issuer::new(ca_params("Root", true), root_key);
+    let int_key = KeyPair::generate().expect("key");
+    let int = ca_params("Int", true)
+        .signed_by(&int_key, &root_issuer)
+        .expect("int");
+    let int_issuer = Issuer::new(ca_params("Int", true), int_key);
+    let leaf_key = KeyPair::generate().expect("key");
+    let leaf = ca_params("leaf", false)
+        .signed_by(&leaf_key, &int_issuer)
+        .expect("leaf");
+    Pki {
+        root: root.der().to_vec(),
+        int: int.der().to_vec(),
+        leaf: leaf.der().to_vec(),
+    }
+}
+
+/// A self-signed non-CA certificate.
+pub(crate) fn self_signed_der() -> Vec<u8> {
+    let key = KeyPair::generate().expect("key");
+    ca_params("solo", false)
+        .self_signed(&key)
+        .expect("cert")
+        .der()
+        .to_vec()
+}
+
+/// A network-target fixture over `ders`, in presentation order.
+pub(crate) fn network_fixture(ders: &[&[u8]]) -> Fixture {
+    let records = ders
+        .iter()
+        .enumerate()
+        .map(|(position, der)| {
+            CertificateRecord::from_der(der, CertOrigin::Presented { position }, &Limits::default())
+                .expect("record")
+        })
+        .collect();
+    let mut fixture = Fixture::of(records);
+    fixture.network = true;
+    fixture
 }

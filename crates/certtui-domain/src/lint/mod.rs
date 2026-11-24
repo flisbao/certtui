@@ -7,12 +7,17 @@ use std::cmp::Reverse;
 use crate::finding::Finding;
 use crate::finding::FindingCode;
 
+mod chain;
 mod context;
 mod validity;
 
 #[cfg(test)]
 mod test_support;
 
+pub use chain::{
+    ChainDuplicateCertLint, ChainExtraCertLint, ChainIncompleteLint, ChainOrderWrongLint,
+    ChainRootSentLint, SelfSignedLeafLint,
+};
 pub use context::{LintContext, Thresholds};
 pub use validity::{
     ExpiredLint, ExpiresSoonCriticalLint, ExpiresSoonLint, NotYetValidLint, ValidityTooLongLint,
@@ -31,6 +36,12 @@ pub trait Lint: Send + Sync {
 #[must_use]
 pub fn registry() -> Vec<Box<dyn Lint>> {
     vec![
+        Box::new(ChainIncompleteLint),
+        Box::new(ChainOrderWrongLint),
+        Box::new(ChainDuplicateCertLint),
+        Box::new(ChainRootSentLint),
+        Box::new(ChainExtraCertLint),
+        Box::new(SelfSignedLeafLint),
         Box::new(ExpiredLint),
         Box::new(NotYetValidLint),
         Box::new(ExpiresSoonCriticalLint),
@@ -102,11 +113,19 @@ mod tests {
 
     #[test]
     fn quando_run_lints_deve_ordenar_achados_reais() {
-        // Expired and, being public, valid for far more than 398 days.
+        // Self-signed (rcgen), expired and, being public, valid for far more
+        // than 398 days: two errors ordered by code, then the warning.
         let fixture = Fixture::new(0, 500 * 86_400);
         let ctx = fixture.ctx(600 * 86_400, true);
         let findings = run_lints(&ctx);
         let codes: Vec<FindingCode> = findings.iter().map(|f| f.code).collect();
-        assert_eq!(codes, [FindingCode::Expired, FindingCode::ValidityTooLong]);
+        assert_eq!(
+            codes,
+            [
+                FindingCode::Expired,
+                FindingCode::SelfSignedLeaf,
+                FindingCode::ValidityTooLong
+            ]
+        );
     }
 }
