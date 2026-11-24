@@ -2,4 +2,5 @@
 
 pub mod clock;
 
-pub(crate) mod source;
+/// Local filesystem and standard-input source adapters.
+pub mod source;

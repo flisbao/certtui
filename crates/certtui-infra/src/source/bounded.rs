@@ -6,8 +6,6 @@ const INITIAL_CAPACITY: usize = 64 * 1024;
 const READ_CHUNK: usize = 8 * 1024;
 
 /// Reads at most `limit + 1` bytes and rejects input beyond `limit`.
-// Justificativa: o adaptador de fonte será conectado à porta no Task 15.
-#[allow(dead_code)]
 pub(crate) fn read_limited<R: Read>(reader: R, limit: usize) -> Result<Vec<u8>, LoadError> {
     read_limited_inner(reader, limit).0
 }

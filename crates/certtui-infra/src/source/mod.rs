@@ -1,7 +1,8 @@
-//! Bounded readers used by local source adapters.
+//! Filesystem and standard-input source loading with bounded content detection.
 
 mod bounded;
+mod format;
+mod fs;
+mod text;
 
-// Justificativa: a porta que consumirá esta função será adicionada no Task 15.
-#[allow(unused_imports)]
-pub(crate) use bounded::read_limited;
+pub use fs::FsSourceLoader;
