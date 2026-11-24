@@ -1,6 +1,6 @@
-//! Value parsers of the network-only options (`--sni`, `--connect-to`,
-//! `--timeout`). They run while the command line is parsed, so a bad value is
-//! a usage error before any network I/O.
+//! Parsers of the network-only options (`--sni`, `--connect-to`, `--timeout`).
+//! SNI is validated after Clap parses the raw string so an invalid value is
+//! never echoed by Clap in its usage error.
 
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
@@ -17,7 +17,8 @@ pub struct ConnectTo {
     pub port: Option<u16>,
 }
 
-/// Parses `--sni`: a DNS name (lowercased, punycode) or an IP literal.
+/// Validates and normalizes `--sni`: a DNS name (lowercased, punycode) or an
+/// IP literal.
 ///
 /// # Errors
 ///

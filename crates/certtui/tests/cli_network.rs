@@ -190,6 +190,21 @@ fn quando_sni_e_invalido_deve_sair_2_antes_de_conectar() {
 }
 
 #[test]
+fn quando_sni_invalido_tem_controles_deve_nao_ecoar_no_erro() {
+    let fixture = Fixture::start(Behavior::Ok);
+    let sni = "bad\nname\ttest\u{202e}";
+    let out = fixture.run(&[&format!("--sni={sni}")]);
+    let message = stderr(&out);
+
+    assert_eq!(out.status.code(), Some(2), "{message}");
+    assert_eq!(out.stdout, Vec::<u8>::new());
+    assert_eq!(message.lines().count(), 1, "{message:?}");
+    assert!(!message.contains('\t'), "{message:?}");
+    assert!(!message.contains('\u{202e}'), "{message:?}");
+    assert_eq!(fixture.server.accepted_connections(), 0);
+}
+
+#[test]
 fn quando_connect_to_e_invalido_deve_sair_2_sem_conectar() {
     let fixture = Fixture::start(Behavior::Ok);
     for value in ["localhost", "1.2.3.4:0", "1.2.3.4:99999", "[::1", "x"] {

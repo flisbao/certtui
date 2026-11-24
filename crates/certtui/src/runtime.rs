@@ -24,7 +24,12 @@ pub fn block_on<F: Future>(future: F) -> anyhow::Result<F::Output> {
         .enable_all()
         .build()
         .context("starting the async runtime")?;
-    Ok(runtime.block_on(future))
+    let output = runtime.block_on(future);
+    // DNS may have started a blocking OS resolver call. `Runtime::drop`
+    // waits for blocking jobs, which would extend the target deadline past
+    // the timeout result already returned by the future.
+    runtime.shutdown_background();
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -43,5 +48,26 @@ mod tests {
             true
         });
         assert!(slept.unwrap());
+    }
+
+    #[test]
+    fn quando_spawn_blocking_ultrapassa_future_deve_retornar_sem_esperar() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_at = std::time::Instant::now();
+        let result = block_on(async move {
+            let _blocking_job = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            });
+            started_rx.await.unwrap();
+            7
+        });
+        let elapsed = started_at.elapsed();
+
+        assert_eq!(result.unwrap(), 7);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "runtime shutdown waited {elapsed:?} for blocking DNS-like work"
+        );
     }
 }

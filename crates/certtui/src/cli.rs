@@ -28,6 +28,19 @@ pub struct Cli {
     /// What to do.
     #[command(subcommand)]
     pub command: Command,
+    /// Server name to send in SNI instead of the host (network targets only).
+    /// An IP literal sends no SNI.
+    #[arg(long, global = true, value_name = "NAME")]
+    sni: Option<String>,
+    /// Connect to this address instead of resolving the host: `IP`, `IP:PORT`
+    /// or `[IPV6]:PORT`; the port defaults to the target's (network targets
+    /// only).
+    #[arg(long, global = true, value_name = "IP[:PORT]", value_parser = parse_connect_to)]
+    connect_to: Option<ConnectTo>,
+    /// Overall time limit for the target, in seconds, up to a hard cap of
+    /// 120 (network targets only).
+    #[arg(long, global = true, value_name = "SECONDS", value_parser = parse_timeout)]
+    timeout: Option<std::time::Duration>,
 }
 
 /// Top-level subcommands.
@@ -94,19 +107,26 @@ pub struct InspectArgs {
     /// Accepted for compatibility; output never uses colors.
     #[arg(long)]
     pub no_color: bool,
-    /// Server name to send in SNI instead of the host (network targets only).
-    /// An IP literal sends no SNI.
-    #[arg(long, value_name = "NAME", value_parser = parse_sni)]
-    pub sni: Option<String>,
-    /// Connect to this address instead of resolving the host: `IP`, `IP:PORT`
-    /// or `[IPV6]:PORT`; the port defaults to the target's (network targets
-    /// only).
-    #[arg(long, value_name = "IP[:PORT]", value_parser = parse_connect_to)]
-    pub connect_to: Option<ConnectTo>,
-    /// Overall time limit for the target, in seconds, up to a hard cap of
-    /// 120 (network targets only).
-    #[arg(long, value_name = "SECONDS", value_parser = parse_timeout)]
-    pub timeout: Option<std::time::Duration>,
+}
+
+#[derive(Clone)]
+struct NetworkOptions {
+    sni: Option<String>,
+    connect_to: Option<ConnectTo>,
+    timeout: Option<std::time::Duration>,
+}
+
+impl NetworkOptions {
+    fn network_only_flags(&self) -> Vec<&'static str> {
+        [
+            ("--sni", self.sni.is_some()),
+            ("--connect-to", self.connect_to.is_some()),
+            ("--timeout", self.timeout.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(flag, given)| given.then_some(flag))
+        .collect()
+    }
 }
 
 /// What the command needs from the outside world; the composition root
@@ -136,18 +156,6 @@ impl InspectArgs {
             (None, false, true) => Mode::Pem,
             (None, false, false) => Mode::Text,
         }
-    }
-
-    /// The network-only options that were given.
-    fn network_only_flags(&self) -> Vec<&'static str> {
-        [
-            ("--sni", self.sni.is_some()),
-            ("--connect-to", self.connect_to.is_some()),
-            ("--timeout", self.timeout.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(flag, given)| given.then_some(flag))
-        .collect()
     }
 }
 
@@ -180,13 +188,22 @@ pub fn run(
             return code;
         }
     };
+    let network_options = match cli.sni.as_deref().map(parse_sni).transpose() {
+        Ok(sni) => NetworkOptions {
+            sni,
+            connect_to: cli.connect_to,
+            timeout: cli.timeout,
+        },
+        Err(message) => return usage(err, &format!("--sni: {message}")),
+    };
     match cli.command {
-        Command::Inspect(inspect_args) => inspect(&inspect_args, env, out, err),
+        Command::Inspect(inspect_args) => inspect(&inspect_args, &network_options, env, out, err),
     }
 }
 
 fn inspect(
     args: &InspectArgs,
+    network_options: &NetworkOptions,
     env: &Env<'_>,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -197,7 +214,7 @@ fn inspect(
         Ok(target) => target,
         Err(error) => return usage(err, &error.to_string()),
     };
-    let report = match gather(args, env, target, err)? {
+    let report = match gather(network_options, env, target, err)? {
         Ok(report) => report,
         Err(code) => return Ok(code),
     };
@@ -230,24 +247,24 @@ fn inspect(
 /// The report of `target`, or the exit code of a failure already reported on
 /// `err`.
 fn gather(
-    args: &InspectArgs,
+    network_options: &NetworkOptions,
     env: &Env<'_>,
     target: Target,
     err: &mut dyn Write,
 ) -> anyhow::Result<Result<InspectionReport, ExitCode>> {
     match target {
-        Target::Network(network) => gather_network(args, env, network, err),
-        local => gather_local(args, env, local, err),
+        Target::Network(network) => gather_network(network_options, env, network, err),
+        local => gather_local(network_options, env, local, err),
     }
 }
 
 fn gather_local(
-    args: &InspectArgs,
+    network_options: &NetworkOptions,
     env: &Env<'_>,
     target: Target,
     err: &mut dyn Write,
 ) -> anyhow::Result<Result<InspectionReport, ExitCode>> {
-    let flags = args.network_only_flags();
+    let flags = network_options.network_only_flags();
     if !flags.is_empty() {
         let verb = if flags.len() == 1 { "applies" } else { "apply" };
         let message = format!("{} only {verb} to network targets", flags.join(", "));
@@ -262,17 +279,19 @@ fn gather_local(
 }
 
 fn gather_network(
-    args: &InspectArgs,
+    network_options: &NetworkOptions,
     env: &Env<'_>,
     parsed: NetworkTarget,
     err: &mut dyn Write,
 ) -> anyhow::Result<Result<InspectionReport, ExitCode>> {
-    let limits = args.timeout.map_or_else(Limits::default, |timeout| {
-        with_timeout(&Limits::default(), timeout)
-    });
+    let limits = network_options
+        .timeout
+        .map_or_else(Limits::default, |timeout| {
+            with_timeout(&Limits::default(), timeout)
+        });
     let target = NetworkTarget {
-        sni: args.sni.clone(),
-        connect_to: args.connect_to.map(|connect_to| {
+        sni: network_options.sni.clone(),
+        connect_to: network_options.connect_to.map(|connect_to| {
             std::net::SocketAddr::new(connect_to.ip, connect_to.port.unwrap_or(parsed.port))
         }),
         ..parsed
@@ -477,6 +496,43 @@ mod tests {
         );
         assert_eq!(request.limits.target_total_timeout, Duration::from_secs(7));
         assert_eq!(request.limits.dns_timeout, Limits::default().dns_timeout);
+    }
+
+    #[test]
+    fn quando_flags_globais_estao_antes_ou_depois_do_subcomando_deve_aceitar() {
+        for args in [
+            vec![
+                "--sni",
+                "Other.Test",
+                "--connect-to",
+                "10.0.0.7",
+                "--timeout",
+                "7",
+                "inspect",
+                "example.test:8443",
+            ],
+            vec![
+                "inspect",
+                "example.test:8443",
+                "--sni",
+                "Other.Test",
+                "--connect-to",
+                "10.0.0.7",
+                "--timeout",
+                "7",
+            ],
+        ] {
+            let fetcher = recording(Ok(chain(vec![leaf_der()])));
+            let got = run_with(&fetcher, &args);
+            assert_eq!(got.code, ExitCode::Ok, "{}", got.err);
+            let request = only_request(&fetcher);
+            assert_eq!(request.target.sni.as_deref(), Some("other.test"));
+            assert_eq!(
+                request.target.connect_to,
+                Some("10.0.0.7:8443".parse().unwrap())
+            );
+            assert_eq!(request.limits.target_total_timeout, Duration::from_secs(7));
+        }
     }
 
     #[test]
