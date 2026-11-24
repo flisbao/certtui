@@ -9,11 +9,16 @@ pub mod clipboard;
 pub mod copy;
 pub mod keymap;
 pub mod msg;
+pub mod terminal;
 pub mod theme;
 pub mod toast;
 pub mod update;
+pub mod view;
 
 pub use app_state::{AppState, HomeState, InspectState, JobId, JobTracker, Modal, Screen};
 pub use keymap::{Action, Keymap};
 pub use msg::{Command, Msg};
+pub use terminal::{MIN_SIZE, TerminalGuard, install_panic_hook, install_signal_restore};
+pub use theme::{Theme, ThemeKind};
 pub use update::update;
+pub use view::view;

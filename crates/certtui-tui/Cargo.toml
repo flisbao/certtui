@@ -13,3 +13,9 @@ workspace = true
 [dependencies]
 certtui-domain = { path = "../certtui-domain" }
 crossterm = "0.29"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "underline-color"] }
+# Signals that must restore the terminal (SIGINT/SIGTERM).
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt", "signal"] }
+
+[dev-dependencies]
+insta = "1"
