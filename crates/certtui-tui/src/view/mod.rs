@@ -3,6 +3,7 @@
 pub mod home;
 pub mod inspect;
 pub mod tabs;
+pub mod toast;
 pub mod too_small;
 
 use ratatui::Frame;
@@ -33,6 +34,9 @@ pub fn view(state: &AppState, frame: &mut Frame) {
     match state.screen {
         Screen::Home => home::render(state, frame, area, &theme),
         Screen::Inspect => inspect::render(state, frame, area, &theme),
+    }
+    if let Some(toast) = &state.toast {
+        toast::render(toast, frame, area, &theme);
     }
 }
 
