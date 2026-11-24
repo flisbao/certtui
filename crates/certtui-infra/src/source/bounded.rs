@@ -124,7 +124,11 @@ mod tests {
             }
 
             let mut copied = 0;
-            for (target, source) in buf.iter_mut().zip(self.data.iter().skip(self.bytes_read)) {
+            for (target, source) in buf
+                .iter_mut()
+                .zip(self.data.iter().skip(self.bytes_read))
+                .take(2)
+            {
                 *target = *source;
                 copied += 1;
             }
@@ -138,17 +142,21 @@ mod tests {
         let mut reader = InterruptedReader::new(b"abcd");
         assert_eq!(read_limited(&mut reader, 4), Ok(b"abcd".to_vec()));
         assert_eq!(reader.bytes_read, 4);
+        assert!(reader.interrupted_before_data);
+        assert!(reader.interrupted_during_data);
     }
 
     #[test]
     fn quando_interrupcoes_antecedem_excesso_deve_parar_em_limite_mais_um() {
         let limit = 4;
-        let mut reader = InterruptedReader::new(b"abcde");
+        let mut reader = InterruptedReader::new(b"abcdefgh");
         assert_eq!(
             read_limited(&mut reader, limit),
             Err(LoadError::TooLarge { limit })
         );
         assert_eq!(reader.bytes_read, limit + 1);
+        assert!(reader.interrupted_before_data);
+        assert!(reader.interrupted_during_data);
     }
 
     #[test]
