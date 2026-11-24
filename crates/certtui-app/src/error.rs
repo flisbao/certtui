@@ -28,8 +28,9 @@ pub enum LoadError {
     /// The source is structurally invalid.
     #[error("malformed input: {0}")]
     Malformed(String),
-    /// More certificates than `Limits::max_chain_len` were parsed. This is
-    /// the application-level mapping of `ChainError::TooLong`.
+    /// More certificates than the applicable cap were parsed: for local
+    /// sources `Limits::max_certs_per_source`. This is the application-level
+    /// mapping of `ChainError::TooLong`.
     #[error("found {len} certificates, above the limit of {max}")]
     TooManyCerts {
         /// Number of certificates found.

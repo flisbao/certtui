@@ -524,3 +524,128 @@ fn esc_cert_pem() -> String {
     let key = rcgen::KeyPair::generate().unwrap();
     params.self_signed(&key).unwrap().pem()
 }
+
+/// `count` distinct self-signed certificates, each as a PEM block.
+fn distinct_cert_pems(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|i| {
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.distinguished_name.push(
+                rcgen::DnType::CommonName,
+                format!("bulk-{i:03}.example.test"),
+            );
+            let key = rcgen::KeyPair::generate().unwrap();
+            params.self_signed(&key).unwrap().pem()
+        })
+        .collect()
+}
+
+#[test]
+fn quando_diretorio_tem_mais_certs_que_max_chain_len_deve_listar_todos() {
+    let limits = certtui_domain::limits::Limits::default();
+    let count = limits.max_chain_len + 2;
+    let dir = tempdir("many-files");
+    for (i, pem) in distinct_cert_pems(count).iter().enumerate() {
+        std::fs::write(dir.join(format!("c{i:03}.pem")), pem).unwrap();
+    }
+
+    let json = stdout_json(&["inspect", dir.to_str().unwrap(), "--json"]);
+
+    assert_eq!(json["certificates"].as_array().unwrap().len(), count);
+}
+
+#[test]
+fn quando_bundle_pem_tem_mais_certs_que_max_chain_len_deve_listar_todos() {
+    let limits = certtui_domain::limits::Limits::default();
+    let count = limits.max_chain_len + 2;
+    let dir = tempdir("many-bundle");
+    let path = dir.join("bundle.pem");
+    std::fs::write(&path, distinct_cert_pems(count).concat()).unwrap();
+
+    let json = stdout_json(&["inspect", path.to_str().unwrap(), "--json"]);
+
+    assert_eq!(json["certificates"].as_array().unwrap().len(), count);
+}
+
+/// Runs the real loader through `inspect_local` with `max_certs_per_source`.
+fn inspect_with_cap(
+    src: &certtui_app::ports::LocalSource,
+    target: certtui_domain::target::Target,
+    cap: usize,
+) -> certtui_domain::model::InspectionReport {
+    let limits = certtui_domain::limits::Limits {
+        max_certs_per_source: cap,
+        ..certtui_domain::limits::Limits::default()
+    };
+    certtui_app::inspect::inspect_local(
+        &certtui_infra::source::FsSourceLoader::new(),
+        src,
+        target,
+        &limits,
+    )
+    .unwrap()
+}
+
+#[test]
+fn quando_bundle_tem_exatamente_max_certs_per_source_deve_aceitar_sem_nota_de_truncamento() {
+    let cap = 12;
+    let dir = tempdir("cap-exact");
+    let path = dir.join("bundle.pem");
+    std::fs::write(&path, distinct_cert_pems(cap).concat()).unwrap();
+
+    let report = inspect_with_cap(
+        &certtui_app::ports::LocalSource::File(path.clone()),
+        certtui_domain::target::Target::File(path.clone()),
+        cap,
+    );
+
+    assert_eq!(report.chain.len(), cap);
+    assert_eq!(report.notes, Vec::new());
+}
+
+#[test]
+fn quando_bundle_passa_de_max_certs_per_source_deve_truncar_com_nota() {
+    let cap = 12;
+    let dir = tempdir("cap-over");
+    let path = dir.join("bundle.pem");
+    std::fs::write(&path, distinct_cert_pems(cap + 1).concat()).unwrap();
+
+    let report = inspect_with_cap(
+        &certtui_app::ports::LocalSource::File(path.clone()),
+        certtui_domain::target::Target::File(path.clone()),
+        cap,
+    );
+
+    assert_eq!(report.chain.len(), cap);
+    assert_eq!(
+        report.notes,
+        vec![certtui_domain::model::LoadNote::TruncatedAtCertLimit { limit: cap }]
+    );
+}
+
+#[test]
+fn quando_diretorio_passa_de_max_certs_per_source_deve_truncar_com_nota() {
+    let cap = 12;
+    let dir = tempdir("cap-dir");
+    for (i, pem) in distinct_cert_pems(cap + 1).iter().enumerate() {
+        std::fs::write(dir.join(format!("c{i:03}.pem")), pem).unwrap();
+    }
+
+    let report = inspect_with_cap(
+        &certtui_app::ports::LocalSource::Directory {
+            path: dir.to_path_buf(),
+            recursive: false,
+        },
+        certtui_domain::target::Target::Directory {
+            path: dir.to_path_buf(),
+            recursive: false,
+        },
+        cap,
+    );
+
+    assert_eq!(report.chain.len(), cap);
+    assert_eq!(
+        report.notes,
+        vec![certtui_domain::model::LoadNote::TruncatedAtCertLimit { limit: cap }]
+    );
+}

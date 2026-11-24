@@ -19,9 +19,12 @@ use crate::ports::{LocalSource, RawCert, SourceLoader};
 /// # Errors
 ///
 /// - Any [`LoadError`] from the loader.
-/// - [`LoadError::NoCertificatesFound`] (with all notes) when nothing parses.
-/// - [`LoadError::TooManyCerts`] when more than `limits.max_chain_len`
-///   certificates parse.
+/// - [`LoadError::NoCertificatesFound`] (with the retained notes, capped at
+///   `limits.max_scan_diagnostics`) when nothing parses.
+/// - [`LoadError::TooManyCerts`] when more than `limits.max_certs_per_source`
+///   certificates parse. For local sources that cap governs, not
+///   `max_chain_len`, which belongs to the presented/AIA chain of a TLS
+///   target (spec section 9).
 pub fn inspect_local(
     loader: &dyn SourceLoader,
     src: &LocalSource,
@@ -41,7 +44,14 @@ pub fn inspect_local(
     if records.is_empty() {
         return Err(LoadError::NoCertificatesFound { notes });
     }
-    let chain = Chain::new(records, limits).map_err(|error| map_chain_error(&error))?;
+    // A local source is a bundle, not a presented chain: its cap is
+    // `max_certs_per_source` (already enforced by `parse_all`), so the chain
+    // is built against that cap instead of `max_chain_len`.
+    let chain_limits = Limits {
+        max_chain_len: limits.max_certs_per_source,
+        ..*limits
+    };
+    let chain = Chain::new(records, &chain_limits).map_err(|error| map_chain_error(&error))?;
     Ok(build_report(target, chain, notes))
 }
 
@@ -78,10 +88,10 @@ fn parse_all(
     let mut dropped = false;
     for raw in raws {
         match CertificateRecord::from_der(&raw.der, raw.origin, limits) {
-            Ok(_record) if records.len() >= limits.max_chain_len => {
+            Ok(_record) if records.len() >= limits.max_certs_per_source => {
                 return Err(LoadError::TooManyCerts {
-                    len: limits.max_chain_len.saturating_add(1),
-                    max: limits.max_chain_len,
+                    len: limits.max_certs_per_source.saturating_add(1),
+                    max: limits.max_certs_per_source,
                 });
             }
             Ok(record) => records.push(record),
@@ -230,17 +240,17 @@ mod tests {
     }
 
     #[test]
-    fn quando_certs_passam_de_max_chain_len_deve_dar_erro_tipado() {
+    fn quando_certs_passam_de_max_certs_per_source_deve_dar_erro_tipado() {
         let limits = Limits::default();
-        let certs: Vec<_> = (0..=limits.max_chain_len)
+        let certs: Vec<_> = (0..=limits.max_certs_per_source)
             .map(|i| raw("rsa2048-leaf.der", i))
             .collect();
         let err = run(certs, Vec::new(), &limits).unwrap_err();
         assert_eq!(
             err,
             LoadError::TooManyCerts {
-                len: limits.max_chain_len + 1,
-                max: limits.max_chain_len
+                len: limits.max_certs_per_source + 1,
+                max: limits.max_certs_per_source
             }
         );
     }
@@ -248,7 +258,7 @@ mod tests {
     #[test]
     fn quando_varios_validos_passam_do_teto_deve_contar_so_validos_ate_o_primeiro_excesso() {
         let limits = Limits {
-            max_chain_len: 2,
+            max_certs_per_source: 2,
             ..Limits::default()
         };
         let certs = vec![
@@ -262,6 +272,59 @@ mod tests {
         let err = run(certs, Vec::new(), &limits).unwrap_err();
 
         assert_eq!(err, LoadError::TooManyCerts { len: 3, max: 2 });
+    }
+
+    #[test]
+    fn quando_mais_de_max_chain_len_certs_locais_deve_aceitar_ate_max_certs_per_source() {
+        let limits = Limits::default();
+        let count = limits.max_chain_len + 2;
+        assert!(count <= limits.max_certs_per_source);
+        let certs: Vec<_> = (0..count).map(|i| raw("rsa2048-leaf.der", i)).collect();
+
+        let report = run(certs, Vec::new(), &limits).unwrap();
+
+        assert_eq!(report.chain.len(), count);
+    }
+
+    #[test]
+    fn quando_max_chain_len_e_pequeno_nao_deve_limitar_fonte_local() {
+        let limits = Limits {
+            max_chain_len: 1,
+            ..Limits::default()
+        };
+        let certs = vec![raw("rsa2048-leaf.der", 0), raw("expired.der", 1)];
+
+        let report = run(certs, Vec::new(), &limits).unwrap();
+
+        assert_eq!(report.chain.len(), 2);
+    }
+
+    #[test]
+    fn quando_certs_no_limite_exato_de_max_certs_per_source_deve_aceitar() {
+        let limits = Limits {
+            max_certs_per_source: 3,
+            ..Limits::default()
+        };
+        let certs: Vec<_> = (0..3).map(|i| raw("rsa2048-leaf.der", i)).collect();
+
+        let report = run(certs, Vec::new(), &limits).unwrap();
+
+        assert_eq!(report.chain.len(), 3);
+    }
+
+    #[test]
+    fn quando_loader_truncou_em_max_certs_per_source_deve_manter_a_nota_de_truncamento() {
+        let limits = Limits {
+            max_certs_per_source: 2,
+            ..Limits::default()
+        };
+        let note = LoadNote::TruncatedAtCertLimit { limit: 2 };
+        let certs = vec![raw("rsa2048-leaf.der", 0), raw("expired.der", 1)];
+
+        let report = run(certs, vec![note.clone()], &limits).unwrap();
+
+        assert_eq!(report.chain.len(), 2);
+        assert_eq!(report.notes, vec![note]);
     }
 
     #[test]
