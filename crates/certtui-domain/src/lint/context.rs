@@ -1,7 +1,7 @@
 //! The read-only input every lint receives.
 
 use crate::chain_analysis::ChainAnalysis;
-use crate::model::{Chain, TrustVerdict};
+use crate::model::{CertificateRecord, Chain, TrustVerdict};
 use crate::time::Timestamp;
 
 /// Day-based limits that drive the validity lints.
@@ -47,4 +47,20 @@ pub struct LintContext<'a> {
     pub hostname_ok: Option<bool>,
     /// The chain is anchored in a public store (system or Mozilla).
     pub publicly_trusted: bool,
+}
+
+impl<'a> LintContext<'a> {
+    /// The certificates with their index, minus byte-identical repeats:
+    /// `CHAIN_DUPLICATE_CERT` reports those, so per-certificate lints skip
+    /// them rather than repeat (or contradict) the verdict on the original.
+    pub fn unique_records(
+        &self,
+    ) -> impl Iterator<Item = (usize, &'a CertificateRecord)> + use<'a, '_> {
+        let duplicates = &self.analysis.duplicates;
+        self.chain
+            .records()
+            .iter()
+            .enumerate()
+            .filter(move |(i, _)| !duplicates.contains(i))
+    }
 }

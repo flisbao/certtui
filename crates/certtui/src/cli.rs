@@ -258,6 +258,10 @@ fn load_anchors(
                 writeln!(err, "certtui: warning: {}", output::single_line(warning))
                     .context("writing the trust warning")?;
             }
+            if anchors.is_empty() {
+                writeln!(err, "certtui: warning: no trust anchors loaded")
+                    .context("writing the trust warning")?;
+            }
             Ok(Ok(anchors))
         }
         Err(error) => usage(err, &output::single_line(&error.to_string())).map(Err),
@@ -274,10 +278,13 @@ struct Validation<'a> {
 
 impl Validation<'_> {
     /// The report with its trust verdict and findings filled in. A network
-    /// target is checked against its host unless `--host-check` says otherwise.
+    /// target is checked against its SNI, or else its host, unless
+    /// `--host-check` says otherwise.
     fn apply(&self, report: InspectionReport) -> InspectionReport {
         let network_host = match &report.target {
-            Target::Network(network) => Some(network.host.clone()),
+            Target::Network(network) => {
+                Some(network.sni.clone().unwrap_or_else(|| network.host.clone()))
+            }
             _ => None,
         };
         validate(
@@ -671,6 +678,7 @@ mod tests {
     use certtui_app::testing::{
         FakeChainFetcher, FakeChainVerifier, FakeSourceLoader, FakeTrustProvider, FixedClock,
     };
+    use certtui_app::trust::TrustAnchor;
     use certtui_domain::model::{Timings, TlsSessionInfo, TrustVerdict};
     use certtui_domain::time::Timestamp;
     use serde_json::Value;
@@ -741,7 +749,18 @@ mod tests {
         });
         let clock = FixedClock(Timestamp::from_unix(1_769_904_000).unwrap());
         let provider = |_files: Vec<PathBuf>| -> Box<dyn TrustStoreProvider> {
-            Box::new(FakeTrustProvider(Ok(TrustAnchors::default())))
+            // One anchor, so the "no trust anchors loaded" warning stays out
+            // of the stderr these tests compare.
+            Box::new(FakeTrustProvider(Ok(TrustAnchors {
+                entries: vec![TrustAnchor {
+                    subject_der: Vec::new(),
+                    spki_der: Vec::new(),
+                    name_constraints_der: None,
+                    source: TrustSource::System,
+                    label: "Fake Root".to_owned(),
+                }],
+                warnings: Vec::new(),
+            })))
         };
         let env = Env {
             loader,

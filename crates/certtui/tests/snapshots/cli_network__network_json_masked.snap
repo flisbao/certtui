@@ -149,6 +149,13 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
       "severity": "error"
     },
     {
+      "category": "trust",
+      "cert_index": 0,
+      "code": "HOSTNAME_MISMATCH",
+      "message": "certificate does not match the name \"alt.example.test\"",
+      "severity": "error"
+    },
+    {
       "category": "presentation",
       "cert_index": 2,
       "code": "CHAIN_ROOT_SENT",

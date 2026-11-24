@@ -19,10 +19,7 @@ impl Lint for WeakSignatureLint {
 
     fn check(&self, ctx: &LintContext<'_>) -> Vec<Finding> {
         let anchor_index = ctx.analysis.path.last().copied();
-        ctx.chain
-            .records()
-            .iter()
-            .enumerate()
+        ctx.unique_records()
             .filter(|(_, record)| {
                 matches!(
                     record.summary.signature_algorithm.hash,
@@ -55,10 +52,7 @@ impl Lint for WeakKeyLint {
     }
 
     fn check(&self, ctx: &LintContext<'_>) -> Vec<Finding> {
-        ctx.chain
-            .records()
-            .iter()
-            .enumerate()
+        ctx.unique_records()
             .filter_map(|(i, record)| {
                 let key = &record.summary.public_key;
                 // `bits == 0` means the size could not be determined.
@@ -67,6 +61,9 @@ impl Lint for WeakKeyLint {
                     PublicKeyAlgorithm::EcP256
                     | PublicKeyAlgorithm::EcP384
                     | PublicKeyAlgorithm::EcP521 => ("EC", 256),
+                    // An EC key on a curve the parser does not name keeps the
+                    // curve OID in `curve`; its size still counts.
+                    PublicKeyAlgorithm::Other(_) if key.curve.is_some() => ("EC", 256),
                     _ => return None,
                 };
                 (key.bits != 0 && key.bits < minimum).then(|| Finding {
@@ -184,5 +181,53 @@ mod tests {
         leaf.summary.public_key.bits = 0;
         let f = network_fixture_of(vec![leaf]);
         no_findings(&WeakKeyLint.check(&f.ctx(0, false)));
+    }
+
+    #[test]
+    fn quando_curva_ec_desconhecida_abaixo_de_256_bits_deve_dar_weak_key() {
+        let mut leaf = fixture_record("ec-p256-leaf.der");
+        // secp224r1: the parser keeps the curve OID and the real size.
+        leaf.summary.public_key.algorithm = PublicKeyAlgorithm::Other("1.3.132.0.33".to_owned());
+        leaf.summary.public_key.curve = Some("1.3.132.0.33".to_owned());
+        leaf.summary.public_key.bits = 224;
+        let f = network_fixture_of(vec![leaf]);
+        assert_eq!(
+            codes(&WeakKeyLint.check(&f.ctx(0, false))),
+            [FindingCode::WeakKey]
+        );
+    }
+
+    #[test]
+    fn quando_algoritmo_desconhecido_sem_curva_deve_nao_dar_weak_key() {
+        let mut leaf = fixture_record("rsa2048-leaf.der");
+        leaf.summary.public_key.algorithm = PublicKeyAlgorithm::Other("1.2.3".to_owned());
+        leaf.summary.public_key.curve = None;
+        leaf.summary.public_key.bits = 100;
+        let f = network_fixture_of(vec![leaf]);
+        no_findings(&WeakKeyLint.check(&f.ctx(0, false)));
+    }
+
+    #[test]
+    fn quando_raiz_sha1_repetida_deve_nao_dar_weak_signature_na_copia() {
+        let p = pki();
+        let mut records = records_of(&[&p.leaf, &p.int, &p.root, &p.root]);
+        for index in [2, 3] {
+            records[index].summary.signature_algorithm = SignatureAlgorithm::from_oid(SHA1_RSA);
+        }
+        let f = network_fixture_of(records);
+        no_findings(&WeakSignatureLint.check(&f.ctx(0, false)));
+    }
+
+    #[test]
+    fn quando_raiz_repetida_com_chave_fraca_deve_dar_weak_key_uma_vez() {
+        let p = pki();
+        let mut records = records_of(&[&p.leaf, &p.int, &p.root, &p.root]);
+        for record in &mut records[2..] {
+            record.summary.public_key.bits = 128;
+        }
+        let f = network_fixture_of(records);
+        let findings = WeakKeyLint.check(&f.ctx(0, false));
+        let indices: Vec<_> = findings.iter().map(|x| x.cert_index).collect();
+        assert_eq!(indices, [Some(2)]);
     }
 }

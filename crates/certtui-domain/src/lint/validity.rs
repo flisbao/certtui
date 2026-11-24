@@ -13,10 +13,7 @@ impl Lint for ExpiredLint {
     }
 
     fn check(&self, ctx: &LintContext<'_>) -> Vec<Finding> {
-        ctx.chain
-            .records()
-            .iter()
-            .enumerate()
+        ctx.unique_records()
             .filter(|(_, record)| ctx.now > record.summary.not_after)
             .map(|(i, record)| Finding {
                 code: FindingCode::Expired,
@@ -39,10 +36,7 @@ impl Lint for NotYetValidLint {
     }
 
     fn check(&self, ctx: &LintContext<'_>) -> Vec<Finding> {
-        ctx.chain
-            .records()
-            .iter()
-            .enumerate()
+        ctx.unique_records()
             .filter(|(_, record)| ctx.now < record.summary.not_before)
             .map(|(i, record)| Finding {
                 code: FindingCode::NotYetValid,
@@ -69,10 +63,7 @@ impl Lint for ExpiresSoonCriticalLint {
 
     fn check(&self, ctx: &LintContext<'_>) -> Vec<Finding> {
         let critical = i64::from(ctx.thresholds.critical_days);
-        ctx.chain
-            .records()
-            .iter()
-            .enumerate()
+        ctx.unique_records()
             .filter(|(_, record)| ctx.now <= record.summary.not_after)
             .filter_map(|(i, record)| {
                 let days = ctx.now.days_until(record.summary.not_after);
@@ -104,10 +95,7 @@ impl Lint for ExpiresSoonLint {
     fn check(&self, ctx: &LintContext<'_>) -> Vec<Finding> {
         let critical = i64::from(ctx.thresholds.critical_days);
         let warn = i64::from(ctx.thresholds.warn_days);
-        ctx.chain
-            .records()
-            .iter()
-            .enumerate()
+        ctx.unique_records()
             .filter(|(_, record)| ctx.now <= record.summary.not_after)
             .filter_map(|(i, record)| {
                 let days = ctx.now.days_until(record.summary.not_after);
@@ -164,7 +152,7 @@ impl Lint for ValidityTooLongLint {
 mod tests {
     use super::*;
     use crate::lint::Thresholds;
-    use crate::lint::test_support::{Fixture, record};
+    use crate::lint::test_support::{Fixture, pki, record, records_of, ts};
 
     const DAY: i64 = 86_400;
     /// A validity window of one year, ending at `END`.
@@ -187,6 +175,25 @@ mod tests {
     fn quando_now_igual_a_not_after_deve_nao_expirar() {
         let f = year_fixture();
         assert_no_findings(&ExpiredLint.check(&f.ctx(END, false)));
+    }
+
+    #[test]
+    fn quando_cert_repetido_e_expirado_deve_dar_expired_uma_vez() {
+        let p = pki();
+        let mut records = records_of(&[&p.leaf, &p.int, &p.int]);
+        for record in &mut records {
+            record.summary.not_after = ts(DAY);
+        }
+        let f = Fixture::of(records);
+        let findings = ExpiredLint.check(&f.ctx(2 * DAY, false));
+        let indices: Vec<_> = findings.iter().map(|x| x.cert_index).collect();
+        assert_eq!(indices, [Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn quando_now_igual_a_not_before_deve_ser_valido() {
+        let f = year_fixture();
+        assert_no_findings(&NotYetValidLint.check(&f.ctx(END - 365 * DAY, false)));
     }
 
     #[test]

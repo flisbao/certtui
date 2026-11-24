@@ -183,7 +183,12 @@ fn quando_todos_os_alvos_falham_deve_sair_3() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
-    assert_eq!(stderr(&out).lines().count(), 2, "{}", stderr(&out));
+    // One line per failed target; `--ca-only` without a file also warns.
+    let failures = stderr(&out)
+        .lines()
+        .filter(|line| !line.starts_with("certtui: warning:"))
+        .count();
+    assert_eq!(failures, 2, "{}", stderr(&out));
 }
 
 #[test]
@@ -256,6 +261,38 @@ fn quando_trust_store_vazia_deve_dar_untrusted_sem_panic() {
     );
     assert!(text.contains("error TRUST_UNTRUSTED"), "{text}");
     assert!(!stderr(&out).contains("panicked"), "{}", stderr(&out));
+    // The empty store is announced, like an unreadable system store is.
+    assert!(
+        stderr(&out).contains("certtui: warning: no trust anchors loaded"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn quando_sni_e_informado_deve_checar_o_hostname_contra_o_sni() {
+    let fixture = Fixture::start(Behavior::Ok, "sni");
+    // The target name is not in the certificate, which is for `localhost`, the SNI.
+    let out = certtui()
+        .args([
+            "check",
+            &format!("example.test:{}", fixture.server.addr().port()),
+            "--connect-to",
+            "127.0.0.1",
+            "--sni",
+            "localhost",
+            "--ca-only",
+            "--ca-file",
+            &fixture.ca_file(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        !stdout(&out).contains("HOSTNAME_MISMATCH"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]
