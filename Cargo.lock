@@ -283,6 +283,7 @@ dependencies = [
 name = "certtui-infra"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "certtui-app",
  "certtui-domain",
  "cms",
@@ -292,6 +293,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
 ]
 
 [[package]]
