@@ -14,11 +14,20 @@ workspace = true
 certtui-app = { path = "../certtui-app" }
 certtui-domain = { path = "../certtui-domain" }
 crossterm = "0.29"
+base64 = "0.23.1"
+thiserror = "2"
+# The OS clipboard (X11 and Wayland); off with `--no-default-features`.
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"], optional = true }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "underline-color"] }
 # Signals that must restore the terminal (SIGINT/SIGTERM).
-tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt", "signal"] }
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt", "signal", "time"] }
 
 [dev-dependencies]
 insta = "1"
 serde_json = "1"
 rcgen = "0.14"
+
+[features]
+default = ["native-clipboard"]
+# Clipboard of the operating system through `arboard` (decision D17).
+native-clipboard = ["dep:arboard"]
