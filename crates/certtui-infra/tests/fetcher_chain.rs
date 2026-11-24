@@ -26,12 +26,13 @@ async fn quando_server_tls13_deve_capturar_cadeia_e_info() {
     let got = fetch_ok(&server).await;
 
     assert_eq!(got.ders, server.presented_chain());
-    assert_eq!(got.session.version, "TLSv1.3");
-    assert_ne!(got.session.cipher_suite, "");
-    assert!(got.session.cipher_suite.starts_with("TLS13_"), "{got:?}");
-    assert!(got.session.key_exchange_group.is_some(), "{got:?}");
-    assert_eq!(got.session.peer_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
-    let alpn = got.session.alpn.clone().unwrap();
+    let session = got.session.as_ref().unwrap();
+    assert_eq!(session.version, "TLSv1.3");
+    assert_ne!(session.cipher_suite, "");
+    assert!(session.cipher_suite.starts_with("TLS13_"), "{got:?}");
+    assert!(session.key_exchange_group.is_some(), "{got:?}");
+    assert_eq!(session.peer_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let alpn = session.alpn.clone().unwrap();
     assert!(alpn == "h2" || alpn == "http/1.1", "{alpn}");
     let seen = server.negotiated_alpn(Duration::from_secs(2)).await;
     assert_eq!(seen, Observation::Present(alpn.into_bytes()));
@@ -43,11 +44,12 @@ async fn quando_server_tls12_only_deve_negociar_tls12() {
     let server = start(Behavior::Tls12Only).await;
     let got = fetch_ok(&server).await;
 
-    assert_eq!(got.session.version, "TLSv1.2");
-    assert_ne!(got.session.cipher_suite, "");
-    assert!(got.session.cipher_suite.contains("ECDHE"), "{got:?}");
+    let session = got.session.as_ref().unwrap();
+    assert_eq!(session.version, "TLSv1.2");
+    assert_ne!(session.cipher_suite, "");
+    assert!(session.cipher_suite.contains("ECDHE"), "{got:?}");
     assert_eq!(got.ders, server.presented_chain());
-    assert!(got.session.alpn.is_some(), "{got:?}");
+    assert!(session.alpn.is_some(), "{got:?}");
 }
 
 #[tokio::test]

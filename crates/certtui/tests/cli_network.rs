@@ -523,3 +523,82 @@ fn quando_porta_esta_fechada_deve_sair_3_com_connection_failed() {
         stderr(&out)
     );
 }
+
+#[test]
+fn quando_idn_tem_formas_equivalentes_deve_usar_o_mesmo_host_e_sni() {
+    let fixture = Fixture::start(Behavior::Ok);
+    for (name, port) in [
+        ("bücher.de", 443),
+        ("bu\u{0308}cher.de", 443),
+        ("bu\u{0308}cher.de:8443", 8443),
+        ("bücher。de:8443", 8443),
+        ("bücher．de｡", 443),
+    ] {
+        let out = certtui()
+            .args([
+                "inspect",
+                name,
+                "--connect-to",
+                &fixture.server.addr().to_string(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{name:?}: {}", stderr(&out));
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["target"]["host"], "xn--bcher-kva.de");
+        assert_eq!(report["target"]["port"], port);
+        assert_eq!(
+            fixture.server.last_sni(),
+            Observation::Present("xn--bcher-kva.de".to_owned())
+        );
+    }
+}
+
+#[test]
+fn quando_tls12_falha_apos_pedir_certificado_deve_relatar_captura_parcial() {
+    let fixture = Fixture::start(Behavior::Tls12ClientAuth(vec![0x5A; 37]));
+    let report = fixture.json(&[]);
+    assert_eq!(report.get("tls"), Some(&Value::Null));
+    assert_eq!(
+        report["notes"],
+        json!([{"kind": "handshake_failed_after_client_cert_request", "peer_ip": "127.0.0.1"}])
+    );
+    assert_eq!(report["ocsp_staple"], json!({"present": true, "bytes": 37}));
+    assert_eq!(report["certificates"].as_array().unwrap().len(), 3);
+    for phase in ["connect", "handshake", "total"] {
+        assert!(report["timings"][phase].is_u64(), "{phase}");
+    }
+    assert_eq!(fixture.server.accepted_connections(), 1);
+}
+
+#[test]
+fn quando_captura_parcial_deve_exibir_nota_em_texto_e_preservar_stdout_de_dados() {
+    let fixture = Fixture::start(Behavior::Tls12ClientAuth(vec![0x5A; 37]));
+    let notice = "TLS handshake with 127.0.0.1 failed after a client certificate request";
+    let text = fixture.run(&["--text"]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert!(stdout(&text).contains(notice));
+    let pem = fixture.run(&["--pem"]);
+    assert!(pem.status.success(), "{}", stderr(&pem));
+    assert!(stderr(&pem).contains(notice));
+    let mut expected = String::new();
+    for der in fixture.server.presented_chain() {
+        expected.push_str("-----BEGIN CERTIFICATE-----\n");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+        for line in encoded.as_bytes().chunks(64) {
+            expected.push_str(std::str::from_utf8(line).unwrap());
+            expected.push('\n');
+        }
+        expected.push_str("-----END CERTIFICATE-----\n");
+    }
+    assert_eq!(stdout(&pem), expected);
+    let field = fixture.run(&["--field", "fingerprint.sha256"]);
+    assert!(field.status.success(), "{}", stderr(&field));
+    assert!(stderr(&field).contains(notice));
+    let report = fixture.json(&[]);
+    let fingerprint = report["certificates"][0]["fingerprints"]["sha256"]
+        .as_str()
+        .unwrap();
+    assert_eq!(stdout(&field), format!("{fingerprint}\n"));
+}

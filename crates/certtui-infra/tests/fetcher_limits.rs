@@ -107,3 +107,14 @@ async fn quando_ja_cancelado_na_entrada_deve_dar_cancelled_sem_conectar() {
     assert_eq!(got, Err(FetchError::Cancelled));
     assert_eq!(server.accepted_connections(), 0);
 }
+
+#[tokio::test]
+async fn quando_tls_valido_excede_orcamento_deve_retornar_limite_exato() {
+    let server = start(Behavior::Ok).await;
+    let mut req = request_to(&server);
+    req.limits.max_handshake_bytes = 16;
+    let result = RustlsChainFetcher::new()
+        .fetch(&req, CancellationToken::new())
+        .await;
+    assert_eq!(result, Err(FetchError::ByteBudgetExceeded { limit: 16 }));
+}

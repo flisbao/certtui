@@ -138,7 +138,9 @@ fn parse_port(port: &str) -> Result<u16, TargetError> {
 
 /// An IPv4 literal or a punycode DNS name in lowercase, without trailing dot.
 fn normalize_host(host: &str) -> Result<String, TargetError> {
-    let host = host.strip_suffix('.').unwrap_or(host);
+    // STD3 verifies label lengths and rejects trailing empty labels. Remove
+    // exactly one root separator (including its UTS #46 equivalents) first.
+    let host = host.strip_suffix(['.', '。', '．', '｡']).unwrap_or(host);
     if host.is_empty() || host.len() > MAX_RAW_HOST_BYTES {
         return Err(TargetError::InvalidHost);
     }
@@ -233,6 +235,26 @@ mod tests {
     fn quando_ponto_final_deve_remover() {
         assert_eq!(ok("example.com."), pair("example.com", 443));
         assert_eq!(ok("example.com.:8443"), pair("example.com", 8443));
+    }
+
+    #[test]
+    fn quando_separador_idna_final_deve_remover_um_unico_ponto_raiz() {
+        for dot in ["。", "．", "｡"] {
+            assert_eq!(
+                ok(&format!("example.test{dot}:443")),
+                pair("example.test", 443)
+            );
+            for invalid in [
+                format!("example.test.{dot}"),
+                format!("example.test{dot}."),
+                format!("a{dot}{dot}b"),
+            ] {
+                assert_eq!(
+                    parse_network_target(&invalid),
+                    Err(TargetError::InvalidHost)
+                );
+            }
+        }
     }
 
     #[test]

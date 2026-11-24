@@ -108,13 +108,15 @@ fn looks_like_network(arg: &str) -> bool {
         return false;
     }
     !host.is_empty()
-        && host.chars().all(is_host_char)
+        // ASCII filename punctuation, whitespace and separators indicate a local path.
+        // Leave the entire Unicode name to the domain parser for IDNA validation.
+        && !host.bytes().any(is_local_path_byte)
         && !host.starts_with(['.', '-'])
         && !has_file_extension(host)
 }
 
-fn is_host_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '.' | '-' | '_')
+fn is_local_path_byte(byte: u8) -> bool {
+    byte.is_ascii() && !byte.is_ascii_alphanumeric() && !matches!(byte, b'.' | b'-' | b'_')
 }
 
 fn has_file_extension(host: &str) -> bool {
@@ -281,6 +283,10 @@ mod tests {
             "dir/file.pem",
             "missing.pem",
             "MISSING.CRT",
+            "bu\u{0308}cher.de.pem",
+            "./bücher。de",
+            "example.com/path",
+            "example.com?query",
             "has space.txt",
             "C:\\dir\\file",
         ] {

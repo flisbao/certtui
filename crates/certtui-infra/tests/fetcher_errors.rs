@@ -54,7 +54,12 @@ async fn quando_server_fecha_na_hora_deve_dar_erro_rapido() {
 async fn quando_server_manda_alert_deve_dar_handshake_error_rapido() {
     let (got, elapsed) = fetch_from(Behavior::TlsAlert).await;
 
-    assert_clean_handshake_error(&got);
+    assert_eq!(
+        got,
+        Err(FetchError::Handshake(
+            "the peer sent alert HandshakeFailure".to_owned()
+        ))
+    );
     assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
 }
 

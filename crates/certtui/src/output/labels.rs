@@ -138,6 +138,9 @@ fn reject_reason(reason: RejectReason) -> &'static str {
 /// One-line description of a load diagnostic (never any content).
 pub fn note_text(note: &LoadNote) -> String {
     match note {
+        LoadNote::HandshakeFailedAfterClientCertRequest { peer_ip } => {
+            format!("TLS handshake with {peer_ip} failed after a client certificate request")
+        }
         LoadNote::Rejected { offset, reason } => {
             format!(
                 "candidate at offset {offset} rejected: {}",

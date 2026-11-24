@@ -7,14 +7,14 @@
 
 use std::error::Error as StdError;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use certtui_app::fetch::{FetchError, FetchRequest, FetchedChain, Stage};
 use certtui_app::ports::ChainFetcher;
-use certtui_domain::model::Timings;
+use certtui_domain::model::{LoadNote, Timings};
 use certtui_domain::target::NetworkTarget;
 use rustls::client::Resumption;
 use rustls::client::danger::ServerCertVerifier;
@@ -28,6 +28,7 @@ use tokio_rustls::client::TlsStream;
 use tokio_util::sync::CancellationToken;
 
 use super::capturing_verifier::{CapturedHandshake, CapturingVerifier};
+use super::client_cert_request::ClientCertRequest;
 use super::connect::{Resolver, SystemResolver, connect_first, resolve};
 use super::limited_stream::{ByteBudgetExceeded, LimitedStream};
 use super::session::{build_session_info, sanitize};
@@ -85,7 +86,7 @@ impl RustlsChainFetcher {
         &self,
         req: &FetchRequest,
         started: Instant,
-    ) -> Result<(FetchedChain, Stream), FetchError> {
+    ) -> Result<(FetchedChain, Option<Stream>), FetchError> {
         let limits = &req.limits;
         let (addrs, dns) = self.addresses(req).await?;
         let phase = Instant::now();
@@ -96,14 +97,13 @@ impl RustlsChainFetcher {
         let (tls, captured) = negotiate(req, tcp).await?;
         let handshake = phase.elapsed();
 
-        let session = build_session_info(tls.get_ref().1, peer.ip());
         let timings = Timings {
             dns,
             connect: Some(connect),
             handshake: Some(handshake),
             total: Some(started.elapsed()),
         };
-        let chain = assemble(captured, session, timings)?;
+        let chain = assemble(captured, tls.as_ref(), peer.ip(), timings);
         Ok((chain, tls))
     }
 }
@@ -149,14 +149,19 @@ impl ChainFetcher for RustlsChainFetcher {
             timed = work => timed.unwrap_or(Err(FetchError::Timeout(Stage::Total))),
         };
         let (chain, stream) = outcome?;
-        close_quietly(stream).await;
+        if let Some(stream) = stream {
+            close_quietly(stream).await;
+        }
         Ok(chain)
     }
 }
 
 /// TLS client: ring provider, TLS 1.2 and 1.3, ALPN, no client auth, no
 /// session resumption, and `verifier` as the (accept-all) certificate check.
-fn connector(verifier: &Arc<CapturingVerifier>) -> Result<TlsConnector, FetchError> {
+fn connector(
+    verifier: &Arc<CapturingVerifier>,
+    request: Arc<ClientCertRequest>,
+) -> Result<TlsConnector, FetchError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier: Arc<dyn ServerCertVerifier> = Arc::clone(verifier) as _;
     let mut config = ClientConfig::builder_with_provider(provider)
@@ -164,7 +169,7 @@ fn connector(verifier: &Arc<CapturingVerifier>) -> Result<TlsConnector, FetchErr
         .map_err(|_| FetchError::Handshake("TLS client configuration failed".to_owned()))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+        .with_client_cert_resolver(request);
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     config.resumption = Resumption::disabled();
     Ok(TlsConnector::from(Arc::new(config)))
@@ -181,47 +186,80 @@ fn server_name(target: &NetworkTarget) -> Result<ServerName<'static>, FetchError
 async fn negotiate(
     req: &FetchRequest,
     tcp: TcpStream,
-) -> Result<(Stream, Option<CapturedHandshake>), FetchError> {
+) -> Result<(Option<Stream>, CapturedHandshake), FetchError> {
     let verifier = CapturingVerifier::new();
-    let connector = connector(&verifier)?;
+    let request = Arc::new(ClientCertRequest::default());
+    let connector = connector(&verifier, Arc::clone(&request))?;
     let name = server_name(&req.target)?;
     let limited = LimitedStream::new(tcp, req.limits.max_handshake_bytes);
-    let tls = handshake(&connector, name, limited, req.limits.handshake_timeout).await?;
-    Ok((tls, verifier.captured()))
+    let result = tokio::time::timeout(
+        req.limits.handshake_timeout,
+        connector.connect(name, limited),
+    )
+    .await
+    .map_err(|_| FetchError::Timeout(Stage::Handshake))?;
+    handshake_capture(result, request.observed(), verifier.captured())
 }
 
-/// Runs the TLS handshake within `timeout`.
-async fn handshake(
-    connector: &TlsConnector,
-    name: ServerName<'static>,
-    stream: LimitedStream<TcpStream>,
-    timeout: Duration,
-) -> Result<Stream, FetchError> {
-    tokio::time::timeout(timeout, connector.connect(name, stream))
-        .await
-        .map_err(|_| FetchError::Timeout(Stage::Handshake))?
-        .map_err(|e| map_tls_error(&e))
-}
-
-/// Builds the result from what the verifier captured.
-fn assemble(
+/// A rejection alert is ambiguous on its own. Recover only a chain actually
+/// presented on this connection after observing a client certificate request.
+fn handshake_capture<S>(
+    result: io::Result<S>,
+    request_observed: bool,
     captured: Option<CapturedHandshake>,
-    session: certtui_domain::model::TlsSessionInfo,
+) -> Result<(Option<S>, CapturedHandshake), FetchError> {
+    let captured = captured.filter(|chain| !chain.end_entity.is_empty());
+    match result {
+        Ok(stream) => Ok((Some(stream), captured.ok_or(FetchError::EmptyChain)?)),
+        Err(error) => {
+            if request_observed
+                && is_client_auth_alert(&error)
+                && let Some(chain) = captured
+            {
+                Ok((None, chain))
+            } else {
+                Err(map_tls_error(&error))
+            }
+        }
+    }
+}
+
+fn is_client_auth_alert(error: &io::Error) -> bool {
+    causes(error).any(|cause| {
+        matches!(
+            cause.downcast_ref::<rustls::Error>(),
+            Some(rustls::Error::AlertReceived(
+                AlertDescription::HandshakeFailure | AlertDescription::CertificateRequired
+            ))
+        )
+    })
+}
+
+/// Only a completed stream has negotiated session parameters.
+fn assemble(
+    captured: CapturedHandshake,
+    stream: Option<&Stream>,
+    peer_ip: IpAddr,
     timings: Timings,
-) -> Result<FetchedChain, FetchError> {
-    let captured = captured
-        .filter(|c| !c.end_entity.is_empty())
-        .ok_or(FetchError::EmptyChain)?;
+) -> FetchedChain {
+    let (session, note) = match stream {
+        Some(tls) => (Some(build_session_info(tls.get_ref().1, peer_ip)), None),
+        None => (
+            None,
+            Some(LoadNote::HandshakeFailedAfterClientCertRequest { peer_ip }),
+        ),
+    };
     let mut ders = vec![captured.end_entity];
     ders.extend(captured.intermediates);
     // rustls erases "no staple" and "empty staple": empty means none.
     let ocsp_staple = (!captured.ocsp_response.is_empty()).then_some(captured.ocsp_response);
-    Ok(FetchedChain {
+    FetchedChain {
         ders,
         ocsp_staple,
         session,
+        note,
         timings,
-    })
+    }
 }
 
 /// Sends `close_notify` (best effort, bounded) and drops the stream.
@@ -385,14 +423,43 @@ mod tests {
 
     #[test]
     fn quando_nada_foi_capturado_deve_dar_empty_chain() {
-        let session = certtui_domain::model::TlsSessionInfo {
-            version: "TLSv1.3".to_owned(),
-            cipher_suite: "X".to_owned(),
-            key_exchange_group: None,
-            alpn: None,
-            peer_ip: std::net::Ipv4Addr::LOCALHOST.into(),
+        assert_eq!(
+            handshake_capture(Ok(()), false, None),
+            Err(FetchError::EmptyChain)
+        );
+    }
+
+    #[test]
+    fn quando_alerta_de_rejeicao_deve_exigir_pedido_e_cadeia_nao_vazia() {
+        let captured = |leaf| {
+            Some(CapturedHandshake {
+                end_entity: leaf,
+                intermediates: Vec::new(),
+                ocsp_response: Vec::new(),
+            })
         };
-        let got = assemble(None, session, Timings::default());
-        assert_eq!(got, Err(FetchError::EmptyChain));
+        for alert in [
+            AlertDescription::HandshakeFailure,
+            AlertDescription::CertificateRequired,
+        ] {
+            let error = || wrapped(rustls::Error::AlertReceived(alert));
+            assert!(handshake_capture::<()>(Err(error()), true, captured(vec![42])).is_ok());
+            for (observed, capture) in [
+                (false, captured(vec![42])),
+                (true, None),
+                (true, captured(vec![])),
+            ] {
+                assert_eq!(
+                    handshake_capture::<()>(Err(error()), observed, capture).unwrap_err(),
+                    map_tls_error(&error())
+                );
+            }
+        }
+        let other = wrapped(rustls::Error::AlertReceived(AlertDescription::AccessDenied));
+        let expected = map_tls_error(&other);
+        assert_eq!(
+            handshake_capture::<()>(Err(other), true, captured(vec![42])).unwrap_err(),
+            expected
+        );
     }
 }

@@ -4,6 +4,7 @@
 // tests (a separate crate) drive them; they are not part of the supported API.
 #[doc(hidden)]
 pub mod capturing_verifier;
+mod client_cert_request;
 mod connect;
 pub mod fetcher;
 pub mod limited_stream;

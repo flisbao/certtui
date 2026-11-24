@@ -28,7 +28,8 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, date_time_ymd,
 };
-use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::server::danger::ClientCertVerifier;
+use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
 use rustls::sign::CertifiedKey;
 use rustls::{ServerConfig, SupportedProtocolVersion};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -84,6 +85,8 @@ pub enum Behavior {
     FloodBytes,
     /// TLS server restricted to TLS 1.2.
     Tls12Only,
+    /// TLS 1.2 with mandatory client authentication and an OCSP staple.
+    Tls12ClientAuth(Vec<u8>),
     /// TLS server restricted to TLS 1.3.
     Tls13Only,
     /// Replies `HTTP/1.1 400 Bad Request` in clear text and closes.
@@ -235,6 +238,7 @@ fn tls_config(
     key: Arc<CertifiedKey>,
     shared: &Arc<Shared>,
     versions: &[&'static SupportedProtocolVersion],
+    client_verifier: Arc<dyn ClientCertVerifier>,
 ) -> Result<Arc<ServerConfig>, HarnessError> {
     let resolver = RecordingResolver {
         key,
@@ -243,7 +247,7 @@ fn tls_config(
     let mut config =
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_protocol_versions(versions)?
-            .with_no_client_auth()
+            .with_client_cert_verifier(client_verifier)
             .with_cert_resolver(Arc::new(resolver));
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(config))
@@ -300,13 +304,29 @@ impl TestServer {
                 pki.anchor.clone(),
             ]
         };
+        let client_verifier = if matches!(behavior, Behavior::Tls12ClientAuth(_)) {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(CertificateDer::from(pki.anchor.clone()))?;
+            WebPkiClientVerifier::builder_with_provider(
+                Arc::new(roots),
+                Arc::new(rustls::crypto::ring::default_provider()),
+            )
+            .build()?
+        } else {
+            WebPkiClientVerifier::no_client_auth()
+        };
         let all = rustls::ALL_VERSIONS;
         let tls = |presented: &[Vec<u8>],
                    ocsp: Option<Vec<u8>>,
                    versions: &[&'static SupportedProtocolVersion],
                    delay: Duration|
          -> Result<(Mode, Vec<Vec<u8>>), HarnessError> {
-            let config = tls_config(certified_key(&pki, presented, ocsp)?, &shared, versions)?;
+            let config = tls_config(
+                certified_key(&pki, presented, ocsp)?,
+                &shared,
+                versions,
+                Arc::clone(&client_verifier),
+            )?;
             let mode = Mode::Tls {
                 acceptor: TlsAcceptor::from(config),
                 delay,
@@ -333,6 +353,12 @@ impl TestServer {
             Behavior::WithStaple(bytes) => tls(&normal, Some(bytes), all, Duration::ZERO)?,
             Behavior::Slow(delay) => tls(&normal, None, all, delay)?,
             Behavior::Tls12Only => tls(&normal, None, &[&rustls::version::TLS12], Duration::ZERO)?,
+            Behavior::Tls12ClientAuth(bytes) => tls(
+                &normal,
+                Some(bytes),
+                &[&rustls::version::TLS12],
+                Duration::ZERO,
+            )?,
             Behavior::Tls13Only => tls(&normal, None, &[&rustls::version::TLS13], Duration::ZERO)?,
             Behavior::NeverResponds => (Mode::NeverResponds, Vec::new()),
             Behavior::FloodBytes => (Mode::Flood, Vec::new()),
@@ -450,12 +476,26 @@ async fn serve(mut stream: TcpStream, mode: Arc<Mode>, shared: Arc<Shared>) {
             if !delay.is_zero() {
                 tokio::time::sleep(*delay).await;
             }
-            let Ok(mut tls) = acceptor.accept(stream).await else {
-                return;
+            let mut stream = match acceptor.accept(stream).into_fallible().await {
+                Ok(mut tls) => {
+                    *lock(&shared.alpn) = Observation::from_option(
+                        tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec),
+                    );
+                    let _ = tokio::time::timeout(Duration::from_secs(1), tls.shutdown()).await;
+                    return;
+                }
+                Err((_err, io)) => io,
             };
-            *lock(&shared.alpn) =
-                Observation::from_option(tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec));
-            let _ = tokio::time::timeout(Duration::from_secs(1), tls.shutdown()).await;
+            let _ = tokio::time::timeout(Duration::from_millis(100), async {
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = stream.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let _ = stream.shutdown().await;
+            })
+            .await;
         }
         Mode::Close => drop(stream),
         Mode::NeverResponds => std::future::pending::<()>().await,

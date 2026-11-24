@@ -31,6 +31,11 @@ pub enum RejectReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LoadNote {
+    /// The peer sent a rejection alert after requesting a client certificate.
+    HandshakeFailedAfterClientCertRequest {
+        /// IP address of the connected peer.
+        peer_ip: std::net::IpAddr,
+    },
     /// A candidate block at `offset` was rejected.
     Rejected {
         /// Byte offset of the block in the input.
@@ -111,7 +116,8 @@ impl LoadNote {
     pub fn is_individual_diagnostic(&self) -> bool {
         matches!(
             self,
-            LoadNote::Rejected { .. }
+            LoadNote::HandshakeFailedAfterClientCertRequest { .. }
+                | LoadNote::Rejected { .. }
                 | LoadNote::Unparsable { .. }
                 | LoadNote::Unreadable { .. }
                 | LoadNote::UnsupportedFormat { .. }

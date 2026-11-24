@@ -35,14 +35,17 @@ fn clean(text: &str) -> Cow<'_, str> {
 struct Document<'a> {
     schema_version: u8,
     target: JsonTarget<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tls: Option<JsonTls<'a>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timings: Option<JsonTimings>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ocsp_staple: Option<JsonStaple>,
+    #[serde(flatten)]
+    network: Option<JsonNetwork<'a>>,
     notes: &'a [LoadNote],
     certificates: Vec<JsonCertificate<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonNetwork<'a> {
+    tls: Option<JsonTls<'a>>,
+    timings: JsonTimings,
+    ocsp_staple: JsonStaple,
 }
 
 #[derive(Serialize)]
@@ -207,9 +210,11 @@ pub fn write(out: &mut dyn Write, view: &View<'_>) -> io::Result<()> {
     let document = Document {
         schema_version: SCHEMA_VERSION,
         target: target(&report.target),
-        tls: report.tls.as_ref().map(tls),
-        timings: is_network.then(|| timings(&report.timings)),
-        ocsp_staple: is_network.then(|| staple(report)),
+        network: is_network.then(|| JsonNetwork {
+            tls: report.tls.as_ref().map(tls),
+            timings: timings(&report.timings),
+            ocsp_staple: staple(report),
+        }),
         notes: &view.report.notes,
         certificates: view
             .certs()

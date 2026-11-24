@@ -3,7 +3,7 @@
 use std::fmt;
 
 use certtui_domain::limits::Limits;
-use certtui_domain::model::{Timings, TlsSessionInfo};
+use certtui_domain::model::{LoadNote, Timings, TlsSessionInfo};
 use certtui_domain::target::NetworkTarget;
 use thiserror::Error;
 
@@ -25,8 +25,10 @@ pub struct FetchedChain {
     pub ders: Vec<Vec<u8>>,
     /// The stapled OCSP response, when the server sent one.
     pub ocsp_staple: Option<Vec<u8>>,
-    /// Negotiated TLS parameters.
-    pub session: TlsSessionInfo,
+    /// Negotiated TLS parameters, available only after a completed handshake.
+    pub session: Option<TlsSessionInfo>,
+    /// A partial capture carries one diagnostic about the interrupted handshake.
+    pub note: Option<LoadNote>,
     /// Durations of the phases that ran.
     pub timings: Timings,
 }
@@ -37,6 +39,7 @@ impl fmt::Debug for FetchedChain {
             .field("der_count", &self.ders.len())
             .field("ocsp_staple_len", &self.ocsp_staple.as_ref().map(Vec::len))
             .field("session", &self.session)
+            .field("note", &self.note)
             .field("timings", &self.timings)
             .finish()
     }
@@ -127,13 +130,14 @@ mod tests {
         FetchedChain {
             ders: vec![vec![0x30, 0x03, 0x02, 0x01, 0x00]],
             ocsp_staple: Some(vec![1, 2, 3]),
-            session: TlsSessionInfo {
+            session: Some(TlsSessionInfo {
                 version: "TLSv1.3".to_owned(),
                 cipher_suite: "TLS13_AES_128_GCM_SHA256".to_owned(),
                 key_exchange_group: None,
                 alpn: None,
                 peer_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            },
+            }),
+            note: None,
             timings: Timings::default(),
         }
     }

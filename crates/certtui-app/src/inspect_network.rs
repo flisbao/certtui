@@ -50,7 +50,7 @@ pub async fn inspect_network(
             max: limits.max_chain_len,
         });
     }
-    let (records, notes) = parse_presented(&fetched_chain.ders, limits);
+    let (records, notes) = parse_presented(&fetched_chain.ders, fetched_chain.note, limits);
     if records.is_empty() {
         return Err(InspectError::NoUsableCertificates { notes });
     }
@@ -59,7 +59,7 @@ pub async fn inspect_network(
     })?;
     Ok(InspectionReport {
         target: Target::Network(request.target),
-        tls: Some(fetched_chain.session),
+        tls: fetched_chain.session,
         ocsp_staple: fetched_chain.ocsp_staple,
         chain,
         trust: TrustVerdict::NotEvaluated,
@@ -72,8 +72,15 @@ pub async fn inspect_network(
 
 /// Parses every presented DER; failures become notes within the shared
 /// diagnostics budget.
-fn parse_presented(ders: &[Vec<u8>], limits: &Limits) -> (Vec<CertificateRecord>, Vec<LoadNote>) {
+fn parse_presented(
+    ders: &[Vec<u8>],
+    fetch_note: Option<LoadNote>,
+    limits: &Limits,
+) -> (Vec<CertificateRecord>, Vec<LoadNote>) {
     let mut collector = DiagnosticNoteCollector::new(limits.max_scan_diagnostics);
+    if let Some(note) = fetch_note {
+        collector.push(note);
+    }
     let mut records = Vec::new();
     for (position, der) in ders.iter().enumerate() {
         match CertificateRecord::from_der(der, CertOrigin::Presented { position }, limits) {
@@ -144,7 +151,8 @@ mod tests {
         FetchedChain {
             ders,
             ocsp_staple: Some(vec![9, 9, 9]),
-            session: session(),
+            session: Some(session()),
+            note: None,
             timings: timings(),
         }
     }
@@ -272,6 +280,27 @@ mod tests {
                 LoadNote::Unparsable { offset: None },
                 LoadNote::DiagnosticsTruncated { limit: 1 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn quando_captura_parcial_deve_compartilhar_o_teto_de_notas_com_o_parse() {
+        let note = LoadNote::HandshakeFailedAfterClientCertRequest {
+            peer_ip: Ipv4Addr::LOCALHOST.into(),
+        };
+        let mut partial = fetched(vec![garbage(), der("rsa2048-leaf.der")]);
+        partial.session = None;
+        partial.note = Some(note.clone());
+        let limits = Limits {
+            max_scan_diagnostics: 1,
+            ..Limits::default()
+        };
+        let report = run(Ok(partial), &limits).await.unwrap();
+        assert_eq!(report.tls, None);
+        assert_eq!(report.trust, TrustVerdict::NotEvaluated);
+        assert_eq!(
+            report.notes,
+            vec![note, LoadNote::DiagnosticsTruncated { limit: 1 }]
         );
     }
 

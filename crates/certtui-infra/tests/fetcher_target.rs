@@ -172,7 +172,10 @@ async fn quando_primeiro_ip_recusa_deve_usar_o_segundo() {
         .unwrap();
 
     assert_eq!(got.ders, server.presented_chain());
-    assert_eq!(got.session.peer_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert_eq!(
+        got.session.unwrap().peer_ip,
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
     assert_eq!(server.accepted_connections(), 1);
     assert!(got.timings.dns.is_some());
 }

@@ -402,13 +402,14 @@ mod tests {
         FetchedChain {
             ders,
             ocsp_staple: None,
-            session: TlsSessionInfo {
+            session: Some(TlsSessionInfo {
                 version: "TLSv1.3".to_owned(),
                 cipher_suite: "TLS_AES_256_GCM_SHA384".to_owned(),
                 key_exchange_group: None,
                 alpn: None,
                 peer_ip: IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
-            },
+            }),
+            note: None,
             timings: Timings {
                 handshake: Some(Duration::from_millis(41)),
                 ..Timings::default()

@@ -92,7 +92,9 @@ pub trait SourceLoader: Send + Sync {
 #[async_trait::async_trait]
 pub trait ChainFetcher: Send + Sync {
     /// Connects to `req.target` within `req.limits` and returns what the
-    /// peer presented. Implementations stop promptly once `cancel` fires.
+    /// peer presented. A rejection alert following a client certificate
+    /// request may return the already presented chain with a diagnostic and
+    /// absent session parameters. Implementations stop promptly once `cancel` fires.
     ///
     /// # Errors
     ///

@@ -87,7 +87,7 @@ pub enum RevocationStatus {
 pub struct InspectionReport {
     /// What was inspected.
     pub target: Target,
-    /// TLS session parameters (network targets only).
+    /// Negotiated parameters of a completed network handshake.
     pub tls: Option<TlsSessionInfo>,
     /// Stapled OCSP response bytes (network targets only), when the server
     /// sent one. The JSON layer reports only `{"present", "bytes"}`.
@@ -102,8 +102,7 @@ pub struct InspectionReport {
     pub findings: Vec<Finding>,
     /// Phase durations.
     pub timings: Timings,
-    /// Read and extraction diagnostics. For network targets: one note per
-    /// presented certificate that could not be parsed.
+    /// Bounded diagnostics for loading, parsing and incomplete TLS handshakes.
     pub notes: Vec<LoadNote>,
 }
 
