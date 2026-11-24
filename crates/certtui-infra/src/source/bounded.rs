@@ -21,6 +21,7 @@ fn read_limited_inner<R: Read>(reader: R, limit: usize) -> (Result<Vec<u8>, Load
     loop {
         let read = match reader.read(&mut chunk) {
             Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return (Err(LoadError::Io(error.to_string())), bytes.capacity()),
         };
         if read == 0 {
@@ -91,6 +92,63 @@ mod tests {
             Err(LoadError::TooLarge { limit })
         );
         assert_eq!(reader.reads, limit + 1);
+    }
+
+    struct InterruptedReader {
+        data: &'static [u8],
+        bytes_read: usize,
+        interrupted_before_data: bool,
+        interrupted_during_data: bool,
+    }
+
+    impl InterruptedReader {
+        fn new(data: &'static [u8]) -> Self {
+            Self {
+                data,
+                bytes_read: 0,
+                interrupted_before_data: false,
+                interrupted_during_data: false,
+            }
+        }
+    }
+
+    impl Read for InterruptedReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted_before_data {
+                self.interrupted_before_data = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            if self.bytes_read == 2 && !self.interrupted_during_data {
+                self.interrupted_during_data = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+
+            let mut copied = 0;
+            for (target, source) in buf.iter_mut().zip(self.data.iter().skip(self.bytes_read)) {
+                *target = *source;
+                copied += 1;
+            }
+            self.bytes_read += copied;
+            Ok(copied)
+        }
+    }
+
+    #[test]
+    fn quando_leitor_e_interrompido_antes_e_durante_deve_retomar_e_aceitar_bytes() {
+        let mut reader = InterruptedReader::new(b"abcd");
+        assert_eq!(read_limited(&mut reader, 4), Ok(b"abcd".to_vec()));
+        assert_eq!(reader.bytes_read, 4);
+    }
+
+    #[test]
+    fn quando_interrupcoes_antecedem_excesso_deve_parar_em_limite_mais_um() {
+        let limit = 4;
+        let mut reader = InterruptedReader::new(b"abcde");
+        assert_eq!(
+            read_limited(&mut reader, limit),
+            Err(LoadError::TooLarge { limit })
+        );
+        assert_eq!(reader.bytes_read, limit + 1);
     }
 
     #[test]
