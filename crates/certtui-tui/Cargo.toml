@@ -9,3 +9,7 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+certtui-domain = { path = "../certtui-domain" }
+crossterm = "0.29"
