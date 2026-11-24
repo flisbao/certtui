@@ -186,10 +186,10 @@ fn target(target: &Target) -> JsonTarget<'_> {
     }
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
+fn hex_upper(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut acc, byte| {
         // Writing to a `String` cannot fail.
-        let _ = write!(acc, "{byte:02x}");
+        let _ = write!(acc, "{byte:02X}");
         acc
     })
 }
@@ -298,7 +298,7 @@ fn certificate(
             .iter()
             .map(|sct| JsonSct {
                 version: sct.version,
-                log_id: hex_lower(&sct.log_id),
+                log_id: hex_upper(&sct.log_id),
                 timestamp: sct.timestamp.to_string(),
             })
             .collect(),
@@ -382,7 +382,13 @@ mod tests {
         assert_ne!(cert["scts"].as_array().unwrap().len(), 0);
         let sct = &cert["scts"][0];
         assert_eq!(sct["version"], 1);
-        assert_eq!(sct["log_id"].as_str().unwrap().len(), 64);
+        let log_id = sct["log_id"].as_str().unwrap();
+        assert_eq!(log_id.len(), 64);
+        assert_eq!(
+            log_id,
+            log_id.to_uppercase(),
+            "log_id must be upper-case hex"
+        );
         assert_ne!(cert["aia"]["ocsp"].as_array().unwrap().len(), 0);
     }
 

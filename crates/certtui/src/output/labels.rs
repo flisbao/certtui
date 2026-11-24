@@ -5,6 +5,27 @@ use certtui_domain::model::{
     CertOrigin, ExtendedKeyUsage, HashAlgorithm, KeyUsage, LoadNote, PublicKeyAlgorithm,
     RejectReason, SubjectAltName,
 };
+use certtui_domain::sanitize::sanitize_display;
+
+/// Single-line display form of certificate-derived text.
+///
+/// `sanitize_display` keeps `\n` and `\t`, and most certificate strings (SAN
+/// and AIA/CRL URLs, paths, ...) are not escaped by the domain, so they could
+/// forge output lines. Line breaks and tabs are shown as the literal sequences
+/// `\n`, `\r` and `\t` (nothing is dropped), then the remaining terminal
+/// controls are removed.
+pub fn single_line(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    sanitize_display(&escaped).into_owned()
+}
 
 /// Name of a public key algorithm family.
 pub fn public_key_algorithm(algorithm: &PublicKeyAlgorithm) -> String {
@@ -78,15 +99,13 @@ pub fn san_parts(san: &SubjectAltName) -> (&'static str, String) {
 
 /// `DNS:example.com`-style rendering of a subject alternative name.
 pub fn san_text(san: &SubjectAltName) -> String {
-    let (kind, value) = san_parts(san);
-    let prefix = match kind {
-        "dns" => "DNS",
-        "ip" => "IP",
-        "email" => "email",
-        "uri" => "URI",
-        _ => "other",
-    };
-    format!("{prefix}:{value}")
+    match san {
+        SubjectAltName::Dns(name) => format!("DNS:{name}"),
+        SubjectAltName::Ip(ip) => format!("IP:{ip}"),
+        SubjectAltName::Email(email) => format!("email:{email}"),
+        SubjectAltName::Uri(uri) => format!("URI:{uri}"),
+        SubjectAltName::Other { kind } => format!("other:{kind}"),
+    }
 }
 
 /// One-line description of where a certificate came from.
@@ -176,6 +195,13 @@ mod tests {
             }),
             "other:directoryName"
         );
+    }
+
+    #[test]
+    fn quando_single_line_deve_escapar_quebras_sem_perder_nada() {
+        assert_eq!(single_line("a\nb\tc\rd"), r"a\nb\tc\rd");
+        assert_eq!(single_line("a\u{1b}[31mb\u{202E}"), "a[31mb");
+        assert_eq!(single_line("limpo ção"), "limpo ção");
     }
 
     #[test]

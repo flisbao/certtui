@@ -7,7 +7,6 @@ use std::fmt::Write as _;
 use std::io::{self, Write};
 
 use certtui_domain::model::{CertificateRecord, FingerprintAlgorithm, FingerprintFormat};
-use certtui_domain::sanitize::sanitize_display;
 
 use super::{View, labels};
 
@@ -37,14 +36,15 @@ pub fn write(out: &mut dyn Write, view: &View<'_>) -> io::Result<()> {
 }
 
 fn line(out: &mut dyn Write, label: &str, value: &str) -> io::Result<()> {
-    writeln!(out, "{INDENT}{label}: {}", sanitize_display(value))
+    writeln!(out, "{INDENT}{label}: {}", labels::single_line(value))
 }
 
 fn list(out: &mut dyn Write, label: &str, values: &[String]) -> io::Result<()> {
     if values.is_empty() {
         return Ok(());
     }
-    line(out, label, &values.join(", "))
+    let items: Vec<String> = values.iter().map(|v| labels::single_line(v)).collect();
+    line(out, label, &items.join(", "))
 }
 
 fn write_certificate(
@@ -57,7 +57,7 @@ fn write_certificate(
     writeln!(
         out,
         "[{index}] Subject: {}",
-        sanitize_display(&summary.subject.rfc4514)
+        labels::single_line(&summary.subject.rfc4514)
     )?;
     line(out, "Issuer", &summary.issuer.rfc4514)?;
     line(out, "Origin", &labels::origin_text(&record.origin))?;
@@ -155,8 +155,8 @@ fn write_extensions(out: &mut dyn Write, record: &CertificateRecord) -> io::Resu
         writeln!(
             out,
             "{INDENT}  {} {}{critical}{undecodable}",
-            sanitize_display(&extension.oid),
-            sanitize_display(&extension.name),
+            labels::single_line(&extension.oid),
+            labels::single_line(&extension.name),
         )?;
     }
     Ok(())
@@ -199,7 +199,7 @@ fn public_key_text(record: &CertificateRecord) -> String {
 mod tests {
     use certtui_domain::model::LoadNote;
 
-    use super::super::testing::report;
+    use super::super::testing::{make_hostile, report, report_with};
     use super::*;
 
     fn render(view: &View<'_>) -> String {
@@ -260,6 +260,59 @@ mod tests {
         );
     }
 
+    /// Every line is either blank, indented, a `[N] Subject:` header or `Notes:`.
+    fn assert_layout_intact(text: &str, headers: usize) {
+        let mut seen = 0;
+        for line in text.lines() {
+            if line.starts_with("[0] Subject: ") {
+                seen += 1;
+            } else {
+                assert!(
+                    line.is_empty()
+                        || line.starts_with("    ")
+                        || line == "Notes:"
+                        || line.starts_with("  - "),
+                    "forged layout line: {line:?}"
+                );
+                assert!(!line.starts_with('['), "forged header: {line:?}");
+            }
+        }
+        assert_eq!(seen, headers);
+    }
+
+    #[test]
+    fn quando_texto_do_cert_tem_newline_e_tab_nao_deve_forjar_linhas() {
+        let report = report_with("rsa2048-leaf", make_hostile);
+        let text = render(&view(&report));
+        assert_layout_intact(&text, 1);
+        // Nothing is silently dropped: the controls are shown escaped.
+        assert!(text.contains(r"x\n[1] Subject: CN=Trusted Root CA\n    Issuer: evil\ty"));
+        assert!(!text.contains('\t'));
+    }
+
+    #[test]
+    fn quando_cada_campo_hostil_deve_ficar_em_uma_so_linha() {
+        let report = report_with("rsa2048-leaf", make_hostile);
+        let text = render(&view(&report));
+        for label in [
+            "Subject Alt Names: ",
+            "OCSP: ",
+            "CA Issuers: ",
+            "CRL Distribution Points: ",
+            "Issuer: ",
+            "Origin: ",
+            "Public Key: ",
+            "Signature Algorithm: ",
+        ] {
+            let lines: Vec<&str> = text
+                .lines()
+                .filter(|l| l.trim_start().starts_with(label))
+                .collect();
+            assert_eq!(lines.len(), 1, "{label}: {lines:?}");
+            assert!(lines[0].contains(r"\n"), "{label}: {}", lines[0]);
+        }
+    }
+
     #[test]
     fn quando_texto_do_cert_tem_controle_deve_sair_sanitizado() {
         let mut report = report(&["rsa2048-leaf"], Vec::new());
@@ -277,6 +330,7 @@ mod tests {
         assert!(text.contains("[0] Subject: CN=a[31mb\n"));
         assert!(text.contains("Issuer: CN=xy\n"));
         assert!(text.contains("CRL Distribution Points: http://a/b\n"));
+        assert_layout_intact(&text, 1);
         assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
     }
 }

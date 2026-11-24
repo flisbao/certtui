@@ -3,7 +3,6 @@
 use std::io::{self, Write};
 
 use certtui_domain::model::{CertificateRecord, FingerprintAlgorithm, FingerprintFormat};
-use certtui_domain::sanitize::sanitize_display;
 
 use super::{labels, pem};
 
@@ -44,20 +43,21 @@ pub enum Field {
 
 /// The value of `field` for `record`, with a final newline when non-empty.
 ///
-/// Text taken from the certificate is sanitized for terminal display.
+/// Text taken from the certificate is sanitized for terminal display and kept
+/// on one line per value (see [`labels::single_line`]).
 #[must_use]
 pub fn value(record: &CertificateRecord, field: Field, format: FingerprintFormat) -> String {
     let summary = &record.summary;
     let mut text = match field {
-        Field::Subject => sanitize_display(&summary.subject.rfc4514).into_owned(),
-        Field::Issuer => sanitize_display(&summary.issuer.rfc4514).into_owned(),
+        Field::Subject => labels::single_line(&summary.subject.rfc4514),
+        Field::Issuer => labels::single_line(&summary.issuer.rfc4514),
         Field::Serial => summary.serial.to_hex(),
         Field::NotBefore => summary.not_before.to_string(),
         Field::NotAfter => summary.not_after.to_string(),
         Field::Sans => summary
             .subject_alt_names
             .iter()
-            .map(|san| sanitize_display(&labels::san_text(san)).into_owned())
+            .map(|san| labels::single_line(&labels::san_text(san)))
             .collect::<Vec<_>>()
             .join("\n"),
         Field::FingerprintSha1 => record
@@ -93,7 +93,7 @@ pub fn write(
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::record;
+    use super::super::testing::{make_hostile, record, report_with};
     use super::*;
 
     #[test]
@@ -175,6 +175,33 @@ mod tests {
             value(&record, Field::Subject, FingerprintFormat::default()),
             "CN=a[31mb\n"
         );
+    }
+
+    #[test]
+    fn quando_san_tem_newline_e_tab_deve_dar_uma_linha_por_san() {
+        let report = report_with("rsa2048-leaf", make_hostile);
+        let record = report.chain.get(0).unwrap();
+        let text = value(record, Field::Sans, FingerprintFormat::default());
+        assert_eq!(text.lines().count(), record.summary.subject_alt_names.len());
+        assert!(text.ends_with('\n'));
+        assert!(!text.contains('\t'));
+        assert!(
+            text.lines()
+                .next()
+                .unwrap()
+                .starts_with(r"DNS:x\n[1] Subject")
+        );
+    }
+
+    #[test]
+    fn quando_subject_ou_issuer_tem_newline_deve_ser_uma_linha_escapada() {
+        let report = report_with("rsa2048-leaf", make_hostile);
+        let record = report.chain.get(0).unwrap();
+        for field in [Field::Subject, Field::Issuer] {
+            let text = value(record, field, FingerprintFormat::default());
+            assert_eq!(text.lines().count(), 1, "{text:?}");
+            assert!(text.contains(r"\n[1] Subject"));
+        }
     }
 
     #[test]

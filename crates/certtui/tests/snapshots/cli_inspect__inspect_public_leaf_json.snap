@@ -1,0 +1,156 @@
+---
+source: crates/certtui/tests/cli_inspect.rs
+expression: "String::from_utf8(out.stdout).unwrap()"
+---
+{
+  "schema_version": 1,
+  "target": {
+    "kind": "file",
+    "path": "public-leaf-with-sct.pem"
+  },
+  "notes": [],
+  "certificates": [
+    {
+      "index": 0,
+      "origin": {
+        "kind": "file",
+        "path": "public-leaf-with-sct.pem",
+        "index": 0
+      },
+      "version": 3,
+      "serial": "01EEE6AABB521D5E14FC315FD9985690",
+      "subject": {
+        "rfc4514": "CN=example.com",
+        "common_name": "example.com"
+      },
+      "issuer": {
+        "rfc4514": "CN=Cloudflare TLS Issuing ECC CA 3,O=SSL Corporation,C=US",
+        "common_name": "Cloudflare TLS Issuing ECC CA 3"
+      },
+      "not_before": "2026-09-26T22:49:11Z",
+      "not_after": "2026-12-25T22:56:35Z",
+      "public_key": {
+        "algorithm": "EC P-256",
+        "bits": 256,
+        "curve": "prime256v1"
+      },
+      "signature_algorithm": {
+        "oid": "1.2.840.10045.4.3.2",
+        "name": "ecdsa-with-SHA256",
+        "hash": "sha256"
+      },
+      "subject_alt_names": [
+        {
+          "type": "dns",
+          "value": "example.com"
+        },
+        {
+          "type": "dns",
+          "value": "*.example.com"
+        }
+      ],
+      "basic_constraints": {
+        "ca": false,
+        "path_len": null
+      },
+      "key_usage": [
+        "digitalSignature"
+      ],
+      "extended_key_usage": [
+        "serverAuth"
+      ],
+      "subject_key_id": null,
+      "authority_key_id": "8303FDE7F6F54A4D1541F4ED2216D3320A3ECA66",
+      "aia": {
+        "ocsp": [
+          "http://o.cf-i.ssl.com"
+        ],
+        "ca_issuers": [
+          "http://i.cf-i.ssl.com/Cloudflare-TLS-I-E3.cer"
+        ]
+      },
+      "crl_distribution_points": [
+        "http://c.cf-i.ssl.com/ae801ed1c55bb579d79208b0d772acfb8cc3a208.crl"
+      ],
+      "scts": [
+        {
+          "version": 1,
+          "log_id": "944E4387FAECC1EF81F3192426A8186501C7D35F3802013F72677D55372E19D8",
+          "timestamp": "2026-09-26T22:59:12Z"
+        },
+        {
+          "version": 1,
+          "log_id": "CB38F715897C84A1445F5BC1DDFBC96EF29A59CD470A690585B0CB14C31458E7",
+          "timestamp": "2026-09-26T22:59:12Z"
+        }
+      ],
+      "extensions": [
+        {
+          "oid": "2.5.29.19",
+          "critical": true,
+          "name": "Basic Constraints",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.35",
+          "critical": false,
+          "name": "Authority Key Identifier",
+          "decode_error": false
+        },
+        {
+          "oid": "1.3.6.1.5.5.7.1.1",
+          "critical": false,
+          "name": "Authority Information Access",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.17",
+          "critical": false,
+          "name": "Subject Alternative Name",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.32",
+          "critical": false,
+          "name": "Certificate Policies",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.37",
+          "critical": false,
+          "name": "Extended Key Usage",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.31",
+          "critical": false,
+          "name": "CRL Distribution Points",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.15",
+          "critical": true,
+          "name": "Key Usage",
+          "decode_error": false
+        },
+        {
+          "oid": "1.3.6.1.4.1.44363.44",
+          "critical": false,
+          "name": "1.3.6.1.4.1.44363.44",
+          "decode_error": false
+        },
+        {
+          "oid": "1.3.6.1.4.1.11129.2.4.2",
+          "critical": false,
+          "name": "Signed Certificate Timestamps",
+          "decode_error": false
+        }
+      ],
+      "fingerprints": {
+        "sha1": "89:9C:B2:59:E7:DE:8D:F1:00:33:A2:AF:48:C2:2C:2F:65:80:A2:1D",
+        "sha256": "85:CA:6A:B0:68:E9:BC:CE:88:B6:C4:AA:3C:47:F7:D1:72:28:13:4A:45:7F:87:0D:38:00:E6:22:3A:0D:F0:7A",
+        "sha512": "CE:F6:04:11:25:73:B1:B7:BE:CC:BA:5D:BE:81:D7:F1:C2:D9:AE:77:38:9F:DF:20:BA:25:D7:4A:39:2A:14:6E:BD:55:69:C1:31:9B:2B:67:69:D2:D0:11:B9:8D:4C:3C:1A:2A:E7:DD:BA:A7:50:4F:21:6A:1D:88:76:4B:6E:3E"
+      }
+    }
+  ]
+}

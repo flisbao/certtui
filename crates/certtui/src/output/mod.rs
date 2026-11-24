@@ -63,6 +63,45 @@ pub(crate) mod testing {
         .unwrap()
     }
 
+    /// A one-certificate report whose record is edited by `edit`.
+    pub(crate) fn report_with(
+        name: &str,
+        edit: impl FnOnce(&mut CertificateRecord),
+    ) -> InspectionReport {
+        let mut record = record(name, 0);
+        edit(&mut record);
+        let mut report = report(&[], Vec::new());
+        report.chain = Chain::new(vec![record], &Limits::default()).unwrap();
+        report
+    }
+
+    /// Edits every free-text field of a record so that it embeds newlines and
+    /// tabs plus a forged output line.
+    pub(crate) fn make_hostile(record: &mut CertificateRecord) {
+        use certtui_domain::model::SubjectAltName;
+        let forged = "x\n[1] Subject: CN=Trusted Root CA\n    Issuer: evil\ty";
+        record.summary.subject_alt_names = vec![
+            SubjectAltName::Dns(forged.to_owned()),
+            SubjectAltName::Uri(format!("http://{forged}")),
+            SubjectAltName::Email(forged.to_owned()),
+            SubjectAltName::Other {
+                kind: forged.to_owned(),
+            },
+        ];
+        record.summary.aia.ocsp = vec![format!("http://ocsp/{forged}")];
+        record.summary.aia.ca_issuers = vec![format!("http://ca/{forged}")];
+        record.summary.crl_distribution_points = vec![format!("http://crl/{forged}")];
+        record.summary.subject.rfc4514 = format!("CN={forged}");
+        record.summary.issuer.rfc4514 = format!("CN={forged}");
+        record.summary.public_key.curve = Some(forged.to_owned());
+        record.summary.signature_algorithm.name = forged.to_owned();
+        record.summary.extensions[0].name = forged.to_owned();
+        record.origin = CertOrigin::File {
+            path: PathBuf::from(format!("dir/{forged}.pem")),
+            index: 0,
+        };
+    }
+
     pub(crate) fn report(names: &[&str], notes: Vec<LoadNote>) -> InspectionReport {
         let records = names
             .iter()

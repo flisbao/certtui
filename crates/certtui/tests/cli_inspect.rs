@@ -451,6 +451,20 @@ fn quando_text_de_leaf_com_scts_deve_bater_com_snapshot() {
 }
 
 #[test]
+fn quando_json_do_leaf_publico_com_scts_deve_bater_com_snapshot() {
+    let out = certtui()
+        .current_dir(FIXTURES)
+        .args(["inspect", "public-leaf-with-sct.pem", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    insta::assert_snapshot!(
+        "inspect_public_leaf_json",
+        String::from_utf8(out.stdout).unwrap()
+    );
+}
+
+#[test]
 fn quando_sem_subcomando_deve_sair_2() {
     certtui().assert().code(2);
 }
@@ -478,11 +492,28 @@ fn assert_pem_shape(text: &str, count: usize) {
     assert_eq!(first_body.len(), 64);
 }
 
-fn tempdir(tag: &str) -> std::path::PathBuf {
+/// A scratch directory removed when dropped, even if the test fails.
+struct TempDir(std::path::PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn tempdir(tag: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!("certtui-cli-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    TempDir(dir)
 }
 
 fn esc_cert_pem() -> String {
