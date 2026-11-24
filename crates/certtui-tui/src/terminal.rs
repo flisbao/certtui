@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, Show};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -11,7 +12,7 @@ use crossterm::terminal::{
 /// Smallest terminal the screens are laid out for, as `(columns, rows)`.
 pub const MIN_SIZE: (u16, u16) = (80, 24);
 
-/// Raw mode plus the alternate screen, undone on drop.
+/// Raw mode, the alternate screen and bracketed paste, undone on drop.
 ///
 /// The mouse is never captured.
 #[derive(Debug)]
@@ -27,7 +28,12 @@ impl TerminalGuard {
     /// The terminal could not be configured. Nothing is left changed.
     pub fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
+        if let Err(error) = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            Hide
+        ) {
             restore_terminal();
             return Err(error);
         }
@@ -46,7 +52,7 @@ pub fn restore_terminal() {
     // Nothing can be done if the terminal itself is gone.
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
-    let _ = execute!(stdout, LeaveAlternateScreen, Show);
+    let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen, Show);
     let _ = stdout.flush();
 }
 

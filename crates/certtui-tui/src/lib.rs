@@ -29,4 +29,5 @@ pub use msg::{Command, Msg};
 pub use terminal::{MIN_SIZE, TerminalGuard, install_panic_hook, install_signal_restore};
 pub use theme::{Theme, ThemeKind};
 pub use update::update;
+pub use update_home::start_inspect;
 pub use view::view;

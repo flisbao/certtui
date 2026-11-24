@@ -135,6 +135,17 @@ fn byte_index(text: &str, chars: usize) -> usize {
         .map_or(text.len(), |(index, _)| index)
 }
 
+/// Opens the Inspect screen on `target` and asks for the job that feeds it.
+///
+/// Also what the binary uses to start on a target given on the command line.
+pub fn start_inspect(state: &mut AppState, target: Target) -> Vec<Command> {
+    let id = state.jobs.start();
+    state.screen = Screen::Inspect;
+    state.inspect = Some(InspectState::loading(id));
+    state.home.editing = false;
+    vec![Command::Inspect { id, target }]
+}
+
 fn submit(state: &mut AppState) -> Vec<Command> {
     let text = if state.home.input.trim().is_empty() {
         selected_row(state).cloned().unwrap_or_default()
@@ -145,13 +156,7 @@ fn submit(state: &mut AppState) -> Vec<Command> {
         return Vec::new();
     }
     match (state.target_parser)(&text) {
-        Ok(target) => {
-            let id = state.jobs.start();
-            state.screen = Screen::Inspect;
-            state.inspect = Some(InspectState::loading(id));
-            state.home.editing = false;
-            vec![Command::Inspect { id, target }]
-        }
+        Ok(target) => start_inspect(state, target),
         Err(message) => {
             let toast = Toast::new(message, ToastKind::Error, state.now);
             state.set_toast(toast);

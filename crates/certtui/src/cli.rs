@@ -277,28 +277,48 @@ struct Validation<'a> {
 }
 
 impl Validation<'_> {
-    /// The report with its trust verdict and findings filled in. A network
-    /// target is checked against its SNI, or else its host, unless
-    /// `--host-check` says otherwise.
+    /// The report with its trust verdict and findings filled in; see
+    /// [`validate_for_target`].
     fn apply(&self, report: InspectionReport) -> InspectionReport {
-        let network_host = match &report.target {
-            Target::Network(network) => {
-                Some(network.sni.clone().unwrap_or_else(|| network.host.clone()))
-            }
-            _ => None,
-        };
-        validate(
+        validate_for_target(
             report,
-            ValidationInputs {
-                verifier: self.env.verifier,
-                anchors: self.anchors,
-                clock: self.env.clock,
-                thresholds: self.thresholds,
-                hostname: self.host_check.map(str::to_owned).or(network_host.clone()),
-                is_network_target: network_host.is_some(),
-            },
+            self.env.verifier,
+            self.anchors,
+            self.env.clock,
+            self.thresholds,
+            self.host_check,
         )
     }
+}
+
+/// `report` with its trust verdict and findings filled in. A network target
+/// is checked against its SNI, or else its host, unless `host_check` names
+/// another name.
+pub fn validate_for_target(
+    report: InspectionReport,
+    verifier: &dyn ChainVerifier,
+    anchors: &TrustAnchors,
+    clock: &dyn Clock,
+    thresholds: Thresholds,
+    host_check: Option<&str>,
+) -> InspectionReport {
+    let network_host = match &report.target {
+        Target::Network(network) => {
+            Some(network.sni.clone().unwrap_or_else(|| network.host.clone()))
+        }
+        _ => None,
+    };
+    validate(
+        report,
+        ValidationInputs {
+            verifier,
+            anchors,
+            clock,
+            thresholds,
+            hostname: host_check.map(str::to_owned).or(network_host.clone()),
+            is_network_target: network_host.is_some(),
+        },
+    )
 }
 
 /// How the certificates are rendered.
