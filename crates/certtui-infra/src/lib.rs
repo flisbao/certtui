@@ -10,3 +10,6 @@ pub mod tls;
 
 /// Trust anchor loading: system, Mozilla and custom CA files.
 pub mod trust;
+
+/// Chain verification against trust anchors (`rustls-webpki`).
+pub mod chain_verifier;

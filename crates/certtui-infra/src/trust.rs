@@ -177,7 +177,7 @@ impl TrustStoreProvider for NativeTrustProvider {
 }
 
 /// Turns one DER certificate into an anchor; `None` when it is unusable.
-fn anchor_from_der(der: &[u8], source: TrustSource) -> Option<TrustAnchor> {
+pub(crate) fn anchor_from_der(der: &[u8], source: TrustSource) -> Option<TrustAnchor> {
     let cert_der = CertificateDer::from(der);
     let anchor = webpki::anchor_from_trusted_cert(&cert_der).ok()?;
     Some(TrustAnchor {

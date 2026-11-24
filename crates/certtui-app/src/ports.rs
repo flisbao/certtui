@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use certtui_domain::limits::Limits;
-use certtui_domain::model::{CertOrigin, LoadNote};
+use certtui_domain::model::{CertOrigin, Chain, LoadNote, TrustVerdict};
 use certtui_domain::time::Timestamp;
 use tokio_util::sync::CancellationToken;
 
@@ -116,4 +116,29 @@ pub trait TrustStoreProvider: Send + Sync {
     ///
     /// Returns [`TrustError`] if a required custom CA file cannot be read.
     fn anchors(&self, sources: &[TrustSource]) -> Result<TrustAnchors, TrustError>;
+}
+
+/// Outcome of verifying a chain: trust decision plus the hostname check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainVerification {
+    /// Whether the chain validates against the supplied anchors.
+    pub trust: TrustVerdict,
+    /// Whether the leaf matches the requested hostname; `None` when no
+    /// hostname was given.
+    pub hostname_ok: Option<bool>,
+}
+
+/// Decides whether a chain is trusted for server authentication.
+pub trait ChainVerifier: Send + Sync {
+    /// Verifies `chain` (leaf first, intermediates in any order) against
+    /// `anchors` at instant `now`, and the leaf against `hostname` when
+    /// given. Never panics: every failure becomes an `Untrusted` verdict
+    /// whose reason carries no certificate bytes.
+    fn verify(
+        &self,
+        chain: &Chain,
+        anchors: &TrustAnchors,
+        hostname: Option<&str>,
+        now: Timestamp,
+    ) -> ChainVerification;
 }
