@@ -4,6 +4,7 @@
 # Runs the release binary on the Home screen in a pty (`script`), keeps it
 # idle for 10 seconds and reads its user+system time from /proc.
 set -euo pipefail
+export LC_ALL=C
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"

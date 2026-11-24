@@ -446,4 +446,25 @@ mod tests {
         update(&mut state, key('j'));
         assert_eq!(inspect(&state).phase, Phase::Loading);
     }
+
+    #[test]
+    fn quando_resize_durante_job_em_voo_deve_manter_o_job_e_a_tela() {
+        let (mut state, id) = loading_state();
+        for (columns, rows) in [(79, 24), (200, 60), (80, 24)] {
+            assert_eq!(update(&mut state, Msg::Resize(columns, rows)), Vec::new());
+            assert_eq!(state.size, (columns, rows));
+        }
+        assert_eq!(state.screen, Screen::Inspect);
+        assert_eq!(inspect(&state).job, id);
+        assert!(state.jobs.is_active(id));
+        // The result still lands after the resizes.
+        update(
+            &mut state,
+            Msg::InspectDone {
+                id,
+                result: Ok(Arc::new(sample_report())),
+            },
+        );
+        assert!(inspect(&state).report().is_some());
+    }
 }

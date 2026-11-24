@@ -75,5 +75,9 @@ cargo build --locked --release --workspace
 if [ -x scripts/rss_check.sh ]; then
     scripts/rss_check.sh
 fi
+# Skips itself when `script` (util-linux) is not installed.
+if [ -x scripts/idle_cpu_check.sh ]; then
+    scripts/idle_cpu_check.sh
+fi
 
 echo "== all gates passed =="
