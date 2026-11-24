@@ -135,6 +135,22 @@ fn quando_alvo_e_dominio_deve_sair_2_com_mensagem() {
 }
 
 #[test]
+fn quando_alvo_de_rede_e_invalido_deve_sair_2_com_mensagem_especifica() {
+    for (target, message) in [
+        ("http://example.com", "unsupported scheme `http`"),
+        ("example.com:99999", "invalid port"),
+        ("https://user:pw@example.com", "credentials"),
+        ("https://", "empty target"),
+    ] {
+        let out = certtui().args(["inspect", target]).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{target}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(message), "{target}: {stderr}");
+        assert!(!stderr.contains("pw"), "{target}: {stderr}");
+    }
+}
+
+#[test]
 fn quando_stdin_e_texto_sujo_deve_achar_certs() {
     let dirty = std::fs::read(fixture("messy/bundle-mixed.txt")).unwrap();
     let out = certtui()

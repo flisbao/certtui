@@ -14,7 +14,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::exit_code::ExitCode;
 use crate::output::field::Field;
 use crate::output::{self, View};
-use crate::target_parse::{local_source, parse_local_target};
+use crate::target_parse::{UsageError, local_source, parse_target};
 
 /// Inspect and analyze X.509 certificates.
 #[derive(Debug, Parser)]
@@ -150,12 +150,14 @@ fn inspect(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> anyhow::Result<ExitCode> {
-    let target = match parse_local_target(&args.target, args.file, args.recursive) {
+    let target = match parse_target(&args.target, args.file, args.recursive, &|path| {
+        path.exists()
+    }) {
         Ok(target) => target,
         Err(error) => return usage(err, &error.to_string()),
     };
     let Some(source) = local_source(&target) else {
-        return usage(err, "network targets arrive in a later release");
+        return usage(err, &UsageError::NetworkTarget.to_string());
     };
     let report = match inspect_local(loader, &source, target, &Limits::default()) {
         Ok(report) => report,
