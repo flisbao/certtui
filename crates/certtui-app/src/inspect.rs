@@ -68,6 +68,7 @@ fn build_report(target: Target, chain: Chain, notes: Vec<LoadNote>) -> Inspectio
     InspectionReport {
         target,
         tls: None,
+        ocsp_staple: None,
         chain,
         trust: TrustVerdict::NotEvaluated,
         revocation: Vec::new(),

@@ -86,6 +86,9 @@ pub struct InspectionReport {
     pub target: Target,
     /// TLS session parameters (network targets only).
     pub tls: Option<TlsSessionInfo>,
+    /// Stapled OCSP response bytes (network targets only), when the server
+    /// sent one. The JSON layer reports only `{"present", "bytes"}`.
+    pub ocsp_staple: Option<Vec<u8>>,
     /// The certificates found.
     pub chain: Chain,
     /// Trust verdict.

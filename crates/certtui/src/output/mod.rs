@@ -111,6 +111,7 @@ pub(crate) mod testing {
         InspectionReport {
             target: Target::File(PathBuf::from("x.pem")),
             tls: None,
+            ocsp_staple: None,
             chain: Chain::new(records, &Limits::default()).unwrap(),
             trust: TrustVerdict::NotEvaluated,
             revocation: Vec::new(),

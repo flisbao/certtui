@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{CertOrigin, LoadNote};
 use certtui_domain::time::Timestamp;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::LoadError;
+use crate::fetch::{FetchError, FetchRequest, FetchedChain};
 
 /// Source of the current time.
 ///
@@ -82,4 +84,23 @@ pub trait SourceLoader: Send + Sync {
     ///
     /// [`LoadError`] when the source cannot be read or is unsupported.
     fn load(&self, src: &LocalSource, limits: &Limits) -> Result<LoadedCerts, LoadError>;
+}
+
+/// Fetches the certificate chain a network target presents.
+///
+/// Object safe: the application layer holds it as `dyn ChainFetcher`.
+#[async_trait::async_trait]
+pub trait ChainFetcher: Send + Sync {
+    /// Connects to `req.target` within `req.limits` and returns what the
+    /// peer presented. Implementations stop promptly once `cancel` fires.
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError`] when resolution, connection or the handshake fails,
+    /// a budget is exceeded, or the fetch is cancelled.
+    async fn fetch(
+        &self,
+        req: &FetchRequest,
+        cancel: CancellationToken,
+    ) -> Result<FetchedChain, FetchError>;
 }

@@ -3,8 +3,11 @@
 use certtui_domain::limits::Limits;
 use certtui_domain::time::Timestamp;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::error::LoadError;
-use crate::ports::{Clock, LoadedCerts, LocalSource, SourceLoader};
+use crate::fetch::{FetchError, FetchRequest, FetchedChain};
+use crate::ports::{ChainFetcher, Clock, LoadedCerts, LocalSource, SourceLoader};
 
 /// A [`Clock`] that always returns the same instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +25,25 @@ pub struct FakeSourceLoader(pub Result<LoadedCerts, LoadError>);
 
 impl SourceLoader for FakeSourceLoader {
     fn load(&self, _src: &LocalSource, _limits: &Limits) -> Result<LoadedCerts, LoadError> {
+        self.0.clone()
+    }
+}
+
+/// A [`ChainFetcher`] that returns a canned result whatever the request,
+/// except that an already cancelled token yields [`FetchError::Cancelled`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeChainFetcher(pub Result<FetchedChain, FetchError>);
+
+#[async_trait::async_trait]
+impl ChainFetcher for FakeChainFetcher {
+    async fn fetch(
+        &self,
+        _req: &FetchRequest,
+        cancel: CancellationToken,
+    ) -> Result<FetchedChain, FetchError> {
+        if cancel.is_cancelled() {
+            return Err(FetchError::Cancelled);
+        }
         self.0.clone()
     }
 }

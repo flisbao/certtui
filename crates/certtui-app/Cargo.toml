@@ -8,8 +8,13 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait = "0.1.92"
 certtui-domain = { path = "../certtui-domain" }
 thiserror = "2"
+tokio-util = { version = "0.7.20", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt"] }
 
 [features]
 # Exposes test doubles (e.g. `FixedClock`) to downstream crates' tests.

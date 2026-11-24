@@ -2,6 +2,8 @@
 
 pub mod error;
 
+pub mod fetch;
+
 pub mod inspect;
 
 pub mod ports;
