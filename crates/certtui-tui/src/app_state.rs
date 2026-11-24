@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use certtui_domain::limits::Limits;
 use certtui_domain::model::{FingerprintFormat, InspectionReport};
 use certtui_domain::target::Target;
 
@@ -252,6 +253,8 @@ pub struct AppState {
     pub should_quit: bool,
     /// How text typed on Home becomes a target.
     pub target_parser: TargetParser,
+    /// Largest text a copy may put on the clipboard, in bytes.
+    pub max_clipboard_bytes: usize,
 }
 
 impl AppState {
@@ -276,6 +279,7 @@ impl AppState {
             now,
             should_quit: false,
             target_parser: crate::update_home::default_target_parser,
+            max_clipboard_bytes: Limits::default().max_clipboard_bytes,
         }
     }
 }

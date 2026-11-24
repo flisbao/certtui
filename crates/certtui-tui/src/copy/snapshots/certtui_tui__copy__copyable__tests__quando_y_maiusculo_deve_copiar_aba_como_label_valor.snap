@@ -1,0 +1,14 @@
+---
+source: crates/certtui-tui/src/copy/copyable.rs
+expression: payload.text
+---
+Subject: CN=rsa2048.example.test,O=CertTui Test,C=BR
+Issuer: CN=rsa2048.example.test,O=CertTui Test,C=BR
+Serial: 737165299F2A97F62F082F339CADEB39BD78B1CE
+Not Before: 2026-11-23T21:05:35Z
+Not After: 2036-11-20T21:05:35Z
+Public Key: RSA (2048 bits)
+Signature: sha256WithRSAEncryption
+SHA-256: DD:DB:9B:86:33:47:FC:84:96:10:30:C3:F4:C5:7C:66:CA:BF:92:1E:D4:B4:3A:15:CE:41:B7:9F:39:A6:63:BB
+Origin: presented by server, position 0
+Trust: untrusted (unknown issuer)

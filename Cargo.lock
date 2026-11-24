@@ -357,6 +357,7 @@ dependencies = [
  "certtui-domain",
  "rcgen",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -409,6 +410,7 @@ dependencies = [
  "insta",
  "ratatui",
  "rcgen",
+ "serde_json",
  "tokio",
 ]
 

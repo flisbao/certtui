@@ -6,9 +6,11 @@ use certtui_app::present::labels;
 use certtui_domain::model::InspectionReport;
 
 use crate::app_state::{AppState, InspectState, Pane, Phase, Screen};
+use crate::copy::{Copyable as _, InspectCopy};
 use crate::detail_rows::{DetailRow, rows_for_tab};
 use crate::keymap::Action;
 use crate::msg::Command;
+use crate::toast::{Toast, ToastKind};
 use crate::update::on_global_action;
 use crate::view::details_viewport_rows;
 
@@ -59,6 +61,11 @@ pub fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
         Action::PrevTab => change_tab(state, false),
         Action::Down => move_cursor(state, true),
         Action::Up => move_cursor(state, false),
+        Action::CopyFocused
+        | Action::CopyView
+        | Action::CopyPem
+        | Action::CopyChainPem
+        | Action::CopyJson => return copy(state, action),
         _ => return on_global_action(state, action),
     }
     Vec::new()
@@ -110,6 +117,41 @@ fn change_tab(state: &mut AppState, forward: bool) {
         inspect.row_cursor = 0;
         inspect.scroll = 0;
     }
+}
+
+/// Builds the copy for `action` and asks for it, or explains why not.
+fn copy(state: &mut AppState, action: Action) -> Vec<Command> {
+    let payload = {
+        let Some(inspect) = state.inspect.as_ref() else {
+            return Vec::new();
+        };
+        let view = InspectCopy {
+            inspect,
+            format: state.fingerprint_format,
+        };
+        match action {
+            Action::CopyFocused => view.copy_focused(),
+            Action::CopyView => view.copy_view(),
+            Action::CopyPem => view.copy_pem(),
+            Action::CopyChainPem => view.copy_chain_pem(),
+            Action::CopyJson => view.copy_json(),
+            _ => None,
+        }
+    };
+    let Some(payload) = payload else {
+        return Vec::new();
+    };
+    if payload.text.len() > state.max_clipboard_bytes {
+        let kib = payload.text.len().div_ceil(1024);
+        let toast = Toast::new(
+            format!("too large to copy ({kib} KiB); press e to export"),
+            ToastKind::Error,
+            state.now,
+        );
+        state.set_toast(toast);
+        return Vec::new();
+    }
+    vec![Command::CopyToClipboard(payload)]
 }
 
 /// The rows of the visible tab; empty until the report is ready.
