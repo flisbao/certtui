@@ -9,6 +9,11 @@ impressos. Essa chave nunca protegeu nada.
 > `grep -rl "PRIVATE KE[Y]" tests/fixtures` deve listar **somente**
 > `messy/with-private-key.txt`.
 
+A mesma chave descartável também existe em
+`fuzz/corpus/extract_text_certs/with-private-key.txt` (semente do fuzzer).
+Scanners de segredos podem sinalizar os dois arquivos; ambos são falsos
+positivos conhecidos.
+
 ## Regra "zero OpenSSL"
 
 O projeto Rust nunca chama o OpenSSL. Os dois scripts desta pasta

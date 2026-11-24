@@ -97,9 +97,6 @@ pub(crate) struct ConsumedRanges {
     ranges: Vec<Range<usize>>,
 }
 
-// Justificativa: the query helpers are first used by the detectors of the
-// following tasks; until then only the tests exercise them.
-#[cfg_attr(not(test), allow(dead_code))]
 impl ConsumedRanges {
     /// Records `range`, keeping the list sorted by start. Empty ranges are
     /// ignored. Ranges must not overlap one already recorded (detectors check
@@ -123,6 +120,16 @@ impl ConsumedRanges {
         self.ranges.insert(at, range);
     }
 
+    /// The consumed ranges, sorted by start.
+    pub(crate) fn as_slice(&self) -> &[Range<usize>] {
+        &self.ranges
+    }
+}
+
+/// Query helpers exercised only by the tests: the detectors claim ranges and
+/// never ask about them.
+#[cfg(test)]
+impl ConsumedRanges {
     /// Whether `pos` lies inside a consumed range.
     pub(crate) fn contains(&self, pos: usize) -> bool {
         let at = self.ranges.partition_point(|r| r.start <= pos);
@@ -140,11 +147,6 @@ impl ConsumedRanges {
         at.checked_sub(1)
             .and_then(|i| self.ranges.get(i))
             .is_some_and(|r| r.end > range.start)
-    }
-
-    /// The consumed ranges, sorted by start.
-    pub(crate) fn as_slice(&self) -> &[Range<usize>] {
-        &self.ranges
     }
 }
 

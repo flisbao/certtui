@@ -39,11 +39,20 @@ fn line(out: &mut dyn Write, label: &str, value: &str) -> io::Result<()> {
     writeln!(out, "{INDENT}{label}: {}", labels::single_line(value))
 }
 
+/// Escapes `\` and `,` so that an item can never contain the `", "`
+/// separator: a value such as `x, DNS:evil` cannot pass for two entries.
+fn escape_list_item(value: &str) -> String {
+    value.replace('\\', r"\\").replace(',', r"\,")
+}
+
 fn list(out: &mut dyn Write, label: &str, values: &[String]) -> io::Result<()> {
     if values.is_empty() {
         return Ok(());
     }
-    let items: Vec<String> = values.iter().map(|v| labels::single_line(v)).collect();
+    let items: Vec<String> = values
+        .iter()
+        .map(|value| labels::single_line(&escape_list_item(value)))
+        .collect();
     line(out, label, &items.join(", "))
 }
 
@@ -311,6 +320,29 @@ mod tests {
             assert_eq!(lines.len(), 1, "{label}: {lines:?}");
             assert!(lines[0].contains(r"\n"), "{label}: {}", lines[0]);
         }
+    }
+
+    #[test]
+    fn quando_san_contem_separador_de_lista_nao_deve_forjar_outro_san() {
+        let mut report = report(&["rsa2048-leaf"], Vec::new());
+        let mut record = report.chain.get(0).unwrap().clone();
+        record.summary.subject_alt_names = vec![
+            certtui_domain::model::SubjectAltName::Dns("a.test".to_owned()),
+            certtui_domain::model::SubjectAltName::Dns("x, DNS:evil.test".to_owned()),
+            certtui_domain::model::SubjectAltName::Dns(r"back\slash".to_owned()),
+        ];
+        report.chain = certtui_domain::model::Chain::new(
+            vec![record],
+            &certtui_domain::limits::Limits::default(),
+        )
+        .unwrap();
+        let text = render(&view(&report));
+        assert!(
+            text.contains(
+                r"    Subject Alt Names: DNS:a.test, DNS:x\, DNS:evil.test, DNS:back\\slash"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

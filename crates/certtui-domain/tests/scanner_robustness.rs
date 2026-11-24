@@ -6,7 +6,7 @@
 
 mod support;
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use certtui_domain::extract::{CandidateKind, ScanOutcome, scan_text};
 use certtui_domain::limits::Limits;
@@ -18,12 +18,7 @@ use support::*;
 fn scan_within_budget(input: &[u8]) -> ScanOutcome {
     let started = Instant::now();
     let out = scan_text(input, &Limits::default());
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "demorou {elapsed:?} para {} bytes",
-        input.len()
-    );
+    assert_within_budget(started, input.len());
     out
 }
 

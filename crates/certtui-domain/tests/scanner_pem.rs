@@ -274,7 +274,7 @@ fn quando_muitos_begin_sem_end_deve_terminar_em_tempo_linear() {
         out.diagnostics.len(),
         Limits::default().max_scan_diagnostics
     );
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_within_budget(started, input.len());
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn quando_corpo_enorme_sem_end_deve_terminar_em_tempo_linear() {
     let started = std::time::Instant::now();
     let out = scan(&input);
     assert_eq!(reasons(&out), vec![RejectReason::UnterminatedPem]);
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_within_budget(started, input.len());
 }
 
 #[test]
@@ -310,7 +310,7 @@ fn quando_muitos_begin_com_corpo_parcial_sem_end_deve_terminar_em_tempo_linear()
     let out = scan(input.as_bytes());
     assert_eq!(out.candidates.len(), 0);
     assert!(out.diagnostics_truncated);
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_within_budget(started, input.len());
 }
 
 #[test]

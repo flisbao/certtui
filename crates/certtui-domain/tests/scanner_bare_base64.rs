@@ -298,11 +298,7 @@ fn quando_ha_muitos_certs_base64_colados_sem_separador_deve_ser_linear_e_dedupli
     assert!(input.len() > 4 * 1024 * 1024);
     let started = std::time::Instant::now();
     let out = scan_text(input.as_bytes(), &limits);
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "demorou {:?}",
-        started.elapsed()
-    );
+    assert_within_budget(started, input.len());
     assert_eq!(out.candidates.len(), 1, "6000 copias do mesmo certificado");
     assert!(!out.truncated);
 }

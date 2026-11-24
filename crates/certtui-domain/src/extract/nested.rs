@@ -544,6 +544,10 @@ mod tests {
         let reasons: Vec<RejectReason> = det.diagnostics.iter().map(|d| d.reason).collect();
         assert_eq!(reasons, vec![RejectReason::NestingTooDeep]);
         assert_eq!(det.diagnostics[0].offset, 0);
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Wall-clock budgets are not enforced under `cargo llvm-cov` (see
+        // `tests/support::timing_enforced`); the plain test step keeps them.
+        let instrumented = std::env::var_os("CARGO_LLVM_COV").is_some()
+            || std::env::var_os("LLVM_PROFILE_FILE").is_some();
+        assert!(instrumented || started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

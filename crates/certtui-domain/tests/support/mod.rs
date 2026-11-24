@@ -67,12 +67,28 @@ pub fn ders(out: &ScanOutcome) -> Vec<&Vec<u8>> {
 pub fn assert_fast(input: &[u8]) -> ScanOutcome {
     let started = std::time::Instant::now();
     let out = scan(input);
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "demorou {:?}",
-        started.elapsed()
-    );
+    assert_within_budget(started, input.len());
     out
+}
+
+/// Whether wall-clock budgets are enforced in this run.
+///
+/// They are not under `cargo llvm-cov`: coverage instrumentation plus the
+/// tests running in parallel on a shared CI runner make elapsed time
+/// meaningless (a 5 s budget measured 5.81 s there). The plain `cargo test`
+/// step keeps enforcing every budget.
+pub fn timing_enforced() -> bool {
+    std::env::var_os("CARGO_LLVM_COV").is_none() && std::env::var_os("LLVM_PROFILE_FILE").is_none()
+}
+
+/// Fails when a scan of `bytes` bytes that began at `started` took 5 s or
+/// more (see [`timing_enforced`]).
+pub fn assert_within_budget(started: std::time::Instant, bytes: usize) {
+    let elapsed = started.elapsed();
+    assert!(
+        !timing_enforced() || elapsed < std::time::Duration::from_secs(5),
+        "demorou {elapsed:?} para {bytes} bytes"
+    );
 }
 
 pub const FOUR_MIB: usize = 4 * 1024 * 1024;
