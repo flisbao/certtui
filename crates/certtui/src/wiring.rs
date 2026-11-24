@@ -15,6 +15,7 @@ use certtui_infra::trust::NativeTrustProvider;
 
 use crate::cli;
 use crate::exit_code::ExitCode;
+use crate::tui_launch::ProcessLauncher;
 
 /// Runs the CLI against the real process environment.
 pub fn run_process() -> std::process::ExitCode {
@@ -36,6 +37,7 @@ pub fn run_process() -> std::process::ExitCode {
         verifier: &verifier,
         clock: &clock,
         trust_provider: &trust_provider,
+        tui: &ProcessLauncher,
     };
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();

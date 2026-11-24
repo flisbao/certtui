@@ -16,6 +16,7 @@ use certtui_domain::sanitize::sanitize_display;
 /// forge output lines. Line breaks and tabs are shown as the literal sequences
 /// `\n`, `\r` and `\t` (nothing is dropped), then the remaining terminal
 /// controls are removed.
+#[must_use]
 pub fn single_line(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
@@ -30,6 +31,7 @@ pub fn single_line(text: &str) -> String {
 }
 
 /// One-line description of a trust verdict.
+#[must_use]
 pub fn trust_text(trust: &TrustVerdict) -> String {
     match trust {
         TrustVerdict::Trusted { anchor } => format!("trusted (anchor: {})", single_line(anchor)),
@@ -39,6 +41,7 @@ pub fn trust_text(trust: &TrustVerdict) -> String {
 }
 
 /// Lower-case name of a severity.
+#[must_use]
 pub fn severity_text(severity: Severity) -> &'static str {
     match severity {
         Severity::Info => "info",
@@ -48,6 +51,7 @@ pub fn severity_text(severity: Severity) -> &'static str {
 }
 
 /// One-line description of a finding: `error EXPIRED [cert 0]: message`.
+#[must_use]
 pub fn finding_text(finding: &Finding) -> String {
     let cert = finding
         .cert_index
@@ -61,6 +65,7 @@ pub fn finding_text(finding: &Finding) -> String {
 }
 
 /// Name of a public key algorithm family.
+#[must_use]
 pub fn public_key_algorithm(algorithm: &PublicKeyAlgorithm) -> String {
     match algorithm {
         PublicKeyAlgorithm::Rsa => "RSA".to_owned(),
@@ -74,6 +79,7 @@ pub fn public_key_algorithm(algorithm: &PublicKeyAlgorithm) -> String {
 }
 
 /// Lower-case name of a signature hash.
+#[must_use]
 pub fn hash_name(hash: HashAlgorithm) -> &'static str {
     match hash {
         HashAlgorithm::Md5 => "md5",
@@ -88,6 +94,7 @@ pub fn hash_name(hash: HashAlgorithm) -> &'static str {
 }
 
 /// RFC 5280 names of the set key usage bits, in bit order.
+#[must_use]
 pub fn key_usage_names(usage: &KeyUsage) -> Vec<&'static str> {
     [
         (usage.digital_signature, "digitalSignature"),
@@ -106,6 +113,7 @@ pub fn key_usage_names(usage: &KeyUsage) -> Vec<&'static str> {
 }
 
 /// Name of an extended key usage purpose (the dotted OID when unknown).
+#[must_use]
 pub fn extended_key_usage(usage: &ExtendedKeyUsage) -> String {
     match usage {
         ExtendedKeyUsage::ServerAuth => "serverAuth".to_owned(),
@@ -120,6 +128,7 @@ pub fn extended_key_usage(usage: &ExtendedKeyUsage) -> String {
 }
 
 /// Kind tag and value of a subject alternative name.
+#[must_use]
 pub fn san_parts(san: &SubjectAltName) -> (&'static str, String) {
     match san {
         SubjectAltName::Dns(name) => ("dns", name.clone()),
@@ -131,6 +140,7 @@ pub fn san_parts(san: &SubjectAltName) -> (&'static str, String) {
 }
 
 /// `DNS:example.com`-style rendering of a subject alternative name.
+#[must_use]
 pub fn san_text(san: &SubjectAltName) -> String {
     match san {
         SubjectAltName::Dns(name) => format!("DNS:{name}"),
@@ -142,6 +152,7 @@ pub fn san_text(san: &SubjectAltName) -> String {
 }
 
 /// One-line description of where a certificate came from.
+#[must_use]
 pub fn origin_text(origin: &CertOrigin) -> String {
     match origin {
         CertOrigin::Presented { position } => format!("presented by server, position {position}"),
@@ -168,6 +179,7 @@ fn reject_reason(reason: RejectReason) -> &'static str {
 }
 
 /// One-line description of a load diagnostic (never any content).
+#[must_use]
 pub fn note_text(note: &LoadNote) -> String {
     match note {
         LoadNote::HandshakeFailedAfterClientCertRequest { peer_ip } => {

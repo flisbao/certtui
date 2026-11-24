@@ -1,0 +1,6 @@
+---
+source: crates/certtui-tui/src/view/mod.rs
+expression: screen
+---
+terminal too small
+need at least 80x24, have 79x24

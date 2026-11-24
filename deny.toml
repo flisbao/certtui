@@ -26,6 +26,9 @@ allow = [
 ]
 exceptions = [
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@=1.0.12" },
+    # Windows-only dependencies of `arboard` (see docs/adr/0004).
+    { allow = ["BSL-1.0"], crate = "clipboard-win@=5.4.3" },
+    { allow = ["BSL-1.0"], crate = "error-code@=3.4.0" },
 ]
 confidence-threshold = 0.93
 

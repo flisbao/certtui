@@ -2,25 +2,9 @@
 
 use std::io::{self, Write};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-
 use super::View;
 
-const COLUMNS: usize = 64;
-
-/// PEM text of one DER certificate, ending in a newline.
-#[must_use]
-pub fn encode(der: &[u8]) -> String {
-    let body: Vec<char> = STANDARD.encode(der).chars().collect();
-    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
-    for line in body.chunks(COLUMNS) {
-        out.extend(line);
-        out.push('\n');
-    }
-    out.push_str("-----END CERTIFICATE-----\n");
-    out
-}
+pub use certtui_app::present::pem::encode;
 
 /// Writes the PEM of every selected certificate.
 ///

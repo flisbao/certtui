@@ -9,7 +9,9 @@ use certtui_app::check::FailOn;
 use certtui_app::error::{InspectError, LoadError};
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
-use certtui_app::ports::{ChainFetcher, ChainVerifier, Clock, SourceLoader, TrustStoreProvider};
+use certtui_app::ports::{
+    ChainFetcher, ChainVerifier, Clock, LocalSource, SourceLoader, TrustStoreProvider,
+};
 use certtui_app::trust::{TrustAnchors, TrustSource, resolve_sources};
 use certtui_app::validate::{ValidationInputs, validate};
 use certtui_domain::limits::Limits;
@@ -26,14 +28,15 @@ use crate::output::field::Field;
 use crate::output::{self, View};
 use crate::runtime;
 use crate::target_parse::{local_source, parse_target};
+use crate::tui_launch::{InspectorOptions, TuiLauncher, TuiRequest};
 
 /// Inspect and analyze X.509 certificates.
 #[derive(Debug, Parser)]
 #[command(name = "certtui", version, about)]
 pub struct Cli {
-    /// What to do.
+    /// What to do. Without a command, the interactive UI opens.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
     /// Server name to send in SNI instead of the host (network targets only).
     /// An IP literal sends no SNI.
     #[arg(long, global = true, value_name = "NAME")]
@@ -71,6 +74,12 @@ pub enum Command {
     Inspect(InspectArgs),
     /// Validate the certificates of one or more targets and report findings.
     Check(CheckArgs),
+    /// `certtui <TARGET>`: open the interactive UI on a file, a directory, `-`
+    /// for standard input, or a TLS server. Without a terminal it is
+    /// inspected like `certtui inspect --text <TARGET>`. Options go before
+    /// the target.
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 /// Trust source (`--trust`).
@@ -234,6 +243,8 @@ pub struct Env<'a> {
     pub clock: &'a dyn Clock,
     /// Builds the trust store provider for the `--ca-file` paths of a run.
     pub trust_provider: &'a dyn Fn(Vec<PathBuf>) -> Box<dyn TrustStoreProvider>,
+    /// Opens the interactive UI.
+    pub tui: &'a dyn TuiLauncher,
 }
 
 /// Trust-related options shared by every command.
@@ -277,28 +288,48 @@ struct Validation<'a> {
 }
 
 impl Validation<'_> {
-    /// The report with its trust verdict and findings filled in. A network
-    /// target is checked against its SNI, or else its host, unless
-    /// `--host-check` says otherwise.
+    /// The report with its trust verdict and findings filled in; see
+    /// [`validate_for_target`].
     fn apply(&self, report: InspectionReport) -> InspectionReport {
-        let network_host = match &report.target {
-            Target::Network(network) => {
-                Some(network.sni.clone().unwrap_or_else(|| network.host.clone()))
-            }
-            _ => None,
-        };
-        validate(
+        validate_for_target(
             report,
-            ValidationInputs {
-                verifier: self.env.verifier,
-                anchors: self.anchors,
-                clock: self.env.clock,
-                thresholds: self.thresholds,
-                hostname: self.host_check.map(str::to_owned).or(network_host.clone()),
-                is_network_target: network_host.is_some(),
-            },
+            self.env.verifier,
+            self.anchors,
+            self.env.clock,
+            self.thresholds,
+            self.host_check,
         )
     }
+}
+
+/// `report` with its trust verdict and findings filled in. A network target
+/// is checked against its SNI, or else its host, unless `host_check` names
+/// another name.
+pub fn validate_for_target(
+    report: InspectionReport,
+    verifier: &dyn ChainVerifier,
+    anchors: &TrustAnchors,
+    clock: &dyn Clock,
+    thresholds: Thresholds,
+    host_check: Option<&str>,
+) -> InspectionReport {
+    let network_host = match &report.target {
+        Target::Network(network) => {
+            Some(network.sni.clone().unwrap_or_else(|| network.host.clone()))
+        }
+        _ => None,
+    };
+    validate(
+        report,
+        ValidationInputs {
+            verifier,
+            anchors,
+            clock,
+            thresholds,
+            hostname: host_check.map(str::to_owned).or(network_host.clone()),
+            is_network_target: network_host.is_some(),
+        },
+    )
 }
 
 /// How the certificates are rendered.
@@ -365,7 +396,7 @@ pub fn run(
         host_check: cli.host_check,
     };
     match cli.command {
-        Command::Inspect(inspect_args) => inspect(
+        Some(Command::Inspect(inspect_args)) => inspect(
             &inspect_args,
             &network_options,
             &trust_options,
@@ -373,10 +404,99 @@ pub fn run(
             out,
             err,
         ),
-        Command::Check(check_args) => {
+        Some(Command::Check(check_args)) => {
             check(&check_args, &network_options, &trust_options, env, out, err)
         }
+        Some(Command::External(words)) => match words.as_slice() {
+            [target] => open_tui(
+                Some(target),
+                &network_options,
+                &trust_options,
+                env,
+                out,
+                err,
+            ),
+            _ => usage(
+                err,
+                "options go before the target: certtui [OPTIONS] <TARGET>",
+            ),
+        },
+        None => open_tui(None, &network_options, &trust_options, env, out, err),
     }
+}
+
+/// `certtui [TARGET]`: the interactive UI, or `inspect --text` when there is
+/// no terminal to draw on.
+fn open_tui(
+    target_arg: Option<&str>,
+    network_options: &NetworkOptions,
+    trust_options: &TrustOptions,
+    env: &Env<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> anyhow::Result<ExitCode> {
+    let target = match target_arg
+        .map(|arg| parse_target(arg, false, false, &|path| path.exists()))
+        .transpose()
+    {
+        Ok(target) => target,
+        Err(error) => return usage(err, &error.to_string()),
+    };
+    if !env.tui.is_interactive() {
+        let Some(arg) = target_arg else {
+            return usage(
+                err,
+                "no terminal available; give a target, as in `certtui inspect <TARGET>`",
+            );
+        };
+        let args = InspectArgs {
+            target: arg.to_owned(),
+            json: false,
+            text: true,
+            pem: false,
+            index: None,
+            field: None,
+            fingerprint_format: FingerprintFormatArg::default(),
+            file: false,
+            recursive: false,
+            no_color: false,
+        };
+        return inspect(&args, network_options, trust_options, env, out, err);
+    }
+    if let Some(local) = target.as_ref().filter(|t| !matches!(t, Target::Network(_))) {
+        let flags = network_options.network_only_flags();
+        if !flags.is_empty() && local_source(local).is_some() {
+            let verb = if flags.len() == 1 { "applies" } else { "apply" };
+            return usage(
+                err,
+                &format!("{} only {verb} to network targets", flags.join(", ")),
+            );
+        }
+    }
+    // Standard input is read whole before the terminal enters raw mode: the
+    // keys then come from the terminal device, and a pipe never blocks them.
+    let stdin = if matches!(target, Some(Target::Stdin)) {
+        match env.loader.load(&LocalSource::Stdin, &Limits::default()) {
+            Ok(loaded) => Some(loaded),
+            Err(error) => return load_failure(err, &error),
+        }
+    } else {
+        None
+    };
+    let request = TuiRequest {
+        target,
+        stdin,
+        options: InspectorOptions {
+            sni: network_options.sni.clone(),
+            connect_to: network_options.connect_to,
+            timeout: network_options.timeout,
+            trust_sources: trust_options.sources.clone(),
+            ca_files: trust_options.ca_files.clone(),
+            host_check: trust_options.host_check.clone(),
+        },
+    };
+    env.tui.launch(request)?;
+    Ok(ExitCode::Ok)
 }
 
 fn inspect(
@@ -728,6 +848,36 @@ mod tests {
         std::fs::read(format!("{FIXTURES}/rsa2048-leaf.der")).unwrap()
     }
 
+    /// Records what the UI would be opened with.
+    struct FakeLauncher {
+        interactive: bool,
+        requests: Mutex<Vec<TuiRequest>>,
+    }
+
+    impl FakeLauncher {
+        fn new(interactive: bool) -> Self {
+            Self {
+                interactive,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<TuiRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl TuiLauncher for FakeLauncher {
+        fn is_interactive(&self) -> bool {
+            self.interactive
+        }
+
+        fn launch(&self, request: TuiRequest) -> anyhow::Result<()> {
+            self.requests.lock().unwrap().push(request);
+            Ok(())
+        }
+    }
+
     struct Outcome {
         code: ExitCode,
         out: String,
@@ -739,6 +889,15 @@ mod tests {
     fn run_in_env(
         loader: &dyn SourceLoader,
         fetcher: &dyn ChainFetcher,
+        args: &[&str],
+    ) -> (anyhow::Result<ExitCode>, Vec<u8>, Vec<u8>) {
+        run_with_launcher(loader, fetcher, &FakeLauncher::new(false), args)
+    }
+
+    fn run_with_launcher(
+        loader: &dyn SourceLoader,
+        fetcher: &dyn ChainFetcher,
+        launcher: &dyn TuiLauncher,
         args: &[&str],
     ) -> (anyhow::Result<ExitCode>, Vec<u8>, Vec<u8>) {
         let verifier = FakeChainVerifier::new(ChainVerification {
@@ -768,6 +927,7 @@ mod tests {
             verifier: &verifier,
             clock: &clock,
             trust_provider: &provider,
+            tui: launcher,
         };
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -1028,5 +1188,124 @@ mod tests {
             assert_eq!(got.out, "");
         }
         assert!(fetcher.requests.lock().unwrap().is_empty());
+    }
+
+    fn run_tui(
+        launcher: &FakeLauncher,
+        loader: &dyn SourceLoader,
+        args: &[&str],
+    ) -> (ExitCode, String, String) {
+        let fetcher = FakeChainFetcher(Err(FetchError::Cancelled));
+        let (code, out, err) = run_with_launcher(loader, &fetcher, launcher, args);
+        (
+            code.unwrap(),
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    fn no_files() -> FakeSourceLoader {
+        FakeSourceLoader(Err(LoadError::Io("no files in unit tests".to_owned())))
+    }
+
+    #[test]
+    fn quando_sem_args_e_interativo_deve_abrir_a_tui_na_home() {
+        let launcher = FakeLauncher::new(true);
+        let (code, out, err) = run_tui(&launcher, &no_files(), &[]);
+        assert_eq!((code, out.as_str(), err.as_str()), (ExitCode::Ok, "", ""));
+        let requests = launcher.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].target, None);
+        assert!(requests[0].stdin.is_none());
+    }
+
+    #[test]
+    fn quando_sem_args_e_sem_terminal_deve_sair_2_com_orientacao() {
+        let launcher = FakeLauncher::new(false);
+        let (code, out, err) = run_tui(&launcher, &no_files(), &[]);
+        assert_eq!(code, ExitCode::Usage);
+        assert_eq!(out, "");
+        assert!(err.contains("no terminal available"), "{err}");
+        assert!(launcher.requests().is_empty());
+    }
+
+    #[test]
+    fn quando_alvo_de_rede_e_interativo_deve_abrir_a_tui_ja_inspecionando() {
+        let launcher = FakeLauncher::new(true);
+        let (code, _, _) = run_tui(
+            &launcher,
+            &no_files(),
+            &["--sni", "alt.test", "example.test:8443"],
+        );
+        assert_eq!(code, ExitCode::Ok);
+        let request = launcher.requests().remove(0);
+        assert!(matches!(
+            request.target,
+            Some(Target::Network(ref network)) if network.host == "example.test" && network.port == 8443
+        ));
+        assert_eq!(request.options.sni.as_deref(), Some("alt.test"));
+    }
+
+    #[test]
+    fn quando_hifen_e_interativo_deve_ler_o_stdin_antes_de_abrir_a_tui() {
+        let launcher = FakeLauncher::new(true);
+        let piped = LoadedCerts {
+            certs: Vec::new(),
+            notes: Vec::new(),
+        };
+        let loader = FakeSourceLoader(Ok(piped.clone()));
+        let (code, _, _) = run_tui(&launcher, &loader, &["-"]);
+        assert_eq!(code, ExitCode::Ok);
+        let request = launcher.requests().remove(0);
+        assert_eq!(request.target, Some(Target::Stdin));
+        assert_eq!(request.stdin, Some(piped));
+    }
+
+    #[test]
+    fn quando_stdin_falha_deve_sair_com_o_codigo_do_load_e_nao_abrir_a_tui() {
+        let launcher = FakeLauncher::new(true);
+        let (code, _, err) = run_tui(&launcher, &no_files(), &["-"]);
+        assert_eq!(code, ExitCode::Input);
+        assert!(err.contains("I/O error"), "{err}");
+        assert!(launcher.requests().is_empty());
+    }
+
+    #[test]
+    fn quando_sem_terminal_e_alvo_deve_cair_no_modo_text_sem_abrir_a_tui() {
+        let launcher = FakeLauncher::new(false);
+        let loader = FakeSourceLoader(Err(LoadError::Io("denied".to_owned())));
+        let (code, _, err) = run_tui(&launcher, &loader, &["some.pem"]);
+        // The same failure `certtui inspect some.pem` reports.
+        assert_eq!(code, ExitCode::Input);
+        assert!(err.contains("denied"), "{err}");
+        assert!(launcher.requests().is_empty());
+    }
+
+    #[test]
+    fn quando_flag_de_rede_com_alvo_local_na_tui_deve_sair_2() {
+        let launcher = FakeLauncher::new(true);
+        let (code, _, err) = run_tui(&launcher, &no_files(), &["--sni", "x.test", "-"]);
+        assert_eq!(code, ExitCode::Usage);
+        assert!(
+            err.contains("--sni only applies to network targets"),
+            "{err}"
+        );
+        assert!(launcher.requests().is_empty());
+    }
+
+    #[test]
+    fn quando_alvo_invalido_deve_sair_2_sem_abrir_a_tui() {
+        let launcher = FakeLauncher::new(true);
+        let (code, _, err) = run_tui(&launcher, &no_files(), &["https://user:pw@example.com"]);
+        assert_eq!(code, ExitCode::Usage);
+        assert!(!err.contains("pw"), "{err}");
+        assert!(launcher.requests().is_empty());
+    }
+
+    #[test]
+    fn quando_subcomando_inspect_deve_continuar_sem_abrir_a_tui() {
+        let launcher = FakeLauncher::new(true);
+        let (_, _, _) = run_tui(&launcher, &no_files(), &["inspect", "x.pem"]);
+        assert!(launcher.requests().is_empty());
     }
 }

@@ -29,7 +29,9 @@ use super::{View, labels};
 /// Current JSON schema version.
 pub const SCHEMA_VERSION: u8 = 1;
 
-pub(super) fn clean(text: &str) -> Cow<'_, str> {
+/// `text` with terminal controls removed, for embedding in a document.
+#[must_use]
+pub fn clean(text: &str) -> Cow<'_, str> {
     sanitize_display(text)
 }
 
@@ -48,15 +50,24 @@ struct Document<'a> {
 /// The trust verdict, with certificate-derived text sanitized.
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub(super) enum JsonTrust<'a> {
-    Trusted { anchor: Cow<'a, str> },
-    Untrusted { reason: Cow<'a, str> },
+pub enum JsonTrust<'a> {
+    /// The chain reaches a trust anchor.
+    Trusted {
+        /// Name of the anchor.
+        anchor: Cow<'a, str>,
+    },
+    /// The chain does not validate.
+    Untrusted {
+        /// Why it does not.
+        reason: Cow<'a, str>,
+    },
+    /// Validation was not run.
     NotEvaluated,
 }
 
 /// One finding: `code`, `severity`, `category`, `cert_index`, `message`.
 #[derive(Serialize)]
-pub(super) struct JsonFinding<'a> {
+pub struct JsonFinding<'a> {
     code: FindingCode,
     severity: Severity,
     category: FindingCategory,
@@ -64,7 +75,9 @@ pub(super) struct JsonFinding<'a> {
     message: Cow<'a, str>,
 }
 
-pub(super) fn trust(verdict: &TrustVerdict) -> JsonTrust<'_> {
+/// The JSON form of a trust verdict.
+#[must_use]
+pub fn trust(verdict: &TrustVerdict) -> JsonTrust<'_> {
     match verdict {
         TrustVerdict::Trusted { anchor } => JsonTrust::Trusted {
             anchor: clean(anchor),
@@ -76,7 +89,9 @@ pub(super) fn trust(verdict: &TrustVerdict) -> JsonTrust<'_> {
     }
 }
 
-pub(super) fn finding(finding: &Finding) -> JsonFinding<'_> {
+/// The JSON form of a finding.
+#[must_use]
+pub fn finding(finding: &Finding) -> JsonFinding<'_> {
     JsonFinding {
         code: finding.code,
         severity: finding.severity,
@@ -458,8 +473,8 @@ fn certificate(
 mod tests {
     use serde_json::Value;
 
-    use super::super::testing::{network_report, report};
     use super::*;
+    use crate::present::testing::{network_report, report};
 
     fn render(report: &certtui_domain::model::InspectionReport, only: Option<usize>) -> Value {
         let mut out = Vec::new();
