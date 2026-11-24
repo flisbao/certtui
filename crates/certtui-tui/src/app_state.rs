@@ -237,6 +237,8 @@ pub struct AppState {
     pub inspect: Option<InspectState>,
     /// Dialog over the screen.
     pub modal: Option<Modal>,
+    /// First visible line of the help dialog.
+    pub help_scroll: u16,
     /// Transient message.
     pub toast: Option<Toast>,
     /// Running jobs.
@@ -271,6 +273,7 @@ impl AppState {
             home: HomeState::default(),
             inspect: None,
             modal: None,
+            help_scroll: 0,
             toast: None,
             jobs: JobTracker::default(),
             theme: ThemeKind::default(),

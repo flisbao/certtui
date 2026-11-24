@@ -24,7 +24,7 @@ pub mod view;
 pub use app_state::{
     AppState, HomeState, InspectState, JobId, JobTracker, Modal, Pane, Phase, Screen, Tab,
 };
-pub use keymap::{Action, Keymap};
+pub use keymap::{Action, HelpEntry, Keymap};
 pub use msg::{Command, Msg};
 pub use terminal::{MIN_SIZE, TerminalGuard, install_panic_hook, install_signal_restore};
 pub use theme::{Theme, ThemeKind};

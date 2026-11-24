@@ -48,12 +48,22 @@ impl Drop for TerminalGuard {
 }
 
 /// Leaves raw mode and the alternate screen; safe to call more than once.
+///
+/// Writes to the terminal device rather than to `io::stdout()`: the binary
+/// keeps the standard output locked while it runs, so a signal handler or a
+/// panic hook on another thread would wait on that lock forever.
 pub fn restore_terminal() {
     // Nothing can be done if the terminal itself is gone.
     let _ = disable_raw_mode();
-    let mut stdout = io::stdout();
-    let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen, Show);
-    let _ = stdout.flush();
+    match std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        Ok(mut tty) => leave_screen(&mut tty),
+        Err(_) => leave_screen(&mut io::stdout()),
+    }
+}
+
+fn leave_screen<W: Write>(out: &mut W) {
+    let _ = execute!(out, DisableBracketedPaste, LeaveAlternateScreen, Show);
+    let _ = out.flush();
 }
 
 /// Makes a panic restore the terminal before its message is printed.

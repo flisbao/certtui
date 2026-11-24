@@ -4,12 +4,11 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
 use certtui_app::ports::{ChainFetcher, ChainVerifier, Clock, SourceLoader, TrustStoreProvider};
-use certtui_app::trust::{TrustAnchors, TrustSource};
+use certtui_app::trust::TrustAnchors;
 use certtui_domain::limits::Limits;
 use certtui_domain::lint::Thresholds;
 use certtui_domain::model::InspectionReport;
@@ -19,9 +18,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::validate_for_target;
 use crate::command_executor::Inspector;
-use crate::network_args::{ConnectTo, with_timeout};
+use crate::network_args::with_timeout;
 use crate::output::single_line;
 use crate::target_parse::local_source;
+use crate::tui_launch::InspectorOptions;
 
 /// Builds the trust store provider for the `--ca-file` paths of a run.
 pub type TrustProviderFactory =
@@ -39,18 +39,8 @@ pub struct SystemInspector {
     pub clock: Arc<dyn Clock>,
     /// Builds the trust store provider.
     pub trust_provider: TrustProviderFactory,
-    /// Trust sources to validate against.
-    pub trust_sources: Vec<TrustSource>,
-    /// `--ca-file` paths.
-    pub ca_files: Vec<PathBuf>,
-    /// `--host-check`.
-    pub host_check: Option<String>,
-    /// `--sni`.
-    pub sni: Option<String>,
-    /// `--connect-to`.
-    pub connect_to: Option<ConnectTo>,
-    /// `--timeout`.
-    pub timeout: Option<Duration>,
+    /// The command line options of the run.
+    pub options: InspectorOptions,
     /// Anchors, loaded on the first inspection and reused after.
     pub anchors: OnceCell<Result<Arc<TrustAnchors>, String>>,
 }
@@ -59,8 +49,8 @@ impl SystemInspector {
     async fn anchors(&self) -> Result<Arc<TrustAnchors>, String> {
         self.anchors
             .get_or_init(|| async {
-                let provider = (self.trust_provider)(self.ca_files.clone());
-                let sources = self.trust_sources.clone();
+                let provider = (self.trust_provider)(self.options.ca_files.clone());
+                let sources = self.options.trust_sources.clone();
                 tokio::task::spawn_blocking(move || provider.anchors(&sources))
                     .await
                     .map_err(|error| format!("loading the trust store failed: {error}"))?
@@ -73,8 +63,8 @@ impl SystemInspector {
 
     fn network_target(&self, parsed: NetworkTarget) -> NetworkTarget {
         NetworkTarget {
-            sni: self.sni.clone(),
-            connect_to: self.connect_to.map(|connect_to| {
+            sni: self.options.sni.clone(),
+            connect_to: self.options.connect_to.map(|connect_to| {
                 SocketAddr::new(connect_to.ip, connect_to.port.unwrap_or(parsed.port))
             }),
             ..parsed
@@ -82,9 +72,11 @@ impl SystemInspector {
     }
 
     fn limits(&self) -> Limits {
-        self.timeout.map_or_else(Limits::default, |timeout| {
-            with_timeout(&Limits::default(), timeout)
-        })
+        self.options
+            .timeout
+            .map_or_else(Limits::default, |timeout| {
+                with_timeout(&Limits::default(), timeout)
+            })
     }
 }
 
@@ -121,7 +113,7 @@ impl Inspector for SystemInspector {
             &anchors,
             self.clock.as_ref(),
             Thresholds::default(),
-            self.host_check.as_deref(),
+            self.options.host_check.as_deref(),
         ))
     }
 }

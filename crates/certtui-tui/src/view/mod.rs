@@ -1,5 +1,6 @@
 //! Pure rendering of [`AppState`].
 
+pub mod help;
 pub mod home;
 pub mod inspect;
 pub mod tabs;
@@ -8,7 +9,7 @@ pub mod too_small;
 
 use ratatui::Frame;
 
-use crate::app_state::{AppState, Screen};
+use crate::app_state::{AppState, Modal, Screen};
 use crate::terminal::MIN_SIZE;
 use crate::theme::Theme;
 
@@ -34,6 +35,9 @@ pub fn view(state: &AppState, frame: &mut Frame) {
     match state.screen {
         Screen::Home => home::render(state, frame, area, &theme),
         Screen::Inspect => inspect::render(state, frame, area, &theme),
+    }
+    if state.modal == Some(Modal::Help) {
+        help::render(frame, area, state.help_scroll, &theme);
     }
     if let Some(toast) = &state.toast {
         toast::render(toast, frame, area, &theme);

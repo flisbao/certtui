@@ -6,6 +6,7 @@ use crate::app_state::{AppState, Modal, Screen};
 use crate::keymap::{Action, Keymap};
 use crate::msg::{Command, Msg};
 use crate::toast::Toast;
+use crate::view::help;
 use crate::{update_home, update_inspect};
 use certtui_domain::model::FingerprintFormat;
 
@@ -95,10 +96,27 @@ pub(crate) fn on_global_action(state: &mut AppState, action: Action) -> Vec<Comm
 }
 
 fn on_modal_action(state: &mut AppState, action: Action) -> Vec<Command> {
-    if matches!(action, Action::Back | Action::Help | Action::Quit) {
-        state.modal = None;
+    match action {
+        Action::Back | Action::Help | Action::Quit => {
+            state.modal = None;
+            state.help_scroll = 0;
+        }
+        Action::Down | Action::Up if state.modal == Some(Modal::Help) => scroll_help(state, action),
+        _ => {}
     }
     Vec::new()
+}
+
+fn scroll_help(state: &mut AppState, action: Action) {
+    let lines = help::help_lines(&Keymap::new()).len();
+    let last = lines.saturating_sub(help::viewport_rows(state.size));
+    let scroll = usize::from(state.help_scroll);
+    let scroll = if action == Action::Down {
+        scroll.saturating_add(1).min(last)
+    } else {
+        scroll.saturating_sub(1)
+    };
+    state.help_scroll = u16::try_from(scroll).unwrap_or(u16::MAX);
 }
 
 fn next_format(format: FingerprintFormat) -> FingerprintFormat {
