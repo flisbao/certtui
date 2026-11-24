@@ -66,11 +66,90 @@ pub enum LoadNote {
         /// The limit that was hit.
         limit: usize,
     },
+    /// A file or directory could not be read (open, permission or I/O error).
+    ///
+    /// `path` is the sanitized path relative to the scanned directory, when
+    /// the note originates from a directory source.
+    Unreadable {
+        /// Sanitized path of the entry, when known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// The input is in a format that is not supported yet (for example JKS or
+    /// PKCS#12 keystores).
+    UnsupportedFormat {
+        /// Sanitized path of the entry, when known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// The input held no certificate candidate at all (empty, or only prose).
+    NoCandidates {
+        /// Sanitized path of the entry, when known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// The input is larger than the allowed byte limit.
+    FileTooLarge {
+        /// Sanitized path of the entry, when known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// The limit that was hit, in bytes.
+        limit: usize,
+    },
+    /// The input is structurally invalid (for example a broken PKCS#7 envelope).
+    MalformedInput {
+        /// Sanitized path of the entry, when known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+}
+
+impl LoadNote {
+    /// Whether this is an individual diagnostic, which counts against the
+    /// per-source diagnostic budget (as opposed to metadata and markers).
+    #[must_use]
+    pub fn is_individual_diagnostic(&self) -> bool {
+        matches!(
+            self,
+            LoadNote::Rejected { .. }
+                | LoadNote::Unparsable { .. }
+                | LoadNote::Unreadable { .. }
+                | LoadNote::UnsupportedFormat { .. }
+                | LoadNote::NoCandidates { .. }
+                | LoadNote::FileTooLarge { .. }
+                | LoadNote::MalformedInput { .. }
+        )
+    }
+
+    /// Fills the `path` of a path-carrying note that has none yet; every
+    /// other note is returned unchanged. `path` must already be sanitized.
+    #[must_use]
+    pub fn with_path_if_unset(self, path: &str) -> LoadNote {
+        match self {
+            LoadNote::Unreadable { path: None } => LoadNote::Unreadable {
+                path: Some(path.to_owned()),
+            },
+            LoadNote::UnsupportedFormat { path: None } => LoadNote::UnsupportedFormat {
+                path: Some(path.to_owned()),
+            },
+            LoadNote::NoCandidates { path: None } => LoadNote::NoCandidates {
+                path: Some(path.to_owned()),
+            },
+            LoadNote::FileTooLarge { path: None, limit } => LoadNote::FileTooLarge {
+                path: Some(path.to_owned()),
+                limit,
+            },
+            LoadNote::MalformedInput { path: None } => LoadNote::MalformedInput {
+                path: Some(path.to_owned()),
+            },
+            other => other,
+        }
+    }
 }
 
 /// Incrementally retains loader notes within a shared diagnostic budget.
 ///
-/// Individual [`LoadNote::Rejected`] and [`LoadNote::Unparsable`] values are
+/// Individual diagnostics (see [`LoadNote::is_individual_diagnostic`]) are
 /// kept only until the configured limit. Non-diagnostic metadata is retained
 /// in insertion order. Dropped diagnostics produce one marker when finalized.
 #[derive(Debug)]
@@ -97,22 +176,23 @@ impl DiagnosticNoteCollector {
 
     /// Adds one note, discarding individual diagnostics after the budget.
     pub fn push(&mut self, note: LoadNote) {
-        match &note {
-            LoadNote::Rejected { .. } | LoadNote::Unparsable { .. }
-                if self.diagnostic_count < self.limit =>
-            {
+        if note.is_individual_diagnostic() {
+            if self.diagnostic_count < self.limit {
                 self.diagnostic_count += 1;
                 self.notes.push(note);
+            } else {
+                self.dropped = true;
             }
-            LoadNote::DiagnosticsTruncated { .. } if !self.has_marker => {
+        } else if matches!(note, LoadNote::DiagnosticsTruncated { .. }) {
+            if self.has_marker {
+                self.dropped = true;
+            } else {
                 self.has_marker = true;
                 self.dropped = true;
                 self.notes.push(note);
             }
-            LoadNote::Rejected { .. }
-            | LoadNote::Unparsable { .. }
-            | LoadNote::DiagnosticsTruncated { .. } => self.dropped = true,
-            _ => self.notes.push(note),
+        } else {
+            self.notes.push(note);
         }
     }
 
@@ -241,5 +321,72 @@ mod tests {
                 LoadNote::DiagnosticsTruncated { limit: 1 },
             ]
         );
+    }
+
+    #[test]
+    fn quando_notas_novas_serializam_deve_omitir_path_ausente_e_manter_o_tipo() {
+        assert_eq!(
+            serde_json::to_string(&LoadNote::Unreadable { path: None }).unwrap(),
+            r#"{"kind":"unreadable"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadNote::Unreadable {
+                path: Some("a/b.pem".to_owned())
+            })
+            .unwrap(),
+            r#"{"kind":"unreadable","path":"a/b.pem"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadNote::UnsupportedFormat { path: None }).unwrap(),
+            r#"{"kind":"unsupported_format"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadNote::NoCandidates { path: None }).unwrap(),
+            r#"{"kind":"no_candidates"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadNote::FileTooLarge {
+                path: Some("big.bin".to_owned()),
+                limit: 9
+            })
+            .unwrap(),
+            r#"{"kind":"file_too_large","path":"big.bin","limit":9}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadNote::MalformedInput { path: None }).unwrap(),
+            r#"{"kind":"malformed_input"}"#
+        );
+    }
+
+    #[test]
+    fn quando_notas_novas_excedem_orcamento_deve_contar_como_diagnostico() {
+        let mut collector = DiagnosticNoteCollector::new(1);
+        collector.push(LoadNote::Unreadable { path: None });
+        collector.push(LoadNote::UnsupportedFormat { path: None });
+        collector.push(LoadNote::NoCandidates { path: None });
+        let (notes, remaining, dropped) = collector.finish();
+        assert_eq!(remaining, 0);
+        assert!(dropped);
+        assert_eq!(
+            notes,
+            vec![
+                LoadNote::Unreadable { path: None },
+                LoadNote::DiagnosticsTruncated { limit: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn quando_nota_com_caminho_sem_valor_deve_receber_o_caminho_so_uma_vez() {
+        let note = LoadNote::Unreadable { path: None }.with_path_if_unset("x.pem");
+        assert_eq!(
+            note,
+            LoadNote::Unreadable {
+                path: Some("x.pem".to_owned())
+            }
+        );
+        assert_eq!(note.clone().with_path_if_unset("y.pem"), note);
+        let other = LoadNote::Unparsable { offset: None };
+        assert_eq!(other.clone().with_path_if_unset("x.pem"), other);
     }
 }

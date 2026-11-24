@@ -649,3 +649,91 @@ fn quando_diretorio_passa_de_max_certs_per_source_deve_truncar_com_nota() {
         vec![certtui_domain::model::LoadNote::TruncatedAtCertLimit { limit: cap }]
     );
 }
+
+#[test]
+fn quando_diretorio_tem_arquivo_sem_candidatos_deve_nomear_o_arquivo_no_json_e_no_texto() {
+    let dir = tempdir("dir-notes");
+    std::fs::copy(fixture("rsa2048-leaf.pem"), dir.join("a.pem")).unwrap();
+    std::fs::write(dir.join("prose.txt"), "only prose here\n").unwrap();
+    std::fs::write(dir.join("store.jks"), [0xFE, 0xED, 0xFE, 0xED, 0, 2]).unwrap();
+    let path = dir.to_str().unwrap();
+
+    let json = stdout_json(&["inspect", path, "--json"]);
+    assert_eq!(json["schema_version"], 1);
+    let notes = json["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[0]["kind"], "no_candidates");
+    assert_eq!(notes[0]["path"], "prose.txt");
+    assert_eq!(notes[1]["kind"], "unsupported_format");
+    assert_eq!(notes[1]["path"], "store.jks");
+
+    let out = certtui()
+        .args(["inspect", path, "--text"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("prose.txt: no certificate candidates found"));
+    assert!(text.contains("store.jks: unsupported format"));
+}
+
+#[test]
+fn quando_diretorio_tem_varios_arquivos_deve_listar_em_ordem_de_nome() {
+    let dir = tempdir("dir-order");
+    let pems = distinct_cert_pems(4);
+    for (name, pem) in ["d.pem", "b.pem", "a.pem", "c.pem"].iter().zip(&pems) {
+        std::fs::write(dir.join(name), pem).unwrap();
+    }
+    let json = stdout_json(&["inspect", dir.to_str().unwrap(), "--json"]);
+    let origins: Vec<String> = json["certificates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|cert| {
+            let path = cert["origin"]["path"].as_str().unwrap();
+            path.rsplit('/').next().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(origins, ["a.pem", "b.pem", "c.pem", "d.pem"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn quando_diretorio_alvo_e_symlink_deve_sair_3_dizendo_que_nao_segue() {
+    let dir = tempdir("dir-link");
+    let real = dir.join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::copy(fixture("rsa2048-leaf.pem"), real.join("a.pem")).unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let out = certtui()
+        .args(["inspect", link.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("symlinked directories are not followed"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("no certificates found"), "{stderr}");
+}
+
+#[test]
+fn quando_texto_comeca_com_0x30_e_tem_pem_deve_achar_o_certificado() {
+    let mut input = b"09:15:02 INFO starting\n".to_vec();
+    input.extend(std::fs::read(fixture("rsa2048-leaf.pem")).unwrap());
+    let out = certtui()
+        .args(["inspect", "-", "--json"])
+        .write_stdin(input)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["certificates"].as_array().unwrap().len(), 1);
+}

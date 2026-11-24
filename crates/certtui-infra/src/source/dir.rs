@@ -1,5 +1,10 @@
 //! Explicit-stack directory traversal without following symbolic links.
+//!
+//! Entries of each directory are visited in byte-wise file-name order, so the
+//! output order does not depend on the filesystem's `read_dir` order: the
+//! files of a directory first, then its subdirectories in the same order.
 
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
 
@@ -7,16 +12,17 @@ use certtui_app::error::LoadError;
 use certtui_app::ports::{LoadedCerts, RawCert};
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{DiagnosticNoteCollector, LoadNote};
+use certtui_domain::sanitize::sanitize_display;
 
-use super::fs::{OriginKind, load_reader, normalize_notes};
+use super::fs::{OriginKind, load_reader};
 
 /// Loads a directory under its traversal and certificate limits.
 ///
 /// # Errors
 ///
-/// Returns a source error when the effective root cannot be inspected or is
-/// not a directory, and `NoCertificatesFound` when no usable certificate was
-/// extracted.
+/// Returns a source error when the effective root cannot be inspected, is a
+/// symbolic link (never followed) or is not a directory, and
+/// `NoCertificatesFound` when no usable certificate was extracted.
 pub(super) fn load_directory(
     path: &Path,
     options: DirectoryOptions,
@@ -26,12 +32,9 @@ pub(super) fn load_directory(
     let root_metadata =
         fs::symlink_metadata(&effective_path).map_err(|error| LoadError::Io(error.to_string()))?;
     if root_metadata.file_type().is_symlink() {
-        return Err(LoadError::NoCertificatesFound {
-            notes: normalize_notes(
-                vec![LoadNote::Unparsable { offset: None }],
-                limits.max_scan_diagnostics,
-            ),
-        });
+        return Err(LoadError::Unsupported(
+            "symlinked directories are not followed",
+        ));
     }
     if !root_metadata.is_dir() {
         return Err(LoadError::Io(
@@ -72,6 +75,7 @@ struct PendingDirectory {
 }
 
 struct DirectoryScan {
+    root: PathBuf,
     stack: Vec<PendingDirectory>,
     certs: Vec<RawCert>,
     notes: DiagnosticNoteCollector,
@@ -84,6 +88,7 @@ struct DirectoryScan {
 impl DirectoryScan {
     fn new(path: &Path, note_limit: usize) -> Self {
         Self {
+            root: path.to_path_buf(),
             stack: vec![PendingDirectory {
                 path: path.to_path_buf(),
                 depth: 0,
@@ -97,40 +102,87 @@ impl DirectoryScan {
         }
     }
 
+    /// Sanitized path of `path` relative to the scanned root, for notes.
+    /// `None` for the root itself.
+    fn relative(&self, path: &Path) -> Option<String> {
+        let relative = path.strip_prefix(&self.root).unwrap_or(path);
+        if relative.as_os_str().is_empty() {
+            return None;
+        }
+        Some(sanitize_display(&relative.to_string_lossy()).into_owned())
+    }
+
     fn walk(&mut self, options: DirectoryOptions, limits: &Limits) {
         while let Some(directory) = self.stack.pop() {
             let Ok(read_dir) = fs::read_dir(&directory.path) else {
-                self.notes.push(LoadNote::Unparsable { offset: None });
+                let path = self.relative(&directory.path);
+                self.notes.push(LoadNote::Unreadable { path });
                 continue;
             };
-            for entry in read_dir {
-                if self.entries >= limits.max_dir_entries {
-                    self.directory_truncated = true;
-                    return;
-                }
-                self.entries = self.entries.saturating_add(1);
-                let Ok(entry) = entry else {
-                    self.notes.push(LoadNote::Unparsable { offset: None });
-                    continue;
-                };
+            let (names, truncated) = self.collect_names(read_dir, &directory, limits);
+            let mut subdirectories = Vec::new();
+            for name in names {
                 self.visit_entry(
                     PendingDirectory {
-                        path: entry.path(),
+                        path: directory.path.join(name),
                         depth: directory.depth,
                     },
                     options,
                     limits,
+                    &mut subdirectories,
                 );
                 if self.cert_overflow {
                     return;
                 }
             }
+            if truncated {
+                self.directory_truncated = true;
+                return;
+            }
+            // The stack pops last-in first-out: push in reverse so that the
+            // subdirectories are visited in name order.
+            self.stack.extend(subdirectories.into_iter().rev());
         }
     }
 
-    fn visit_entry(&mut self, entry: PendingDirectory, options: DirectoryOptions, limits: &Limits) {
+    /// Reads at most the remaining entry budget of names from `read_dir`,
+    /// sorted byte-wise. The flag is set when more entries exist than the
+    /// budget allows.
+    fn collect_names(
+        &mut self,
+        read_dir: fs::ReadDir,
+        directory: &PendingDirectory,
+        limits: &Limits,
+    ) -> (Vec<OsString>, bool) {
+        let mut names = Vec::new();
+        let mut truncated = false;
+        for entry in read_dir {
+            if self.entries >= limits.max_dir_entries {
+                truncated = true;
+                break;
+            }
+            self.entries = self.entries.saturating_add(1);
+            if let Ok(entry) = entry {
+                names.push(entry.file_name());
+            } else {
+                let path = self.relative(&directory.path);
+                self.notes.push(LoadNote::Unreadable { path });
+            }
+        }
+        names.sort_unstable();
+        (names, truncated)
+    }
+
+    fn visit_entry(
+        &mut self,
+        entry: PendingDirectory,
+        options: DirectoryOptions,
+        limits: &Limits,
+        subdirectories: &mut Vec<PendingDirectory>,
+    ) {
         let Ok(metadata) = fs::symlink_metadata(&entry.path) else {
-            self.notes.push(LoadNote::Unparsable { offset: None });
+            let path = self.relative(&entry.path);
+            self.notes.push(LoadNote::Unreadable { path });
             return;
         };
         if metadata.file_type().is_symlink() {
@@ -138,7 +190,7 @@ impl DirectoryScan {
         }
         if metadata.is_dir() {
             if options.recursive && entry.depth < limits.max_dir_depth {
-                self.stack.push(PendingDirectory {
+                subdirectories.push(PendingDirectory {
                     path: entry.path,
                     depth: entry.depth.saturating_add(1),
                 });
@@ -154,13 +206,21 @@ impl DirectoryScan {
         let remaining = limits.max_certs_per_source.saturating_sub(self.certs.len());
         let mut file_limits = *limits;
         file_limits.max_certs_per_source = remaining.saturating_add(1);
+        let relative = self.relative(&path).unwrap_or_default();
         let result = File::open(&path)
-            .map_err(|_| LoadError::Io("unable to open directory entry".to_owned()))
+            .map_err(|error| LoadError::Io(error.to_string()))
             .and_then(|file| load_reader(file, OriginKind::File(path), &file_limits));
-        self.process_child_result(result, limits);
+        self.process_child_result(result, &relative, limits);
     }
 
-    fn process_child_result(&mut self, result: Result<LoadedCerts, LoadError>, limits: &Limits) {
+    /// Merges the outcome of loading one file; `relative` is its sanitized
+    /// path, attached to the per-file notes that name one.
+    fn process_child_result(
+        &mut self,
+        result: Result<LoadedCerts, LoadError>,
+        relative: &str,
+        limits: &Limits,
+    ) {
         match result {
             Ok(mut loaded) => {
                 let remaining = limits.max_certs_per_source.saturating_sub(self.certs.len());
@@ -170,16 +230,21 @@ impl DirectoryScan {
                     self.push_certificate_truncation(limits.max_certs_per_source);
                 }
                 self.certs.extend(loaded.certs);
-                self.merge_child_notes(loaded.notes, limits.max_certs_per_source);
+                self.merge_child_notes(loaded.notes, relative, limits.max_certs_per_source);
             }
             Err(LoadError::NoCertificatesFound { notes }) => {
-                self.merge_child_notes(notes, limits.max_certs_per_source);
+                self.merge_child_notes(notes, relative, limits.max_certs_per_source);
             }
-            Err(_) => self.notes.push(LoadNote::Unparsable { offset: None }),
+            Err(error) => self.notes.push(child_failure_note(&error, relative)),
         }
     }
 
-    fn merge_child_notes(&mut self, incoming: Vec<LoadNote>, certificate_limit: usize) {
+    fn merge_child_notes(
+        &mut self,
+        incoming: Vec<LoadNote>,
+        relative: &str,
+        certificate_limit: usize,
+    ) {
         for note in incoming {
             match note {
                 LoadNote::TruncatedAtCertLimit { .. } if !self.cert_truncation_noted => {
@@ -189,7 +254,7 @@ impl DirectoryScan {
                     });
                 }
                 LoadNote::TruncatedAtCertLimit { .. } => {}
-                other => self.notes.push(other),
+                other => self.notes.push(other.with_path_if_unset(relative)),
             }
         }
     }
@@ -211,7 +276,7 @@ impl DirectoryScan {
             });
         }
         if self.certs.is_empty() && self.notes.is_empty() {
-            self.notes.push(LoadNote::Unparsable { offset: None });
+            self.notes.push(LoadNote::NoCandidates { path: None });
         }
         let (notes, _, _) = self.notes.finish();
         if self.certs.is_empty() {
@@ -222,6 +287,24 @@ impl DirectoryScan {
                 notes,
             })
         }
+    }
+}
+
+/// The diagnostic for a file whose load failed with `error`.
+fn child_failure_note(error: &LoadError, relative: &str) -> LoadNote {
+    let path = Some(relative.to_owned());
+    match error {
+        LoadError::Io(_) => LoadNote::Unreadable { path },
+        LoadError::Unsupported(_) => LoadNote::UnsupportedFormat { path },
+        LoadError::TooLarge { limit } => LoadNote::FileTooLarge {
+            path,
+            limit: *limit,
+        },
+        // `NoCertificatesFound` is handled by the caller and a single file
+        // never yields `TooManyCerts`; both are reported as malformed input.
+        LoadError::Malformed(_)
+        | LoadError::NoCertificatesFound { .. }
+        | LoadError::TooManyCerts { .. } => LoadNote::MalformedInput { path },
     }
 }
 
@@ -260,6 +343,7 @@ mod tests {
                 certs: Vec::new(),
                 notes: vec![certtui_domain::model::LoadNote::TruncatedAtCertLimit { limit: 1 }],
             }),
+            "x.pem",
             &limits,
         );
         scan.process_child_result(
@@ -273,6 +357,7 @@ mod tests {
                 }],
                 notes: Vec::new(),
             }),
+            "x.pem",
             &limits,
         );
         let result = scan.finish(&limits).unwrap();
@@ -294,12 +379,14 @@ mod tests {
                 certs: Vec::new(),
                 notes: vec![certtui_domain::model::LoadNote::TruncatedAtCertLimit { limit: 1 }],
             }),
+            "x.pem",
             &limits,
         );
         scan.process_child_result(
             Err(LoadError::NoCertificatesFound {
                 notes: vec![certtui_domain::model::LoadNote::Unparsable { offset: None }],
             }),
+            "x.pem",
             &limits,
         );
         let result = scan.finish(&limits).unwrap_err();
@@ -327,6 +414,7 @@ mod tests {
             Err(LoadError::NoCertificatesFound {
                 notes: vec![certtui_domain::model::LoadNote::TruncatedAtCertLimit { limit: 1 }],
             }),
+            "x.pem",
             &limits,
         );
         scan.process_child_result(
@@ -340,6 +428,7 @@ mod tests {
                 }],
                 notes: Vec::new(),
             }),
+            "x.pem",
             &limits,
         );
         let result = scan.finish(&limits).unwrap();
@@ -393,7 +482,7 @@ mod tests {
             PathBuf::from(format!("{}/", link.display())),
             link.join("."),
         ] {
-            assert!(matches!(
+            assert_eq!(
                 FsSourceLoader::new().load(
                     &LocalSource::Directory {
                         path,
@@ -401,14 +490,16 @@ mod tests {
                     },
                     &Limits::default(),
                 ),
-                Err(LoadError::NoCertificatesFound { .. })
-            ));
+                Err(LoadError::Unsupported(
+                    "symlinked directories are not followed"
+                ))
+            );
         }
         let limits = Limits {
             max_scan_diagnostics: 0,
             ..Limits::default()
         };
-        assert!(matches!(
+        assert_eq!(
             FsSourceLoader::new().load(
                 &LocalSource::Directory {
                     path: link,
@@ -416,9 +507,10 @@ mod tests {
                 },
                 &limits,
             ),
-            Err(LoadError::NoCertificatesFound { notes })
-                if notes == vec![certtui_domain::model::LoadNote::DiagnosticsTruncated { limit: 0 }]
-        ));
+            Err(LoadError::Unsupported(
+                "symlinked directories are not followed"
+            ))
+        );
     }
 
     #[test]
@@ -436,7 +528,7 @@ mod tests {
                 &Limits::default(),
             ),
             Err(LoadError::NoCertificatesFound { notes })
-                if matches!(notes.as_slice(), [certtui_domain::model::LoadNote::Unparsable { .. }])
+                if notes == vec![certtui_domain::model::LoadNote::NoCandidates { path: None }]
         ));
     }
 
@@ -544,8 +636,9 @@ mod tests {
         assert!(
             result
                 .notes
-                .iter()
-                .any(|note| matches!(note, certtui_domain::model::LoadNote::Unparsable { .. }))
+                .contains(&certtui_domain::model::LoadNote::NoCandidates {
+                    path: Some("garbage.pem".to_owned())
+                })
         );
     }
 
@@ -638,6 +731,233 @@ mod tests {
                 if notes.iter().filter(|note| matches!(note, certtui_domain::model::LoadNote::Rejected { .. } | certtui_domain::model::LoadNote::Unparsable { .. })).count() == 1
                     && !notes.iter().any(|note| matches!(note, certtui_domain::model::LoadNote::DiagnosticsTruncated { .. }))
         ));
+    }
+
+    fn load_dir(
+        path: &std::path::Path,
+        recursive: bool,
+        limits: &Limits,
+    ) -> Result<LoadedCerts, LoadError> {
+        FsSourceLoader::new().load(
+            &LocalSource::Directory {
+                path: path.to_path_buf(),
+                recursive,
+            },
+            limits,
+        )
+    }
+
+    fn file_names(loaded: &LoadedCerts) -> Vec<String> {
+        loaded
+            .certs
+            .iter()
+            .map(|cert| match &cert.origin {
+                certtui_domain::model::CertOrigin::File { path, .. } => path
+                    .strip_prefix(std::env::temp_dir())
+                    .unwrap()
+                    .components()
+                    .skip(1)
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                other => panic!("unexpected origin {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn quando_arquivos_criados_fora_de_ordem_deve_listar_em_ordem_de_nome() {
+        let temp = TestDirectory::new();
+        for (name, cert) in [
+            ("c.pem", "ec-p256-leaf.pem"),
+            ("a.pem", "rsa2048-leaf.pem"),
+            ("b.pem", "expired.pem"),
+        ] {
+            fs::write(temp.path().join(name), fixture(cert)).unwrap();
+        }
+        let loaded = load_dir(temp.path(), false, &Limits::default()).unwrap();
+        let names = file_names(&loaded);
+        assert_eq!(names, ["a.pem", "b.pem", "c.pem"]);
+    }
+
+    #[test]
+    fn quando_recursivo_deve_visitar_arquivos_e_depois_subdiretorios_em_ordem_de_nome() {
+        let temp = TestDirectory::new();
+        for dir in ["z", "m"] {
+            fs::create_dir(temp.path().join(dir)).unwrap();
+        }
+        fs::write(temp.path().join("z/1.pem"), fixture("ec-p256-leaf.pem")).unwrap();
+        fs::write(temp.path().join("m/2.pem"), fixture("expired.pem")).unwrap();
+        fs::write(temp.path().join("m/1.pem"), fixture("san-multi.pem")).unwrap();
+        fs::write(temp.path().join("top.pem"), fixture("rsa2048-leaf.pem")).unwrap();
+        let loaded = load_dir(temp.path(), true, &Limits::default()).unwrap();
+        let names = file_names(&loaded);
+        assert_eq!(names, ["top.pem", "m/1.pem", "m/2.pem", "z/1.pem"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quando_arquivo_nao_e_legivel_deve_anotar_unreadable_com_o_caminho() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TestDirectory::new();
+        let locked = temp.path().join("locked.pem");
+        fs::write(&locked, fixture("rsa2048-leaf.pem")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&locked).is_ok() {
+            return; // running with privileges that ignore permissions
+        }
+        fs::write(temp.path().join("ok.pem"), fixture("expired.pem")).unwrap();
+        let loaded = load_dir(temp.path(), false, &Limits::default()).unwrap();
+        assert_eq!(loaded.certs.len(), 1);
+        assert_eq!(
+            loaded.notes,
+            vec![certtui_domain::model::LoadNote::Unreadable {
+                path: Some("locked.pem".to_owned())
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quando_subdiretorio_nao_e_legivel_deve_anotar_unreadable_com_o_caminho() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TestDirectory::new();
+        let locked = temp.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&locked).is_ok();
+        fs::write(temp.path().join("ok.pem"), fixture("expired.pem")).unwrap();
+        let loaded = load_dir(temp.path(), true, &Limits::default());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        if readable {
+            return; // running with privileges that ignore permissions
+        }
+        assert_eq!(
+            loaded.unwrap().notes,
+            vec![certtui_domain::model::LoadNote::Unreadable {
+                path: Some("locked".to_owned())
+            }]
+        );
+    }
+
+    #[test]
+    fn quando_arquivo_e_keystore_jks_deve_anotar_formato_nao_suportado_com_o_caminho() {
+        let temp = TestDirectory::new();
+        fs::write(
+            temp.path().join("store.jks"),
+            [0xFE, 0xED, 0xFE, 0xED, 0, 2],
+        )
+        .unwrap();
+        fs::write(temp.path().join("ok.pem"), fixture("expired.pem")).unwrap();
+        let loaded = load_dir(temp.path(), false, &Limits::default()).unwrap();
+        assert_eq!(
+            loaded.notes,
+            vec![certtui_domain::model::LoadNote::UnsupportedFormat {
+                path: Some("store.jks".to_owned())
+            }]
+        );
+    }
+
+    #[test]
+    fn quando_arquivo_passa_do_limite_de_entrada_deve_anotar_file_too_large_com_o_caminho() {
+        let temp = TestDirectory::new();
+        fs::write(temp.path().join("big.txt"), vec![b'x'; 64]).unwrap();
+        fs::write(temp.path().join("ok.pem"), fixture("expired.pem")).unwrap();
+        let limits = Limits {
+            max_input_file_bytes: 32,
+            ..Limits::default()
+        };
+        // `ok.pem` is also above 32 bytes: only the notes matter here.
+        let Err(LoadError::NoCertificatesFound { notes }) = load_dir(temp.path(), false, &limits)
+        else {
+            panic!("expected no certificates");
+        };
+        assert_eq!(
+            notes,
+            vec![
+                certtui_domain::model::LoadNote::FileTooLarge {
+                    path: Some("big.txt".to_owned()),
+                    limit: 32
+                },
+                certtui_domain::model::LoadNote::FileTooLarge {
+                    path: Some("ok.pem".to_owned()),
+                    limit: 32
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn quando_arquivo_sem_candidatos_em_subdiretorio_deve_nomear_o_caminho_relativo() {
+        let temp = TestDirectory::new();
+        fs::create_dir(temp.path().join("sub")).unwrap();
+        fs::write(temp.path().join("sub/prose.txt"), "only prose here\n").unwrap();
+        fs::write(temp.path().join("ok.pem"), fixture("expired.pem")).unwrap();
+        let loaded = load_dir(temp.path(), true, &Limits::default()).unwrap();
+        assert_eq!(
+            loaded.notes,
+            vec![certtui_domain::model::LoadNote::NoCandidates {
+                path: Some("sub/prose.txt".to_owned())
+            }]
+        );
+    }
+
+    #[test]
+    fn quando_p7b_do_diretorio_e_malformado_deve_anotar_malformed_input_com_o_caminho() {
+        let temp = TestDirectory::new();
+        fs::write(temp.path().join("bad.p7b"), &fixture("chain-3.p7b")[..32]).unwrap();
+        fs::write(temp.path().join("ok.pem"), fixture("expired.pem")).unwrap();
+        let loaded = load_dir(temp.path(), false, &Limits::default()).unwrap();
+        assert_eq!(
+            loaded.notes,
+            vec![certtui_domain::model::LoadNote::MalformedInput {
+                path: Some("bad.p7b".to_owned())
+            }]
+        );
+    }
+
+    #[test]
+    fn quando_nome_do_arquivo_tem_caractere_de_controle_deve_sanitizar_o_caminho() {
+        let temp = TestDirectory::new();
+        fs::write(temp.path().join("pro\u{1b}[31mse.txt"), "only prose\n").unwrap();
+        fs::write(temp.path().join("ok.pem"), fixture("expired.pem")).unwrap();
+        let loaded = load_dir(temp.path(), false, &Limits::default()).unwrap();
+        assert_eq!(
+            loaded.notes,
+            vec![certtui_domain::model::LoadNote::NoCandidates {
+                path: Some("pro[31mse.txt".to_owned())
+            }]
+        );
+    }
+
+    #[test]
+    fn quando_notas_por_arquivo_excedem_o_orcamento_deve_limitar_com_marcador() {
+        let temp = TestDirectory::new();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(temp.path().join(name), "only prose\n").unwrap();
+        }
+        let limits = Limits {
+            max_scan_diagnostics: 2,
+            ..Limits::default()
+        };
+        let Err(LoadError::NoCertificatesFound { notes }) = load_dir(temp.path(), false, &limits)
+        else {
+            panic!("expected no certificates");
+        };
+        assert_eq!(
+            notes,
+            vec![
+                certtui_domain::model::LoadNote::NoCandidates {
+                    path: Some("a.txt".to_owned())
+                },
+                certtui_domain::model::LoadNote::NoCandidates {
+                    path: Some("b.txt".to_owned())
+                },
+                certtui_domain::model::LoadNote::DiagnosticsTruncated { limit: 2 },
+            ]
+        );
     }
 
     struct TestDirectory(PathBuf);

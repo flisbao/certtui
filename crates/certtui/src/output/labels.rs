@@ -1,5 +1,6 @@
 //! Human-readable labels for domain values, shared by the text and JSON
-//! renderers. Pure functions; no sanitization (callers sanitize).
+//! renderers. Pure functions; free text is sanitized and kept on one line by
+//! `single_line`.
 
 use certtui_domain::model::{
     CertOrigin, ExtendedKeyUsage, HashAlgorithm, KeyUsage, LoadNote, PublicKeyAlgorithm,
@@ -163,6 +164,37 @@ pub fn note_text(note: &LoadNote) -> String {
         LoadNote::DirectoryTruncated { limit } => {
             format!("directory scan stopped at {limit} entries")
         }
+        LoadNote::Unreadable { path } => path_note(
+            path.as_deref(),
+            "could not be read",
+            "an entry could not be read",
+        ),
+        LoadNote::UnsupportedFormat { path } => path_note(
+            path.as_deref(),
+            "unsupported format (JKS and PKCS#12 keystores arrive in a later release)",
+            "unsupported format (JKS and PKCS#12 keystores arrive in a later release)",
+        ),
+        LoadNote::NoCandidates { path } => path_note(
+            path.as_deref(),
+            "no certificate candidates found",
+            "no certificate candidates found",
+        ),
+        LoadNote::FileTooLarge { path, limit } => {
+            let message = format!("larger than the limit of {limit} bytes");
+            path_note(path.as_deref(), &message, &format!("input is {message}"))
+        }
+        LoadNote::MalformedInput { path } => {
+            path_note(path.as_deref(), "malformed input", "malformed input")
+        }
+    }
+}
+
+/// `"<path>: <with_path>"` when the note names a path, else `without_path`.
+/// The path is rendered on one line without control characters.
+fn path_note(path: Option<&str>, with_path: &str, without_path: &str) -> String {
+    match path {
+        Some(path) => format!("{}: {with_path}", single_line(path)),
+        None => without_path.to_owned(),
     }
 }
 
@@ -202,6 +234,66 @@ mod tests {
         assert_eq!(single_line("a\nb\tc\rd"), r"a\nb\tc\rd");
         assert_eq!(single_line("a\u{1b}[31mb\u{202E}"), "a[31mb");
         assert_eq!(single_line("limpo ção"), "limpo ção");
+    }
+
+    #[test]
+    fn quando_note_tem_caminho_deve_nomear_o_arquivo_em_uma_linha() {
+        assert_eq!(
+            note_text(&LoadNote::Unreadable {
+                path: Some("sub/a.pem".to_owned())
+            }),
+            "sub/a.pem: could not be read"
+        );
+        assert_eq!(
+            note_text(&LoadNote::UnsupportedFormat {
+                path: Some("k.jks".to_owned())
+            }),
+            "k.jks: unsupported format (JKS and PKCS#12 keystores arrive in a later release)"
+        );
+        assert_eq!(
+            note_text(&LoadNote::NoCandidates {
+                path: Some("notes.txt".to_owned())
+            }),
+            "notes.txt: no certificate candidates found"
+        );
+        assert_eq!(
+            note_text(&LoadNote::FileTooLarge {
+                path: Some("big".to_owned()),
+                limit: 7
+            }),
+            "big: larger than the limit of 7 bytes"
+        );
+        assert_eq!(
+            note_text(&LoadNote::MalformedInput {
+                path: Some("x.p7b".to_owned())
+            }),
+            "x.p7b: malformed input"
+        );
+        assert_eq!(
+            note_text(&LoadNote::Unreadable {
+                path: Some("a\nb\u{1b}[31m".to_owned())
+            }),
+            r"a\nb[31m: could not be read"
+        );
+    }
+
+    #[test]
+    fn quando_note_sem_caminho_deve_descrever_sem_prefixo() {
+        assert_eq!(
+            note_text(&LoadNote::NoCandidates { path: None }),
+            "no certificate candidates found"
+        );
+        assert_eq!(
+            note_text(&LoadNote::Unreadable { path: None }),
+            "an entry could not be read"
+        );
+        assert_eq!(
+            note_text(&LoadNote::FileTooLarge {
+                path: None,
+                limit: 7
+            }),
+            "input is larger than the limit of 7 bytes"
+        );
     }
 
     #[test]

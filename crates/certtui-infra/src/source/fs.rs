@@ -9,13 +9,13 @@ use certtui_domain::extract::{CandidateKind, scan_text};
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{
     CertOrigin, DiagnosticNoteCollector, Digest, Fingerprints, LoadNote, parse_der_cert,
-    retain_diagnostic_notes,
 };
 
 use super::bounded::read_limited;
 use super::format::{DetectedFormat, detect_format};
 use super::pkcs7::{
-    extract_pkcs7_certs_excluding, extract_pkcs7_certs_with_metadata, has_cms_content_info_prefix,
+    extract_pkcs7_certs_excluding, extract_pkcs7_certs_with_metadata, has_certificate_like_prefix,
+    has_cms_content_info_prefix, has_pkcs12_pfx_prefix,
 };
 use super::text::utf16_to_utf8_bytes;
 
@@ -80,11 +80,16 @@ pub(super) fn load_reader<R: Read>(
         DetectedFormat::BinaryDer => load_binary_der(&bytes, &origin, limits),
         DetectedFormat::Utf16Text => {
             let decoded = utf16_to_utf8_bytes(&bytes);
-            load_text(&decoded, &origin, limits)
+            load_text(
+                &decoded,
+                &origin,
+                limits,
+                LoadNote::NoCandidates { path: None },
+            )
         }
         DetectedFormat::Text => {
             let text = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
-            load_text(text, &origin, limits)
+            load_text(text, &origin, limits, LoadNote::NoCandidates { path: None })
         }
     }
 }
@@ -119,11 +124,14 @@ fn load_binary_der(
                     limit: limits.max_certs_per_source,
                 });
             }
-            for _ in 0..extraction.oversized {
-                note_collector.push(LoadNote::Unparsable { offset: None });
-            }
+            push_dropped_pkcs7_notes(
+                &mut note_collector,
+                extraction.oversized.saturating_add(extraction.unparsable),
+                None,
+                limits,
+            );
             if certs.is_empty() && note_collector.is_empty() {
-                note_collector.push(LoadNote::Unparsable { offset: None });
+                note_collector.push(LoadNote::NoCandidates { path: None });
             }
             let (notes, _, _) = note_collector.finish();
             if certs.is_empty() {
@@ -133,13 +141,46 @@ fn load_binary_der(
             }
         }
         Err(error) if has_cms_content_info_prefix(bytes) => Err(error),
-        Err(_) => Err(LoadError::Unsupported(
+        Err(_) if has_pkcs12_pfx_prefix(bytes) => Err(LoadError::Unsupported(
             "PKCS#12 keystores arrive in a later release",
         )),
+        Err(_) => {
+            // Neither an X.509 certificate, CMS nor a PFX: the leading 0x30 may
+            // be plain text (a log line), a certificate with trailing bytes or
+            // a DER key. Scan it like text; if nothing is found, a
+            // certificate-shaped input gets a malformed note, anything else
+            // (for example a PKCS#8 key, never echoed) has no candidates.
+            let empty_note = if has_certificate_like_prefix(bytes) {
+                LoadNote::Unparsable { offset: Some(0) }
+            } else {
+                LoadNote::NoCandidates { path: None }
+            };
+            load_text(bytes, origin, limits, empty_note)
+        }
     }
 }
 
-fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<LoadedCerts, LoadError> {
+/// Reports PKCS#7 certificate choices that were dropped (over the size cap or
+/// not X.509), bounded by the diagnostics budget.
+fn push_dropped_pkcs7_notes(
+    collector: &mut DiagnosticNoteCollector,
+    dropped: usize,
+    offset: Option<usize>,
+    limits: &Limits,
+) {
+    for _ in 0..dropped.min(limits.max_scan_diagnostics.saturating_add(1)) {
+        collector.push(LoadNote::Unparsable { offset });
+    }
+}
+
+/// Scans `bytes` as free text. `empty_note` is the diagnostic reported when
+/// nothing at all was found and no other note explains why.
+fn load_text(
+    bytes: &[u8],
+    origin: &OriginKind,
+    limits: &Limits,
+    empty_note: LoadNote,
+) -> Result<LoadedCerts, LoadError> {
     let mut scan_limits = *limits;
     scan_limits.max_certs_per_source = Limits::HARD_CAPS.max_certs_per_source;
     let outcome = scan_text(bytes, &scan_limits);
@@ -176,14 +217,12 @@ fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<Loade
                     if extraction.truncated {
                         certificate_truncated = true;
                     }
-                    for _ in 0..extraction
-                        .oversized
-                        .min(limits.max_scan_diagnostics.saturating_add(1))
-                    {
-                        note_collector.push(LoadNote::Unparsable {
-                            offset: Some(candidate.offset),
-                        });
-                    }
+                    push_dropped_pkcs7_notes(
+                        &mut note_collector,
+                        extraction.oversized.saturating_add(extraction.unparsable),
+                        Some(candidate.offset),
+                        limits,
+                    );
                 }
                 Err(_) => note_collector.push(LoadNote::Unparsable {
                     offset: Some(candidate.offset),
@@ -216,26 +255,13 @@ fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<Loade
         });
     }
     if certs.is_empty() && note_collector.is_empty() {
-        note_collector.push(LoadNote::Unparsable { offset: None });
+        note_collector.push(empty_note);
     }
     let (notes, _, _) = note_collector.finish();
     if certs.is_empty() {
         return Err(LoadError::NoCertificatesFound { notes });
     }
     Ok(LoadedCerts { certs, notes })
-}
-
-/// Applies the shared diagnostic quota and retains one truncation marker.
-pub(super) fn normalize_notes(notes: Vec<LoadNote>, limit: usize) -> Vec<LoadNote> {
-    let (mut notes, _, dropped) = retain_diagnostic_notes(notes, limit);
-    if dropped
-        && !notes
-            .iter()
-            .any(|note| matches!(note, LoadNote::DiagnosticsTruncated { .. }))
-    {
-        notes.push(LoadNote::DiagnosticsTruncated { limit });
-    }
-    notes
 }
 
 fn cert_origin(origin: &OriginKind, index: usize) -> CertOrigin {
@@ -534,7 +560,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(LoadError::NoCertificatesFound { notes })
-                if notes.iter().any(|note| matches!(note, certtui_domain::model::LoadNote::Unparsable { .. }))
+                if notes == vec![certtui_domain::model::LoadNote::NoCandidates { path: None }]
         ));
     }
 
@@ -644,8 +670,90 @@ mod tests {
         assert_eq!(
             load_bytes(b"", OriginKind::Stdin, &Limits::default()),
             Err(LoadError::NoCertificatesFound {
-                notes: vec![certtui_domain::model::LoadNote::Unparsable { offset: None }],
+                notes: vec![certtui_domain::model::LoadNote::NoCandidates { path: None }],
             })
+        );
+    }
+
+    #[test]
+    fn quando_texto_so_tem_prosa_deve_dizer_que_nao_ha_candidatos() {
+        assert_eq!(
+            load_bytes(
+                b"just some prose, no certificate here\n",
+                OriginKind::Stdin,
+                &Limits::default()
+            ),
+            Err(LoadError::NoCertificatesFound {
+                notes: vec![certtui_domain::model::LoadNote::NoCandidates { path: None }],
+            })
+        );
+    }
+
+    #[test]
+    fn quando_log_comeca_com_byte_0x30_e_tem_pem_depois_deve_achar_o_certificado() {
+        let mut input = b"09:15:02 INFO starting\n".to_vec();
+        input.extend(fixture("rsa2048-leaf.pem"));
+        assert_eq!(input.first(), Some(&0x30));
+        let result = load_bytes(&input, OriginKind::Stdin, &Limits::default()).unwrap();
+        assert_eq!(result.certs.len(), 1);
+    }
+
+    #[test]
+    fn quando_der_valido_tem_bytes_extras_no_fim_deve_dar_nota_de_malformado_e_nao_pkcs12() {
+        let mut input = fixture("rsa2048-leaf.der");
+        input.extend(b"\ntrailing bytes\n");
+        assert_eq!(
+            load_bytes(&input, OriginKind::Stdin, &Limits::default()),
+            Err(LoadError::NoCertificatesFound {
+                notes: vec![certtui_domain::model::LoadNote::Unparsable { offset: Some(0) }],
+            })
+        );
+    }
+
+    #[test]
+    fn quando_der_de_certificado_truncado_deve_dar_nota_de_malformado_e_nao_pkcs12() {
+        let truncated = fixture("rsa2048-leaf.der");
+        let result = load_bytes(&truncated[..100], OriginKind::Stdin, &Limits::default());
+        assert_eq!(
+            result,
+            Err(LoadError::NoCertificatesFound {
+                notes: vec![certtui_domain::model::LoadNote::Unparsable { offset: Some(0) }],
+            })
+        );
+    }
+
+    #[test]
+    fn quando_chave_pkcs8_der_deve_dar_sem_candidatos_sem_pkcs12_e_sem_vazar_bytes() {
+        // SEQUENCE { INTEGER 0, SEQUENCE { OID rsaEncryption, NULL }, OCTET STRING }
+        let key: Vec<u8> = [
+            &[0x30, 0x19, 0x02, 0x01, 0x00, 0x30, 0x0D][..],
+            &[
+                0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00,
+            ][..],
+            &[0x04, 0x05, 0xDE, 0xAD, 0xBE, 0xEF, 0x01][..],
+        ]
+        .concat();
+        let result = load_bytes(&key, OriginKind::Stdin, &Limits::default());
+        assert_eq!(
+            result,
+            Err(LoadError::NoCertificatesFound {
+                notes: vec![certtui_domain::model::LoadNote::NoCandidates { path: None }],
+            })
+        );
+        let dumped = format!("{result:?}");
+        assert!(!dumped.contains("222, 173, 190, 239"));
+        assert!(!dumped.contains("DEAD"));
+    }
+
+    #[test]
+    fn quando_der_tem_forma_de_pfx_deve_dar_unsupported_pkcs12() {
+        // SEQUENCE { INTEGER 3, SEQUENCE { INTEGER 0 } }
+        let pfx = [0x30, 0x08, 0x02, 0x01, 0x03, 0x30, 0x03, 0x02, 0x01, 0x00];
+        assert_eq!(
+            load_bytes(&pfx, OriginKind::Stdin, &Limits::default()),
+            Err(LoadError::Unsupported(
+                "PKCS#12 keystores arrive in a later release"
+            ))
         );
     }
 

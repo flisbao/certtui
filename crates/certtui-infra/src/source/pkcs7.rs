@@ -18,6 +18,8 @@ pub(crate) struct Pkcs7Extraction {
     pub(crate) truncated: bool,
     /// Number of X.509 certificate choices exceeding the per-certificate cap.
     pub(crate) oversized: usize,
+    /// Number of certificate choices that are not parsable X.509 certificates.
+    pub(crate) unparsable: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +56,7 @@ impl CertificateCollector<'_> {
                 continue;
             }
             if parse_der_cert(choice.encoded, self.limits).is_err() {
+                self.output.unparsable = self.output.unparsable.saturating_add(1);
                 continue;
             }
             let fingerprint = Fingerprints::compute(choice.encoded).sha256;
@@ -132,9 +135,7 @@ impl<'a> DerCursor<'a> {
 ///
 /// Returns a sanitized malformed error when the input is not a valid CMS
 /// `ContentInfo` / `SignedData` envelope.
-// Justificativa: contrato planejado para consumidores sem metadados; o loader
-// usa o helper interno que também comunica truncamento.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn extract_pkcs7_certs(der: &[u8], limits: &Limits) -> Result<Vec<Vec<u8>>, LoadError> {
     Ok(extract_pkcs7_certs_with_metadata(der, limits)?.certs)
 }
@@ -287,23 +288,39 @@ fn malformed(message: &'static str) -> LoadError {
     LoadError::Malformed(message.to_owned())
 }
 
-/// Whether the DER has a top-level CMS `ContentInfo` shape.
-///
-/// Used only to distinguish malformed CMS from the existing unsupported
-/// PKCS#12 fallback, without formatting or retaining input bytes.
-pub(crate) fn has_cms_content_info_prefix(der: &[u8]) -> bool {
+/// The bytes after the header of a top-level DER `SEQUENCE`, when `der`
+/// starts with one. The declared length is not validated.
+fn sequence_content(der: &[u8]) -> Option<&[u8]> {
     if der.first() != Some(&0x30) {
-        return false;
+        return None;
     }
-    let Some(length_byte) = der.get(1).copied() else {
-        return false;
-    };
+    let length_byte = der.get(1).copied()?;
     let header_len = if length_byte & 0x80 == 0 {
         2
     } else {
         2_usize.saturating_add(usize::from(length_byte & 0x7F))
     };
-    der.get(header_len) == Some(&0x06)
+    der.get(header_len..)
+}
+
+/// Whether the DER has a top-level CMS `ContentInfo` shape
+/// (`SEQUENCE { OBJECT IDENTIFIER, ... }`).
+///
+/// Used only to distinguish malformed CMS from other binary inputs, without
+/// formatting or retaining input bytes.
+pub(crate) fn has_cms_content_info_prefix(der: &[u8]) -> bool {
+    sequence_content(der).is_some_and(|content| content.first() == Some(&0x06))
+}
+
+/// Whether the DER has a PKCS#12 `PFX` shape (`SEQUENCE { INTEGER 3, ... }`).
+pub(crate) fn has_pkcs12_pfx_prefix(der: &[u8]) -> bool {
+    sequence_content(der).is_some_and(|content| content.starts_with(&[0x02, 0x01, 0x03]))
+}
+
+/// Whether the DER looks like an X.509 certificate (`SEQUENCE { SEQUENCE,
+/// ... }`), even if it is truncated or otherwise malformed.
+pub(crate) fn has_certificate_like_prefix(der: &[u8]) -> bool {
+    sequence_content(der).is_some_and(|content| content.first() == Some(&0x30))
 }
 
 const SIGNED_DATA_OID_VALUE: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];
@@ -315,7 +332,8 @@ mod tests {
     use certtui_app::error::LoadError;
 
     use super::{
-        extract_pkcs7_certs, extract_pkcs7_certs_with_metadata, has_cms_content_info_prefix,
+        extract_pkcs7_certs, extract_pkcs7_certs_with_metadata, has_certificate_like_prefix,
+        has_cms_content_info_prefix, has_pkcs12_pfx_prefix,
     };
     use certtui_domain::limits::Limits;
 
@@ -433,6 +451,38 @@ mod tests {
         choices.extend(tlv(0xA3, &[0x30, 0x00]));
         let result = extract_pkcs7_certs(&signed_data(&choices, &[]), &Limits::default()).unwrap();
         assert_eq!(result, vec![certificate]);
+    }
+
+    #[test]
+    fn quando_choice_sequence_nao_e_x509_deve_contar_como_ilegivel() {
+        let certificate = fixture("rsa2048-leaf.der");
+        let mut choices = certificate.clone();
+        choices.extend(tlv(0x30, &[0x02, 0x01, 0x00]));
+        choices.extend(tlv(0x30, &[0x02, 0x01, 0x01]));
+        let extracted =
+            extract_pkcs7_certs_with_metadata(&signed_data(&choices, &[]), &Limits::default())
+                .unwrap();
+        assert_eq!(extracted.certs, vec![certificate]);
+        assert_eq!(extracted.unparsable, 2);
+        assert_eq!(extracted.oversized, 0);
+    }
+
+    #[test]
+    fn quando_der_tem_forma_conhecida_deve_classificar_o_prefixo() {
+        let pfx = [0x30, 0x08, 0x02, 0x01, 0x03, 0x30, 0x03, 0x02, 0x01, 0x00];
+        assert!(has_pkcs12_pfx_prefix(&pfx));
+        assert!(!has_cms_content_info_prefix(&pfx));
+        assert!(!has_certificate_like_prefix(&pfx));
+        let cert = fixture("rsa2048-leaf.der");
+        assert!(has_certificate_like_prefix(&cert));
+        assert!(has_certificate_like_prefix(&cert[..40]));
+        assert!(!has_pkcs12_pfx_prefix(&cert));
+        assert!(has_cms_content_info_prefix(&fixture("chain-3.p7b")));
+        // A log line starting with "0" is none of them.
+        assert!(!has_certificate_like_prefix(b"09:15:02 INFO"));
+        assert!(!has_pkcs12_pfx_prefix(b"09:15:02 INFO"));
+        assert!(!has_cms_content_info_prefix(b"09:15:02 INFO"));
+        assert!(!has_certificate_like_prefix(&[]));
     }
 
     #[test]
