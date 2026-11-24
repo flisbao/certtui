@@ -2,8 +2,16 @@
 
 use std::io::{self, Write};
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use certtui_app::ports::TrustStoreProvider;
+use certtui_domain::limits::Limits;
+use certtui_infra::chain_verifier::WebpkiChainVerifier;
+use certtui_infra::clock::SystemClock;
 use certtui_infra::source::FsSourceLoader;
 use certtui_infra::tls::RustlsChainFetcher;
+use certtui_infra::trust::NativeTrustProvider;
 
 use crate::cli;
 use crate::exit_code::ExitCode;
@@ -13,9 +21,21 @@ pub fn run_process() -> std::process::ExitCode {
     let loader = FsSourceLoader::new();
     // Cheap to build: the async runtime only starts for network targets.
     let fetcher = RustlsChainFetcher::new();
+    let verifier = WebpkiChainVerifier::new();
+    let clock = SystemClock;
+    let trust_provider = |ca_files: Vec<PathBuf>| -> Box<dyn TrustStoreProvider> {
+        Box::new(NativeTrustProvider::new(
+            ca_files,
+            Arc::new(FsSourceLoader::new()),
+            Limits::default(),
+        ))
+    };
     let env = cli::Env {
         loader: &loader,
         fetcher: &fetcher,
+        verifier: &verifier,
+        clock: &clock,
+        trust_provider: &trust_provider,
     };
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();

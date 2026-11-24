@@ -2,13 +2,18 @@
 
 use std::ffi::OsString;
 use std::io::Write;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
+use certtui_app::check::FailOn;
 use certtui_app::error::{InspectError, LoadError};
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
-use certtui_app::ports::{ChainFetcher, SourceLoader};
+use certtui_app::ports::{ChainFetcher, ChainVerifier, Clock, SourceLoader, TrustStoreProvider};
+use certtui_app::trust::{TrustAnchors, TrustSource, resolve_sources};
+use certtui_app::validate::{ValidationInputs, validate};
 use certtui_domain::limits::Limits;
+use certtui_domain::lint::Thresholds;
 use certtui_domain::model::{FingerprintFormat, InspectionReport, LoadNote};
 use certtui_domain::target::{NetworkTarget, Target};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -16,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::exit_code::ExitCode;
 use crate::network_args::{ConnectTo, parse_connect_to, parse_sni, parse_timeout, with_timeout};
+use crate::output::check::TargetResult;
 use crate::output::field::Field;
 use crate::output::{self, View};
 use crate::runtime;
@@ -41,6 +47,21 @@ pub struct Cli {
     /// 120 (network targets only).
     #[arg(long, global = true, value_name = "SECONDS", value_parser = parse_timeout)]
     timeout: Option<std::time::Duration>,
+    /// Trust source for validation: `system` (the default), `mozilla` or
+    /// `custom`; repeatable.
+    #[arg(long, global = true, value_enum, value_name = "SOURCE")]
+    trust: Vec<TrustArg>,
+    /// CA certificates to trust, in any format `inspect` reads (adds the
+    /// `custom` source); repeatable.
+    #[arg(long, global = true, value_name = "PATH")]
+    ca_file: Vec<PathBuf>,
+    /// Trust only the `--ca-file` certificates.
+    #[arg(long, global = true)]
+    ca_only: bool,
+    /// Name the leaf must match; defaults to the host of a network target and
+    /// is skipped for files.
+    #[arg(long, global = true, value_name = "NAME")]
+    host_check: Option<String>,
 }
 
 /// Top-level subcommands.
@@ -48,6 +69,76 @@ pub struct Cli {
 pub enum Command {
     /// Show the certificates of a file, directory, standard input or TLS server.
     Inspect(InspectArgs),
+    /// Validate the certificates of one or more targets and report findings.
+    Check(CheckArgs),
+}
+
+/// Trust source (`--trust`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TrustArg {
+    /// The operating system store.
+    System,
+    /// The bundled Mozilla roots.
+    Mozilla,
+    /// The `--ca-file` certificates.
+    Custom,
+}
+
+impl From<TrustArg> for TrustSource {
+    fn from(arg: TrustArg) -> Self {
+        match arg {
+            TrustArg::System => TrustSource::System,
+            TrustArg::Mozilla => TrustSource::Mozilla,
+            TrustArg::Custom => TrustSource::Custom,
+        }
+    }
+}
+
+/// Lowest severity that fails a check (`--fail-on`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum FailOnArg {
+    /// Warnings and errors fail.
+    Warning,
+    /// Only errors fail.
+    #[default]
+    Error,
+}
+
+impl From<FailOnArg> for FailOn {
+    fn from(arg: FailOnArg) -> Self {
+        match arg {
+            FailOnArg::Warning => FailOn::Warning,
+            FailOnArg::Error => FailOn::Error,
+        }
+    }
+}
+
+/// Arguments of `certtui check`.
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// What to check: files, directories, `-` for standard input or TLS
+    /// servers, as for `inspect`.
+    #[arg(required = true)]
+    pub targets: Vec<String>,
+    /// Lowest severity of a finding that makes the command exit 1.
+    #[arg(long, value_enum, default_value_t)]
+    pub fail_on: FailOnArg,
+    /// Warn when a certificate expires within this many days (default 30).
+    #[arg(long, value_name = "N")]
+    pub warn_days: Option<u32>,
+    /// Report an error when a certificate expires within this many days
+    /// (default 7).
+    #[arg(long, value_name = "N")]
+    pub critical_days: Option<u32>,
+    /// Machine-readable JSON (`schema_version` 1).
+    #[arg(long)]
+    pub json: bool,
+    /// Treat every target as a file even if it looks like a host name.
+    #[arg(long)]
+    pub file: bool,
+    /// Descend into subdirectories when a target is a directory.
+    #[arg(long)]
+    pub recursive: bool,
 }
 
 /// Fingerprint display format (`--fingerprint-format`).
@@ -137,6 +228,70 @@ pub struct Env<'a> {
     pub loader: &'a dyn SourceLoader,
     /// Fetches the chain of a network target.
     pub fetcher: &'a dyn ChainFetcher,
+    /// Decides whether a chain is trusted.
+    pub verifier: &'a dyn ChainVerifier,
+    /// Source of "now".
+    pub clock: &'a dyn Clock,
+    /// Builds the trust store provider for the `--ca-file` paths of a run.
+    pub trust_provider: &'a dyn Fn(Vec<PathBuf>) -> Box<dyn TrustStoreProvider>,
+}
+
+/// Trust-related options shared by every command.
+#[derive(Clone)]
+struct TrustOptions {
+    sources: Vec<TrustSource>,
+    ca_files: Vec<PathBuf>,
+    host_check: Option<String>,
+}
+
+/// Loads the anchors of `options`, reporting warnings on `err`; a failure is
+/// a configuration error (exit 2).
+fn load_anchors(
+    options: &TrustOptions,
+    env: &Env<'_>,
+    err: &mut dyn Write,
+) -> anyhow::Result<Result<TrustAnchors, ExitCode>> {
+    let provider = (env.trust_provider)(options.ca_files.clone());
+    match provider.anchors(&options.sources) {
+        Ok(anchors) => {
+            for warning in &anchors.warnings {
+                writeln!(err, "certtui: warning: {}", output::single_line(warning))
+                    .context("writing the trust warning")?;
+            }
+            Ok(Ok(anchors))
+        }
+        Err(error) => usage(err, &output::single_line(&error.to_string())).map(Err),
+    }
+}
+
+/// Everything [`validate`] needs that does not depend on the report.
+struct Validation<'a> {
+    env: &'a Env<'a>,
+    anchors: &'a TrustAnchors,
+    thresholds: Thresholds,
+    host_check: Option<&'a str>,
+}
+
+impl Validation<'_> {
+    /// The report with its trust verdict and findings filled in. A network
+    /// target is checked against its host unless `--host-check` says otherwise.
+    fn apply(&self, report: InspectionReport) -> InspectionReport {
+        let network_host = match &report.target {
+            Target::Network(network) => Some(network.host.clone()),
+            _ => None,
+        };
+        validate(
+            report,
+            ValidationInputs {
+                verifier: self.env.verifier,
+                anchors: self.anchors,
+                clock: self.env.clock,
+                thresholds: self.thresholds,
+                hostname: self.host_check.map(str::to_owned).or(network_host.clone()),
+                is_network_target: network_host.is_some(),
+            },
+        )
+    }
 }
 
 /// How the certificates are rendered.
@@ -196,14 +351,31 @@ pub fn run(
         },
         Err(message) => return usage(err, &format!("--sni: {message}")),
     };
+    let sources: Vec<TrustSource> = cli.trust.iter().copied().map(TrustSource::from).collect();
+    let trust_options = TrustOptions {
+        sources: resolve_sources(&sources, !cli.ca_file.is_empty(), cli.ca_only),
+        ca_files: cli.ca_file,
+        host_check: cli.host_check,
+    };
     match cli.command {
-        Command::Inspect(inspect_args) => inspect(&inspect_args, &network_options, env, out, err),
+        Command::Inspect(inspect_args) => inspect(
+            &inspect_args,
+            &network_options,
+            &trust_options,
+            env,
+            out,
+            err,
+        ),
+        Command::Check(check_args) => {
+            check(&check_args, &network_options, &trust_options, env, out, err)
+        }
     }
 }
 
 fn inspect(
     args: &InspectArgs,
     network_options: &NetworkOptions,
+    trust_options: &TrustOptions,
     env: &Env<'_>,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -214,10 +386,21 @@ fn inspect(
         Ok(target) => target,
         Err(error) => return usage(err, &error.to_string()),
     };
+    let anchors = match load_anchors(trust_options, env, err)? {
+        Ok(anchors) => anchors,
+        Err(code) => return Ok(code),
+    };
     let report = match gather(network_options, env, target, err)? {
         Ok(report) => report,
         Err(code) => return Ok(code),
     };
+    let report = Validation {
+        env,
+        anchors: &anchors,
+        thresholds: Thresholds::default(),
+        host_check: trust_options.host_check.as_deref(),
+    }
+    .apply(report);
     let mode = args.mode();
     let only = match (args.index, mode) {
         (Some(index), _) => Some(index),
@@ -242,6 +425,119 @@ fn inspect(
     };
     render(mode, &view, out, err)?;
     Ok(ExitCode::Ok)
+}
+
+fn check(
+    args: &CheckArgs,
+    network_options: &NetworkOptions,
+    trust_options: &TrustOptions,
+    env: &Env<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> anyhow::Result<ExitCode> {
+    let mut targets = Vec::new();
+    for raw in &args.targets {
+        match parse_target(raw, args.file, args.recursive, &|path| path.exists()) {
+            Ok(target) => targets.push((raw.as_str(), target)),
+            Err(error) => return usage(err, &error.to_string()),
+        }
+    }
+    let thresholds = match thresholds(args) {
+        Ok(thresholds) => thresholds,
+        Err(message) => return usage(err, &message),
+    };
+    let anchors = match load_anchors(trust_options, env, err)? {
+        Ok(anchors) => anchors,
+        Err(code) => return Ok(code),
+    };
+    let validation = Validation {
+        env,
+        anchors: &anchors,
+        thresholds,
+        host_check: trust_options.host_check.as_deref(),
+    };
+    let mut checked: Vec<(&str, Result<InspectionReport, String>)> = Vec::new();
+    for (raw, target) in targets {
+        // The fetch and load failures are written as `certtui: <message>`; they
+        // are captured so each can be attributed to its target.
+        let mut failure = Vec::new();
+        match gather(network_options, env, target, &mut failure)? {
+            Ok(report) => checked.push((raw, Ok(validation.apply(report)))),
+            Err(ExitCode::Usage) => {
+                err.write_all(&failure).context("writing the usage error")?;
+                return Ok(ExitCode::Usage);
+            }
+            Err(_) => {
+                let message = report_failure(err, raw, &failure)?;
+                checked.push((raw, Err(message)));
+            }
+        }
+    }
+    let results: Vec<TargetResult<'_>> = checked
+        .iter()
+        .map(|(target, outcome)| TargetResult {
+            target,
+            outcome: outcome.as_ref().map_err(String::as_str),
+        })
+        .collect();
+    if args.json {
+        output::check::write_json(out, &results)
+    } else {
+        output::check::write_text(out, &results)
+    }
+    .context("writing the output")?;
+    Ok(exit_code_of(&results, args.fail_on.into()))
+}
+
+/// Writes a captured failure on `err`, each line attributed to `target`, and
+/// returns the first line without its `certtui: ` prefix.
+fn report_failure(err: &mut dyn Write, target: &str, captured: &[u8]) -> anyhow::Result<String> {
+    let text = String::from_utf8_lossy(captured);
+    let target = output::single_line(target);
+    let mut first = None;
+    for line in text.lines() {
+        let message = line.strip_prefix("certtui: ").unwrap_or(line);
+        writeln!(err, "certtui: {target}: {message}").context("writing the failure")?;
+        first.get_or_insert_with(|| message.to_owned());
+    }
+    Ok(first.unwrap_or_else(|| "failed".to_owned()))
+}
+
+/// 3 when no target could be checked, 1 when some failed or a finding reaches
+/// `fail_on`, 0 otherwise.
+fn exit_code_of(results: &[TargetResult<'_>], fail_on: FailOn) -> ExitCode {
+    let failed = results
+        .iter()
+        .filter(|result| result.outcome.is_err())
+        .count();
+    if failed == results.len() {
+        return ExitCode::Input;
+    }
+    let findings_fail = results
+        .iter()
+        .filter_map(|result| result.outcome.ok())
+        .any(|report| fail_on.fails(&report.findings));
+    if failed > 0 || findings_fail {
+        ExitCode::Findings
+    } else {
+        ExitCode::Ok
+    }
+}
+
+fn thresholds(args: &CheckArgs) -> Result<Thresholds, String> {
+    let defaults = Thresholds::default();
+    let warn_days = args.warn_days.unwrap_or(defaults.warn_days);
+    let critical_days = args.critical_days.unwrap_or(defaults.critical_days);
+    if critical_days > warn_days {
+        return Err(format!(
+            "--critical-days ({critical_days}) must not exceed --warn-days ({warn_days})"
+        ));
+    }
+    Ok(Thresholds {
+        warn_days,
+        critical_days,
+        ..defaults
+    })
 }
 
 /// The report of `target`, or the exit code of a failure already reported on
@@ -371,9 +667,12 @@ mod tests {
 
     use certtui_app::error::LoadError;
     use certtui_app::fetch::{FetchError, FetchRequest, FetchedChain, Stage};
-    use certtui_app::ports::LoadedCerts;
-    use certtui_app::testing::{FakeChainFetcher, FakeSourceLoader};
-    use certtui_domain::model::{Timings, TlsSessionInfo};
+    use certtui_app::ports::{ChainVerification, LoadedCerts};
+    use certtui_app::testing::{
+        FakeChainFetcher, FakeChainVerifier, FakeSourceLoader, FakeTrustProvider, FixedClock,
+    };
+    use certtui_domain::model::{Timings, TlsSessionInfo, TrustVerdict};
+    use certtui_domain::time::Timestamp;
     use serde_json::Value;
 
     use super::*;
@@ -427,16 +726,41 @@ mod tests {
         err: String,
     }
 
-    fn run_with(fetcher: &dyn ChainFetcher, args: &[&str]) -> Outcome {
-        let loader = FakeSourceLoader(Err(LoadError::Io("no files in unit tests".to_owned())));
+    /// Runs the CLI with fake adapters: the verifier trusts everything, the
+    /// clock is fixed and the trust store is empty.
+    fn run_in_env(
+        loader: &dyn SourceLoader,
+        fetcher: &dyn ChainFetcher,
+        args: &[&str],
+    ) -> (anyhow::Result<ExitCode>, Vec<u8>, Vec<u8>) {
+        let verifier = FakeChainVerifier::new(ChainVerification {
+            trust: TrustVerdict::Trusted {
+                anchor: "Fake Root".to_owned(),
+            },
+            hostname_ok: None,
+        });
+        let clock = FixedClock(Timestamp::from_unix(1_769_904_000).unwrap());
+        let provider = |_files: Vec<PathBuf>| -> Box<dyn TrustStoreProvider> {
+            Box::new(FakeTrustProvider(Ok(TrustAnchors::default())))
+        };
         let env = Env {
-            loader: &loader,
+            loader,
             fetcher,
+            verifier: &verifier,
+            clock: &clock,
+            trust_provider: &provider,
         };
         let mut out = Vec::new();
         let mut err = Vec::new();
         let cli_args = std::iter::once("certtui").chain(args.iter().copied());
-        let code = run(cli_args.map(OsString::from), &env, &mut out, &mut err).unwrap();
+        let result = run(cli_args.map(OsString::from), &env, &mut out, &mut err);
+        (result, out, err)
+    }
+
+    fn run_with(fetcher: &dyn ChainFetcher, args: &[&str]) -> Outcome {
+        let loader = FakeSourceLoader(Err(LoadError::Io("no files in unit tests".to_owned())));
+        let (code, out, err) = run_in_env(&loader, fetcher, args);
+        let code = code.unwrap();
         Outcome {
             code,
             out: String::from_utf8(out).unwrap(),
@@ -651,14 +975,8 @@ mod tests {
             certs: Vec::new(),
             notes: Vec::new(),
         }));
-        let env = Env {
-            loader: &loader,
-            fetcher: &fetcher,
-        };
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let args = ["certtui", "inspect", "-"].map(OsString::from);
-        let code = run(args, &env, &mut out, &mut err).unwrap();
-        assert_eq!(code, ExitCode::Input);
+        let (code, _out, _err) = run_in_env(&loader, &fetcher, &["inspect", "-"]);
+        assert_eq!(code.unwrap(), ExitCode::Input);
         assert!(fetcher.requests.lock().unwrap().is_empty());
     }
 

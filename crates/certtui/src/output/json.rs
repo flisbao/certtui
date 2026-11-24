@@ -1,6 +1,7 @@
 //! `--json`: the public, versioned machine-readable report.
 //!
 //! Contract: `schema_version` stays `1`; later milestones may only add fields.
+//! `trust` and `findings` carry the validation of the chain.
 //! Network targets add `tls`, `timings` and `ocsp_staple` (and the `sni` and
 //! `connect_to` of the target); the documents of local targets do not carry
 //! them.
@@ -14,9 +15,10 @@ use std::io::{self, Write};
 
 use std::time::Duration;
 
+use certtui_domain::finding::{Finding, FindingCategory, FindingCode, Severity};
 use certtui_domain::model::{
     CertOrigin, CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport,
-    KeyId, LoadNote, Timings, TlsSessionInfo,
+    KeyId, LoadNote, Timings, TlsSessionInfo, TrustVerdict,
 };
 use certtui_domain::sanitize::sanitize_display;
 use certtui_domain::target::Target;
@@ -27,7 +29,7 @@ use super::{View, labels};
 /// Current JSON schema version.
 pub const SCHEMA_VERSION: u8 = 1;
 
-fn clean(text: &str) -> Cow<'_, str> {
+pub(super) fn clean(text: &str) -> Cow<'_, str> {
     sanitize_display(text)
 }
 
@@ -38,7 +40,50 @@ struct Document<'a> {
     #[serde(flatten)]
     network: Option<JsonNetwork<'a>>,
     notes: &'a [LoadNote],
+    trust: JsonTrust<'a>,
+    findings: Vec<JsonFinding<'a>>,
     certificates: Vec<JsonCertificate<'a>>,
+}
+
+/// The trust verdict, with certificate-derived text sanitized.
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(super) enum JsonTrust<'a> {
+    Trusted { anchor: Cow<'a, str> },
+    Untrusted { reason: Cow<'a, str> },
+    NotEvaluated,
+}
+
+/// One finding: `code`, `severity`, `category`, `cert_index`, `message`.
+#[derive(Serialize)]
+pub(super) struct JsonFinding<'a> {
+    code: FindingCode,
+    severity: Severity,
+    category: FindingCategory,
+    cert_index: Option<usize>,
+    message: Cow<'a, str>,
+}
+
+pub(super) fn trust(verdict: &TrustVerdict) -> JsonTrust<'_> {
+    match verdict {
+        TrustVerdict::Trusted { anchor } => JsonTrust::Trusted {
+            anchor: clean(anchor),
+        },
+        TrustVerdict::Untrusted { reason } => JsonTrust::Untrusted {
+            reason: clean(reason),
+        },
+        TrustVerdict::NotEvaluated => JsonTrust::NotEvaluated,
+    }
+}
+
+pub(super) fn finding(finding: &Finding) -> JsonFinding<'_> {
+    JsonFinding {
+        code: finding.code,
+        severity: finding.severity,
+        category: finding.category,
+        cert_index: finding.cert_index,
+        message: clean(&finding.message),
+    }
 }
 
 #[derive(Serialize)]
@@ -216,6 +261,8 @@ pub fn write(out: &mut dyn Write, view: &View<'_>) -> io::Result<()> {
             ocsp_staple: staple(report),
         }),
         notes: &view.report.notes,
+        trust: trust(&report.trust),
+        findings: report.findings.iter().map(finding).collect(),
         certificates: view
             .certs()
             .map(|(index, record)| certificate(index, record, view.fingerprint_format))

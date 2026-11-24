@@ -8,7 +8,9 @@ use certtui_app::error::{InspectError, LoadError};
 pub enum ExitCode {
     /// Success.
     Ok = 0,
-    /// Usage error (arguments, unsupported target).
+    /// `check` found findings at or above `--fail-on`, or some targets failed.
+    Findings = 1,
+    /// Usage error (arguments, unsupported target, invalid trust configuration).
     Usage = 2,
     /// I/O failure, or input without any certificate.
     Input = 3,
@@ -47,6 +49,7 @@ mod tests {
     #[test]
     fn quando_codigo_deve_ter_o_valor_numerico_da_especificacao() {
         assert_eq!(ExitCode::Ok as i32, 0);
+        assert_eq!(ExitCode::Findings as i32, 1);
         assert_eq!(ExitCode::Usage as i32, 2);
         assert_eq!(ExitCode::Input as i32, 3);
         assert_eq!(ExitCode::Internal as i32, 4);

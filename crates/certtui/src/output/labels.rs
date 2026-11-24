@@ -2,9 +2,10 @@
 //! renderers. Pure functions; free text is sanitized and kept on one line by
 //! `single_line`.
 
+use certtui_domain::finding::{Finding, Severity};
 use certtui_domain::model::{
     CertOrigin, ExtendedKeyUsage, HashAlgorithm, KeyUsage, LoadNote, PublicKeyAlgorithm,
-    RejectReason, SubjectAltName,
+    RejectReason, SubjectAltName, TrustVerdict,
 };
 use certtui_domain::sanitize::sanitize_display;
 
@@ -26,6 +27,37 @@ pub fn single_line(text: &str) -> String {
         }
     }
     sanitize_display(&escaped).into_owned()
+}
+
+/// One-line description of a trust verdict.
+pub fn trust_text(trust: &TrustVerdict) -> String {
+    match trust {
+        TrustVerdict::Trusted { anchor } => format!("trusted (anchor: {})", single_line(anchor)),
+        TrustVerdict::Untrusted { reason } => format!("untrusted ({})", single_line(reason)),
+        TrustVerdict::NotEvaluated => "not evaluated".to_owned(),
+    }
+}
+
+/// Lower-case name of a severity.
+pub fn severity_text(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
+}
+
+/// One-line description of a finding: `error EXPIRED [cert 0]: message`.
+pub fn finding_text(finding: &Finding) -> String {
+    let cert = finding
+        .cert_index
+        .map_or_else(String::new, |index| format!(" [cert {index}]"));
+    format!(
+        "{} {}{cert}: {}",
+        severity_text(finding.severity),
+        finding.code.as_str(),
+        single_line(&finding.message)
+    )
 }
 
 /// Name of a public key algorithm family.

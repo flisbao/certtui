@@ -17,6 +17,24 @@ fn fixture(name: &str) -> String {
     format!("{FIXTURES}/{name}")
 }
 
+/// Drops the validation (`trust` and `findings`) from a `--json` document.
+///
+/// The verdict depends on the machine's trust store and the findings on the
+/// date (a certificate that is about to expire), so the snapshots of the
+/// certificate model leave them out; `cli_check.rs` covers validation.
+fn without_validation_json(json: &str) -> String {
+    let start = json.find("  \"trust\": ").unwrap();
+    let end = json.find("  \"certificates\": [").unwrap();
+    format!("{}{}", &json[..start], &json[end..])
+}
+
+/// Same for `--text`: the validation section closes the document of a local
+/// target.
+fn without_validation_text(text: &str) -> String {
+    let start = text.find("\nTrust: ").unwrap();
+    text[..start].to_owned()
+}
+
 fn stdout_json(args: &[&str]) -> Value {
     let out = certtui().args(args).output().unwrap();
     assert!(
@@ -59,7 +77,14 @@ fn quando_inspect_json_deve_ter_todas_as_chaves_do_contrato_na_ordem() {
     assert_keys_in_order(
         &text,
         2,
-        &["schema_version", "target", "notes", "certificates"],
+        &[
+            "schema_version",
+            "target",
+            "notes",
+            "trust",
+            "findings",
+            "certificates",
+        ],
     );
     assert_keys_in_order(
         &text,
@@ -437,7 +462,7 @@ fn quando_json_do_chain_3_deve_bater_com_snapshot() {
     assert!(out.status.success());
     insta::assert_snapshot!(
         "inspect_chain3_json",
-        String::from_utf8(out.stdout).unwrap()
+        without_validation_json(&String::from_utf8(out.stdout).unwrap())
     );
 }
 
@@ -451,7 +476,7 @@ fn quando_text_do_chain_3_deve_bater_com_snapshot() {
     assert!(out.status.success());
     insta::assert_snapshot!(
         "inspect_chain3_text",
-        String::from_utf8(out.stdout).unwrap()
+        without_validation_text(&String::from_utf8(out.stdout).unwrap())
     );
 }
 
@@ -465,7 +490,7 @@ fn quando_text_de_leaf_com_scts_deve_bater_com_snapshot() {
     assert!(out.status.success());
     insta::assert_snapshot!(
         "inspect_public_leaf_text",
-        String::from_utf8(out.stdout).unwrap()
+        without_validation_text(&String::from_utf8(out.stdout).unwrap())
     );
 }
 
@@ -479,7 +504,7 @@ fn quando_json_do_leaf_publico_com_scts_deve_bater_com_snapshot() {
     assert!(out.status.success());
     insta::assert_snapshot!(
         "inspect_public_leaf_json",
-        String::from_utf8(out.stdout).unwrap()
+        without_validation_json(&String::from_utf8(out.stdout).unwrap())
     );
 }
 

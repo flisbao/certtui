@@ -1,0 +1,40 @@
+---
+source: crates/certtui/tests/cli_check.rs
+expression: "serde_json::to_string_pretty(&json).unwrap()"
+---
+{
+  "results": [
+    {
+      "error": null,
+      "findings": [
+        {
+          "category": "trust",
+          "cert_index": null,
+          "code": "TRUST_UNTRUSTED",
+          "message": "chain is not trusted: no trust anchors loaded",
+          "severity": "error"
+        },
+        {
+          "category": "trust",
+          "cert_index": 0,
+          "code": "EXPIRED",
+          "message": "certificate expired on 2020-02-01T00:00:00Z",
+          "severity": "error"
+        },
+        {
+          "category": "trust",
+          "cert_index": 0,
+          "code": "SELF_SIGNED_LEAF",
+          "message": "leaf certificate is self-signed",
+          "severity": "error"
+        }
+      ],
+      "target": "<fixtures>/expired.pem",
+      "trust": {
+        "reason": "no trust anchors loaded",
+        "status": "untrusted"
+      }
+    }
+  ],
+  "schema_version": 1
+}

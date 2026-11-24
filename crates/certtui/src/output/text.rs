@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::io::{self, Write};
 
 use certtui_domain::model::{
-    CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport,
+    CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport, TrustVerdict,
 };
 
 use super::{View, labels};
@@ -35,7 +35,25 @@ pub fn write(out: &mut dyn Write, view: &View<'_>) -> io::Result<()> {
             writeln!(out, "  - {}", labels::note_text(note))?;
         }
     }
+    write_validation(out, view.report)?;
     write_session(out, view.report)
+}
+
+/// The trust verdict and the findings, once the chain has been evaluated.
+fn write_validation(out: &mut dyn Write, report: &InspectionReport) -> io::Result<()> {
+    if report.trust == TrustVerdict::NotEvaluated {
+        return Ok(());
+    }
+    writeln!(out)?;
+    writeln!(out, "Trust: {}", labels::trust_text(&report.trust))?;
+    if report.findings.is_empty() {
+        return writeln!(out, "Findings: none");
+    }
+    writeln!(out, "Findings:")?;
+    for finding in &report.findings {
+        writeln!(out, "  - {}", labels::finding_text(finding))?;
+    }
+    Ok(())
 }
 
 /// Separator of the footer segments (U+00B7).

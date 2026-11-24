@@ -166,7 +166,8 @@ fn masked(mut json: Value) -> Value {
 #[test]
 fn quando_json_de_rede_deve_bater_com_snapshot() {
     let fixture = Fixture::start(Behavior::Tls13Only);
-    let json = masked(fixture.json(&["--sni", "Alt.Example.Test"]));
+    // `--trust custom` (no anchors) keeps the verdict independent of the machine.
+    let json = masked(fixture.json(&["--sni", "Alt.Example.Test", "--trust", "custom"]));
     insta::assert_snapshot!(
         "network_json_masked",
         serde_json::to_string_pretty(&json).unwrap()

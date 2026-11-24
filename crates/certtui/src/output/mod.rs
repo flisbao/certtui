@@ -3,6 +3,7 @@
 
 use certtui_domain::model::{CertificateRecord, FingerprintFormat, InspectionReport};
 
+pub mod check;
 pub mod field;
 pub mod json;
 mod labels;

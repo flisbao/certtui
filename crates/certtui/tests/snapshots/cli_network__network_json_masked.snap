@@ -140,6 +140,22 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
       "subject_alt_names": []
     }
   ],
+  "findings": [
+    {
+      "category": "trust",
+      "cert_index": null,
+      "code": "TRUST_UNTRUSTED",
+      "message": "chain is not trusted: no trust anchors loaded",
+      "severity": "error"
+    },
+    {
+      "category": "presentation",
+      "cert_index": 2,
+      "code": "CHAIN_ROOT_SENT",
+      "message": "server sent the self-signed root certificate",
+      "severity": "info"
+    }
+  ],
   "notes": [],
   "ocsp_staple": {
     "bytes": 0,
@@ -165,5 +181,9 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
     "key_exchange_group": "X25519",
     "peer_ip": "127.0.0.1",
     "version": "TLSv1.3"
+  },
+  "trust": {
+    "reason": "no trust anchors loaded",
+    "status": "untrusted"
   }
 }
