@@ -19,7 +19,7 @@ pub use extensions::{
 pub use fingerprint::{Digest, FingerprintAlgorithm, FingerprintFormat, Fingerprints};
 pub use key::{HashAlgorithm, PublicKeyAlgorithm, PublicKeyInfo, SignatureAlgorithm};
 pub use name::{DistinguishedName, SerialNumber};
-pub use note::{LoadNote, RejectReason, retain_diagnostic_notes};
+pub use note::{DiagnosticNoteCollector, LoadNote, RejectReason, retain_diagnostic_notes};
 pub use parse::parse_der_cert;
 pub use record::{CertOrigin, CertificateRecord};
 pub use report::{InspectionReport, RevocationStatus, Timings, TlsSessionInfo, TrustVerdict};

@@ -4,31 +4,136 @@ use std::collections::HashSet;
 
 use certtui_app::error::LoadError;
 use certtui_domain::limits::Limits;
-use certtui_domain::model::{Digest, Fingerprints};
-use cms::cert::CertificateChoices;
-use cms::content_info::ContentInfo;
-use cms::signed_data::SignedData;
-use der::{Decode, Encode};
+use certtui_domain::model::{Digest, Fingerprints, parse_der_cert};
+use cms::content_info::CmsVersion;
+use der::asn1::ObjectIdentifier;
+use der::{Decode, Header, Reader, SliceReader, Tag, TagNumber};
 
 /// Extraction output used by the source loader to report partial results.
 #[derive(Debug, Default)]
 pub(crate) struct Pkcs7Extraction {
-    /// Certificate DER encodings kept within the configured limits.
+    /// Original certificate DER encodings kept within the configured limits.
     pub(crate) certs: Vec<Vec<u8>>,
-    /// Whether another usable certificate was present beyond the cap.
+    /// Whether another unique usable certificate was present beyond the cap.
     pub(crate) truncated: bool,
-    /// Number of certificate choices exceeding the per-certificate size cap.
+    /// Number of X.509 certificate choices exceeding the per-certificate cap.
     pub(crate) oversized: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Tlv<'a> {
+    tag: Tag,
+    encoded: &'a [u8],
+    value: &'a [u8],
+}
+
+struct DerCursor<'a> {
+    input: &'a [u8],
+    offset: usize,
+}
+
+struct CertificateCollector<'a> {
+    limits: &'a Limits,
+    already_seen: &'a HashSet<Digest<32>>,
+    seen: HashSet<Digest<32>>,
+    output: Pkcs7Extraction,
+}
+
+impl CertificateCollector<'_> {
+    fn collect(&mut self, encoded: &[u8]) -> Result<(), LoadError> {
+        let mut choices = DerCursor::new(encoded);
+        while let Some(choice) = choices.next()? {
+            if choice.tag != Tag::Sequence {
+                if choice.tag.is_context_specific() {
+                    continue;
+                }
+                return Err(malformed("invalid PKCS#7/CMS certificate choice"));
+            }
+            if choice.encoded.len() > self.limits.max_cert_der_bytes {
+                self.output.oversized = self.output.oversized.saturating_add(1);
+                continue;
+            }
+            if parse_der_cert(choice.encoded, self.limits).is_err() {
+                continue;
+            }
+            let fingerprint = Fingerprints::compute(choice.encoded).sha256;
+            if self.already_seen.contains(&fingerprint) || !self.seen.insert(fingerprint) {
+                continue;
+            }
+            if self.output.certs.len() >= self.limits.max_certs_per_source {
+                self.output.truncated = true;
+                break;
+            }
+            self.output.certs.push(choice.encoded.to_vec());
+        }
+        Ok(())
+    }
+}
+
+impl<'a> DerCursor<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, offset: 0 }
+    }
+
+    fn next(&mut self) -> Result<Option<Tlv<'a>>, LoadError> {
+        let Some(remaining) = self.input.get(self.offset..) else {
+            return Err(malformed("incomplete PKCS#7/CMS structure"));
+        };
+        if remaining.is_empty() {
+            return Ok(None);
+        }
+        let mut reader =
+            SliceReader::new(remaining).map_err(|_| malformed("invalid PKCS#7/CMS structure"))?;
+        let header =
+            Header::decode(&mut reader).map_err(|_| malformed("invalid PKCS#7/CMS length"))?;
+        let value = reader
+            .read_slice(header.length)
+            .map_err(|_| malformed("incomplete PKCS#7/CMS value"))?;
+        let encoded_len = usize::try_from(reader.position())
+            .map_err(|_| malformed("invalid PKCS#7/CMS length"))?;
+        let Some(encoded) = remaining.get(..encoded_len) else {
+            return Err(malformed("incomplete PKCS#7/CMS value"));
+        };
+        self.offset = self
+            .offset
+            .checked_add(encoded_len)
+            .ok_or_else(|| malformed("invalid PKCS#7/CMS length"))?;
+        Ok(Some(Tlv {
+            tag: header.tag,
+            encoded,
+            value,
+        }))
+    }
+
+    fn peek_tag(&self) -> Result<Option<Tag>, LoadError> {
+        let Some(remaining) = self.input.get(self.offset..) else {
+            return Err(malformed("incomplete PKCS#7/CMS structure"));
+        };
+        if remaining.is_empty() {
+            return Ok(None);
+        }
+        let mut reader =
+            SliceReader::new(remaining).map_err(|_| malformed("invalid PKCS#7/CMS structure"))?;
+        Ok(Some(
+            Header::decode(&mut reader)
+                .map_err(|_| malformed("invalid PKCS#7/CMS length"))?
+                .tag,
+        ))
+    }
+
+    const fn is_finished(&self) -> bool {
+        self.offset == self.input.len()
+    }
 }
 
 /// Extracts only X.509 certificates from CMS `SignedData`.
 ///
 /// # Errors
 ///
-/// Returns a sanitized [`LoadError::Malformed`] when the input is not a valid
-/// CMS `ContentInfo` / `SignedData` structure.
-// Justificativa: este é o contrato planejado para consumidores sem metadados
-// de truncamento; o loader usa o helper interno com metadados.
+/// Returns a sanitized malformed error when the input is not a valid CMS
+/// `ContentInfo` / `SignedData` envelope.
+// Justificativa: contrato planejado para consumidores sem metadados; o loader
+// usa o helper interno que também comunica truncamento.
 #[allow(dead_code)]
 pub(crate) fn extract_pkcs7_certs(der: &[u8], limits: &Limits) -> Result<Vec<Vec<u8>>, LoadError> {
     Ok(extract_pkcs7_certs_with_metadata(der, limits)?.certs)
@@ -42,61 +147,149 @@ pub(crate) fn extract_pkcs7_certs_with_metadata(
     extract_pkcs7_certs_excluding(der, limits, &HashSet::new())
 }
 
-/// Extracts certificates while accounting for unique DER values already kept.
+/// Extracts certificates while accounting for DER values already kept.
 pub(crate) fn extract_pkcs7_certs_excluding(
     der: &[u8],
     limits: &Limits,
     already_seen: &HashSet<Digest<32>>,
 ) -> Result<Pkcs7Extraction, LoadError> {
-    let content_info = ContentInfo::from_der(der)
-        .map_err(|_| LoadError::Malformed("invalid PKCS#7/CMS structure".to_owned()))?;
-    if content_info.content_type.to_der().ok().as_deref() != Some(SIGNED_DATA_OID) {
+    let content_info = one_tlv(der)?;
+    require_tag(content_info, Tag::Sequence)?;
+    let mut content_fields = DerCursor::new(content_info.value);
+    let oid = required_tlv(&mut content_fields)?;
+    require_tag(oid, Tag::ObjectIdentifier)?;
+    ObjectIdentifier::from_der(oid.encoded)
+        .map_err(|_| malformed("invalid PKCS#7/CMS content type"))?;
+    let content = required_tlv(&mut content_fields)?;
+    require_context_tag(content, 0, true)?;
+    require_finished(&content_fields)?;
+    if oid.value != SIGNED_DATA_OID_VALUE {
         return Ok(Pkcs7Extraction::default());
     }
-    let signed_data = content_info
-        .content
-        .decode_as::<SignedData>()
-        .map_err(|_| LoadError::Malformed("invalid PKCS#7/CMS SignedData".to_owned()))?;
 
-    let mut output = Pkcs7Extraction::default();
-    let mut seen = HashSet::new();
-    let Some(certificates) = signed_data.certificates else {
-        return Ok(output);
+    let signed_data = one_tlv(content.value)?;
+    require_tag(signed_data, Tag::Sequence)?;
+    extract_signed_data(signed_data.value, limits, already_seen)
+}
+
+fn extract_signed_data(
+    encoded: &[u8],
+    limits: &Limits,
+    already_seen: &HashSet<Digest<32>>,
+) -> Result<Pkcs7Extraction, LoadError> {
+    let mut fields = DerCursor::new(encoded);
+    let version = required_tlv(&mut fields)?;
+    require_tag(version, Tag::Integer)?;
+    CmsVersion::from_der(version.encoded).map_err(|_| malformed("invalid PKCS#7/CMS version"))?;
+
+    let algorithms = required_tlv(&mut fields)?;
+    require_tag(algorithms, Tag::Set)?;
+    validate_children(algorithms.value)?;
+
+    let encapsulated = required_tlv(&mut fields)?;
+    require_tag(encapsulated, Tag::Sequence)?;
+    validate_encapsulated_content(encapsulated.value)?;
+
+    let mut collector = CertificateCollector {
+        limits,
+        already_seen,
+        seen: HashSet::new(),
+        output: Pkcs7Extraction::default(),
     };
-    for choice in certificates.0.iter() {
-        let CertificateChoices::Certificate(certificate) = choice else {
-            continue;
-        };
-        let encoded_len = certificate
-            .encoded_len()
-            .map_err(|_| LoadError::Malformed("invalid certificate in PKCS#7/CMS".to_owned()))?;
-        let Ok(encoded_len) = usize::try_from(encoded_len) else {
-            output.oversized = output.oversized.saturating_add(1);
-            continue;
-        };
-        if encoded_len > limits.max_cert_der_bytes {
-            output.oversized = output.oversized.saturating_add(1);
-            continue;
-        }
-        let encoded = certificate
-            .to_der()
-            .map_err(|_| LoadError::Malformed("invalid certificate in PKCS#7/CMS".to_owned()))?;
-        let fingerprint = Fingerprints::compute(&encoded).sha256;
-        if already_seen.contains(&fingerprint) || !seen.insert(fingerprint) {
-            continue;
-        }
-        if output.certs.len() >= limits.max_certs_per_source {
-            output.truncated = true;
-            break;
-        }
-        output.certs.push(encoded);
+    if fields.peek_tag()? == Some(context_tag(0, true)) {
+        let certificates = required_tlv(&mut fields)?;
+        collector.collect(certificates.value)?;
     }
-    Ok(output)
+    if fields.peek_tag()? == Some(context_tag(1, true)) {
+        let crls = required_tlv(&mut fields)?;
+        validate_children(crls.value)?;
+    }
+    let signer_infos = required_tlv(&mut fields)?;
+    require_tag(signer_infos, Tag::Set)?;
+    validate_children(signer_infos.value)?;
+    require_finished(&fields)?;
+    Ok(collector.output)
+}
+
+fn validate_encapsulated_content(encoded: &[u8]) -> Result<(), LoadError> {
+    let mut fields = DerCursor::new(encoded);
+    let content_type = required_tlv(&mut fields)?;
+    require_tag(content_type, Tag::ObjectIdentifier)?;
+    ObjectIdentifier::from_der(content_type.encoded)
+        .map_err(|_| malformed("invalid PKCS#7/CMS content type"))?;
+    if let Some(tag) = fields.peek_tag()? {
+        if tag != context_tag(0, true) {
+            return Err(malformed("invalid PKCS#7/CMS encapsulated content"));
+        }
+        let content = required_tlv(&mut fields)?;
+        let octets = one_tlv(content.value)?;
+        require_tag(octets, Tag::OctetString)?;
+    }
+    require_finished(&fields)
+}
+
+fn validate_children(encoded: &[u8]) -> Result<(), LoadError> {
+    let mut children = DerCursor::new(encoded);
+    while children.next()?.is_some() {}
+    Ok(())
+}
+
+fn one_tlv(encoded: &[u8]) -> Result<Tlv<'_>, LoadError> {
+    let mut cursor = DerCursor::new(encoded);
+    let tlv = required_tlv(&mut cursor)?;
+    require_finished(&cursor)?;
+    Ok(tlv)
+}
+
+fn required_tlv<'a>(cursor: &mut DerCursor<'a>) -> Result<Tlv<'a>, LoadError> {
+    cursor
+        .next()?
+        .ok_or_else(|| malformed("incomplete PKCS#7/CMS structure"))
+}
+
+fn require_tag(tlv: Tlv<'_>, expected: Tag) -> Result<(), LoadError> {
+    if tlv.tag == expected {
+        Ok(())
+    } else {
+        Err(malformed("invalid PKCS#7/CMS structure"))
+    }
+}
+
+fn require_context_tag(tlv: Tlv<'_>, number: u8, constructed: bool) -> Result<(), LoadError> {
+    let expected = context_tag(number, constructed);
+    if tlv.tag == expected {
+        Ok(())
+    } else {
+        Err(malformed("invalid PKCS#7/CMS content"))
+    }
+}
+
+const fn context_tag(number: u8, constructed: bool) -> Tag {
+    let number = match number {
+        0 => TagNumber::N0,
+        _ => TagNumber::N1,
+    };
+    Tag::ContextSpecific {
+        constructed,
+        number,
+    }
+}
+
+fn require_finished(cursor: &DerCursor<'_>) -> Result<(), LoadError> {
+    if cursor.is_finished() {
+        Ok(())
+    } else {
+        Err(malformed("trailing PKCS#7/CMS data"))
+    }
+}
+
+fn malformed(message: &'static str) -> LoadError {
+    LoadError::Malformed(message.to_owned())
 }
 
 /// Whether the DER has a top-level CMS `ContentInfo` shape.
 ///
-/// Used only to distinguish a malformed `.p7b` from the existing unsupported
+/// Used only to distinguish malformed CMS from the existing unsupported
 /// PKCS#12 fallback, without formatting or retaining input bytes.
 pub(crate) fn has_cms_content_info_prefix(der: &[u8]) -> bool {
     if der.first() != Some(&0x30) {
@@ -113,9 +306,7 @@ pub(crate) fn has_cms_content_info_prefix(der: &[u8]) -> bool {
     der.get(header_len) == Some(&0x06)
 }
 
-const SIGNED_DATA_OID: &[u8] = &[
-    0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02,
-];
+const SIGNED_DATA_OID_VALUE: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];
 
 #[cfg(test)]
 mod tests {
@@ -132,6 +323,44 @@ mod tests {
 
     fn fixture(name: &str) -> Vec<u8> {
         fs::read(format!("{FIXTURES}/{name}")).unwrap()
+    }
+
+    fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut encoded = vec![tag];
+        if value.len() < 128 {
+            encoded.push(u8::try_from(value.len()).unwrap());
+            encoded.extend_from_slice(value);
+            return encoded;
+        }
+        if let Ok(medium_len) = u16::try_from(value.len()) {
+            encoded.push(0x82);
+            encoded.extend(medium_len.to_be_bytes());
+        } else {
+            encoded.push(0x84);
+            encoded.extend(u32::try_from(value.len()).unwrap().to_be_bytes());
+        }
+        encoded.extend_from_slice(value);
+        encoded
+    }
+
+    fn signed_data(certificates: &[u8], digest_algorithms: &[u8]) -> Vec<u8> {
+        const DATA_OID: &[u8] = &[
+            0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01,
+        ];
+        const SIGNED_DATA_OID: &[u8] = &[
+            0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02,
+        ];
+        let mut fields = vec![0x02, 0x01, 0x01];
+        fields.extend(tlv(0x31, digest_algorithms));
+        fields.extend(tlv(0x30, DATA_OID));
+        if !certificates.is_empty() {
+            fields.extend(tlv(0xA0, certificates));
+        }
+        fields.extend([0x31, 0x00]);
+        let signed = tlv(0x30, &fields);
+        let mut content = SIGNED_DATA_OID.to_vec();
+        content.extend(tlv(0xA0, &signed));
+        tlv(0x30, &content)
     }
 
     #[test]
@@ -188,10 +417,69 @@ mod tests {
         assert_eq!(
             result,
             Err(LoadError::Malformed(
-                "invalid PKCS#7/CMS structure".to_owned()
+                "incomplete PKCS#7/CMS value".to_owned()
             ))
         );
         assert!(has_cms_content_info_prefix(&der[..32]));
         assert!(has_cms_content_info_prefix(&der[..6]));
+    }
+
+    #[test]
+    fn quando_contem_choice_de_certificado_nao_x509_deve_manter_x509() {
+        let certificate = fixture("rsa2048-leaf.der");
+        let mut choices = certificate.clone();
+        choices.extend(tlv(0xA1, &[0x02, 0x01, 0x00]));
+        choices.extend(tlv(0xA2, &[0x02, 0x01, 0x00]));
+        choices.extend(tlv(0xA3, &[0x30, 0x00]));
+        let result = extract_pkcs7_certs(&signed_data(&choices, &[]), &Limits::default()).unwrap();
+        assert_eq!(result, vec![certificate]);
+    }
+
+    #[test]
+    fn quando_certificate_set_repete_x509_deve_deduplicar_preservando_bytes() {
+        let certificate = fixture("rsa2048-leaf.der");
+        let mut choices = certificate.clone();
+        choices.extend_from_slice(&certificate);
+        let result = extract_pkcs7_certs(&signed_data(&choices, &[]), &Limits::default()).unwrap();
+        assert_eq!(result, vec![certificate]);
+    }
+
+    #[test]
+    fn quando_cms_tem_length_interno_maior_que_bytes_disponiveis_deve_rejeitar() {
+        const OID: &[u8] = &[
+            0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02,
+        ];
+        let mut content = OID.to_vec();
+        content.extend([0xA0, 0x84, 0x00, 0x10, 0x00, 0x00]);
+        let der = tlv(0x30, &content);
+        assert!(matches!(
+            extract_pkcs7_certs(&der, &Limits::default()),
+            Err(LoadError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn quando_cms_tem_muitos_algoritmos_nao_usados_deve_extrair_sem_materializa_los() {
+        let mut algorithms = Vec::new();
+        for value in 128_u16..4_128 {
+            let oid_value = [
+                0x2A,
+                0x03,
+                0x80 | u8::try_from(value >> 7).unwrap(),
+                u8::try_from(value & 0x7F).unwrap(),
+            ];
+            let mut algorithm = tlv(0x06, &oid_value);
+            algorithms.extend(tlv(0x30, &algorithm));
+            algorithm.clear();
+        }
+        let der = signed_data(&[], &algorithms);
+        let limits = Limits {
+            max_certs_per_source: 1,
+            ..Limits::default()
+        };
+        assert_eq!(
+            extract_pkcs7_certs(&der, &limits).unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
     }
 }

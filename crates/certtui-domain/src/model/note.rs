@@ -68,6 +68,75 @@ pub enum LoadNote {
     },
 }
 
+/// Incrementally retains loader notes within a shared diagnostic budget.
+///
+/// Individual [`LoadNote::Rejected`] and [`LoadNote::Unparsable`] values are
+/// kept only until the configured limit. Non-diagnostic metadata is retained
+/// in insertion order. Dropped diagnostics produce one marker when finalized.
+#[derive(Debug)]
+pub struct DiagnosticNoteCollector {
+    notes: Vec<LoadNote>,
+    limit: usize,
+    diagnostic_count: usize,
+    dropped: bool,
+    has_marker: bool,
+}
+
+impl DiagnosticNoteCollector {
+    /// Creates an empty collector with room for at most `limit` diagnostics.
+    #[must_use]
+    pub fn new(limit: usize) -> Self {
+        Self {
+            notes: Vec::new(),
+            limit,
+            diagnostic_count: 0,
+            dropped: false,
+            has_marker: false,
+        }
+    }
+
+    /// Adds one note, discarding individual diagnostics after the budget.
+    pub fn push(&mut self, note: LoadNote) {
+        match &note {
+            LoadNote::Rejected { .. } | LoadNote::Unparsable { .. }
+                if self.diagnostic_count < self.limit =>
+            {
+                self.diagnostic_count += 1;
+                self.notes.push(note);
+            }
+            LoadNote::DiagnosticsTruncated { .. } if !self.has_marker => {
+                self.has_marker = true;
+                self.dropped = true;
+                self.notes.push(note);
+            }
+            LoadNote::Rejected { .. }
+            | LoadNote::Unparsable { .. }
+            | LoadNote::DiagnosticsTruncated { .. } => self.dropped = true,
+            _ => self.notes.push(note),
+        }
+    }
+
+    /// Whether no notes have been retained so far.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.notes.is_empty()
+    }
+
+    /// Finalizes notes and appends one marker when diagnostics were dropped.
+    #[must_use]
+    pub fn finish(mut self) -> (Vec<LoadNote>, usize, bool) {
+        if self.dropped && !self.has_marker {
+            self.notes
+                .push(LoadNote::DiagnosticsTruncated { limit: self.limit });
+        }
+        (
+            self.notes,
+            self.limit.saturating_sub(self.diagnostic_count),
+            self.dropped,
+        )
+    }
+}
+
 /// Retains loader diagnostics within the shared per-source diagnostic budget.
 ///
 /// Non-diagnostic metadata is always kept, and only one existing
@@ -76,28 +145,19 @@ pub enum LoadNote {
 /// any diagnostic or duplicate marker was dropped.
 #[must_use]
 pub fn retain_diagnostic_notes(notes: Vec<LoadNote>, max: usize) -> (Vec<LoadNote>, usize, bool) {
-    let mut kept = Vec::new();
-    let mut count = 0;
-    let mut dropped = false;
-    let mut has_marker = false;
+    let had_marker = notes
+        .iter()
+        .any(|note| matches!(note, LoadNote::DiagnosticsTruncated { .. }));
+    let mut collector = DiagnosticNoteCollector::new(max);
     for note in notes {
-        match note {
-            LoadNote::Rejected { .. } | LoadNote::Unparsable { .. } if count < max => {
-                count += 1;
-                kept.push(note);
-            }
-            LoadNote::DiagnosticsTruncated { .. } if !has_marker => {
-                has_marker = true;
-                dropped = true;
-                kept.push(note);
-            }
-            LoadNote::Rejected { .. }
-            | LoadNote::Unparsable { .. }
-            | LoadNote::DiagnosticsTruncated { .. } => dropped = true,
-            _ => kept.push(note),
-        }
+        collector.push(note);
     }
-    (kept, max.saturating_sub(count), dropped)
+    let (mut notes, remaining, dropped) = collector.finish();
+    if dropped && !had_marker && matches!(notes.last(), Some(LoadNote::DiagnosticsTruncated { .. }))
+    {
+        notes.pop();
+    }
+    (notes, remaining, dropped)
 }
 
 #[cfg(test)]
@@ -156,5 +216,30 @@ mod tests {
         );
         assert_eq!(remaining, 0);
         assert!(dropped);
+    }
+
+    #[test]
+    fn quando_coletor_atinge_orcamento_deve_limitar_memoria_e_marcar_no_final() {
+        let mut collector = DiagnosticNoteCollector::new(1);
+        collector.push(LoadNote::Rejected {
+            offset: 1,
+            reason: RejectReason::InvalidBase64,
+        });
+        collector.push(LoadNote::Unparsable { offset: Some(2) });
+        collector.push(LoadNote::PrivateKeyBlocksIgnored { count: 3 });
+        let (notes, remaining, dropped) = collector.finish();
+        assert_eq!(remaining, 0);
+        assert!(dropped);
+        assert_eq!(
+            notes,
+            vec![
+                LoadNote::Rejected {
+                    offset: 1,
+                    reason: RejectReason::InvalidBase64,
+                },
+                LoadNote::PrivateKeyBlocksIgnored { count: 3 },
+                LoadNote::DiagnosticsTruncated { limit: 1 },
+            ]
+        );
     }
 }

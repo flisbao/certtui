@@ -8,7 +8,8 @@ use certtui_app::ports::{LoadedCerts, LocalSource, RawCert, SourceLoader};
 use certtui_domain::extract::{CandidateKind, scan_text};
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{
-    CertOrigin, Digest, Fingerprints, LoadNote, parse_der_cert, retain_diagnostic_notes,
+    CertOrigin, DiagnosticNoteCollector, Digest, Fingerprints, LoadNote, parse_der_cert,
+    retain_diagnostic_notes,
 };
 
 use super::bounded::read_limited;
@@ -47,9 +48,13 @@ impl SourceLoader for FsSourceLoader {
                 load_reader(file, OriginKind::File(path.clone()), limits)
             }
             LocalSource::Stdin => load_reader(stdin().lock(), OriginKind::Stdin, limits),
-            LocalSource::Directory { path, recursive } => {
-                super::dir::load_directory(path, *recursive, limits)
-            }
+            LocalSource::Directory { path, recursive } => super::dir::load_directory(
+                path,
+                super::dir::DirectoryOptions {
+                    recursive: *recursive,
+                },
+                limits,
+            ),
         }
     }
 }
@@ -108,22 +113,19 @@ fn load_binary_der(
                     origin: cert_origin(origin, index),
                 });
             }
-            let mut notes = Vec::new();
+            let mut note_collector = DiagnosticNoteCollector::new(limits.max_scan_diagnostics);
             if extraction.truncated {
-                notes.push(LoadNote::TruncatedAtCertLimit {
+                note_collector.push(LoadNote::TruncatedAtCertLimit {
                     limit: limits.max_certs_per_source,
                 });
             }
-            for _ in 0..extraction
-                .oversized
-                .min(limits.max_scan_diagnostics.saturating_add(1))
-            {
-                notes.push(LoadNote::Unparsable { offset: None });
+            for _ in 0..extraction.oversized {
+                note_collector.push(LoadNote::Unparsable { offset: None });
             }
-            if certs.is_empty() && notes.is_empty() {
-                notes.push(LoadNote::Unparsable { offset: None });
+            if certs.is_empty() && note_collector.is_empty() {
+                note_collector.push(LoadNote::Unparsable { offset: None });
             }
-            let notes = normalize_notes(notes, limits.max_scan_diagnostics);
+            let (notes, _, _) = note_collector.finish();
             if certs.is_empty() {
                 Err(LoadError::NoCertificatesFound { notes })
             } else {
@@ -138,10 +140,24 @@ fn load_binary_der(
 }
 
 fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<LoadedCerts, LoadError> {
-    let outcome = scan_text(bytes, limits);
-    let mut notes = Vec::from(&outcome);
+    let mut scan_limits = *limits;
+    scan_limits.max_certs_per_source = Limits::HARD_CAPS.max_certs_per_source;
+    let outcome = scan_text(bytes, &scan_limits);
+    let mut note_collector = DiagnosticNoteCollector::new(limits.max_scan_diagnostics);
+    let mut source_truncation_seen = false;
+    for note in Vec::from(&outcome) {
+        if matches!(note, LoadNote::TruncatedAtCertLimit { .. }) {
+            source_truncation_seen = true;
+            note_collector.push(LoadNote::TruncatedAtCertLimit {
+                limit: limits.max_certs_per_source,
+            });
+        } else {
+            note_collector.push(note);
+        }
+    }
     let mut certs = Vec::new();
     let mut seen: HashSet<Digest<32>> = HashSet::new();
+    let mut certificate_truncated = false;
     for candidate in outcome.candidates {
         if candidate.kind == CandidateKind::Pkcs7 {
             let mut candidate_limits = *limits;
@@ -158,27 +174,25 @@ fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<Loade
                         });
                     }
                     if extraction.truncated {
-                        notes.push(LoadNote::TruncatedAtCertLimit {
-                            limit: limits.max_certs_per_source,
-                        });
+                        certificate_truncated = true;
                     }
                     for _ in 0..extraction
                         .oversized
                         .min(limits.max_scan_diagnostics.saturating_add(1))
                     {
-                        notes.push(LoadNote::Unparsable {
+                        note_collector.push(LoadNote::Unparsable {
                             offset: Some(candidate.offset),
                         });
                     }
                 }
-                Err(_) => notes.push(LoadNote::Unparsable {
+                Err(_) => note_collector.push(LoadNote::Unparsable {
                     offset: Some(candidate.offset),
                 }),
             }
             continue;
         }
         if parse_der_cert(&candidate.der, limits).is_err() {
-            notes.push(LoadNote::Unparsable {
+            note_collector.push(LoadNote::Unparsable {
                 offset: Some(candidate.offset),
             });
             continue;
@@ -187,9 +201,7 @@ fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<Loade
             continue;
         }
         if certs.len() >= limits.max_certs_per_source {
-            notes.push(LoadNote::TruncatedAtCertLimit {
-                limit: limits.max_certs_per_source,
-            });
+            certificate_truncated = true;
             break;
         }
         let index = certs.len();
@@ -198,16 +210,22 @@ fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<Loade
             origin: cert_origin(origin, index),
         });
     }
-    if certs.is_empty() && notes.is_empty() {
-        notes.push(LoadNote::Unparsable { offset: None });
+    if (outcome.truncated || certificate_truncated) && !source_truncation_seen {
+        note_collector.push(LoadNote::TruncatedAtCertLimit {
+            limit: limits.max_certs_per_source,
+        });
     }
-    let notes = normalize_notes(notes, limits.max_scan_diagnostics);
+    if certs.is_empty() && note_collector.is_empty() {
+        note_collector.push(LoadNote::Unparsable { offset: None });
+    }
+    let (notes, _, _) = note_collector.finish();
     if certs.is_empty() {
         return Err(LoadError::NoCertificatesFound { notes });
     }
     Ok(LoadedCerts { certs, notes })
 }
 
+/// Applies the shared diagnostic quota and retains one truncation marker.
 pub(super) fn normalize_notes(notes: Vec<LoadNote>, limit: usize) -> Vec<LoadNote> {
     let (mut notes, _, dropped) = retain_diagnostic_notes(notes, limit);
     if dropped
@@ -441,9 +459,37 @@ mod tests {
     }
 
     #[test]
+    fn quando_pkcs7_e_pem_sobrepoem_com_limite_exato_deve_manter_o_certificado_distinto() {
+        let der_a = fixture("rsa2048-leaf.der");
+        let der_b = fixture("ec-p256-leaf.der");
+        let encoded = base64_encode(&pkcs7_for_der(&der_a));
+        let mut input =
+            format!("-----BEGIN PKCS7-----\n{encoded}\n-----END PKCS7-----\n").into_bytes();
+        input.extend(fixture("rsa2048-leaf.pem"));
+        input.extend(fixture("ec-p256-leaf.pem"));
+        let limits = Limits {
+            max_certs_per_source: 2,
+            ..Limits::default()
+        };
+        let result = load_bytes(&input, OriginKind::Stdin, &limits).unwrap();
+        assert_eq!(
+            result
+                .certs
+                .iter()
+                .map(|cert| cert.der.as_slice())
+                .collect::<Vec<_>>(),
+            vec![der_a.as_slice(), der_b.as_slice()]
+        );
+        assert!(!result.notes.iter().any(|note| matches!(
+            note,
+            certtui_domain::model::LoadNote::TruncatedAtCertLimit { .. }
+        )));
+    }
+
+    #[test]
     fn quando_pkcs7_sobrepostos_deve_deduplicar_certificados_expandidos() {
         let chain = load_bytes(
-            &fixture("chain-3.pem"),
+            &fixture("chain-3.p7b"),
             OriginKind::Stdin,
             &Limits::default(),
         )
@@ -460,13 +506,13 @@ mod tests {
             result
                 .certs
                 .iter()
-                .map(|cert| cert.der.clone())
-                .collect::<std::collections::BTreeSet<_>>(),
+                .map(|cert| cert.der.as_slice())
+                .collect::<Vec<_>>(),
             chain
                 .certs
                 .iter()
-                .map(|cert| cert.der.clone())
-                .collect::<std::collections::BTreeSet<_>>()
+                .map(|cert| cert.der.as_slice())
+                .collect::<Vec<_>>()
         );
     }
 
