@@ -26,6 +26,48 @@ pub enum SubjectAltName {
     },
 }
 
+/// Whether `host` is covered by `sans`: a DNS name (wildcard only as the whole
+/// first label, standing for exactly one label), or, for an IP literal, an IP
+/// entry. There is no fallback to the subject common name.
+#[must_use]
+pub fn san_matches(sans: &[SubjectAltName], host: &str) -> bool {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return sans
+            .iter()
+            .any(|san| matches!(san, SubjectAltName::Ip(candidate) if *candidate == ip));
+    }
+    let host = host.strip_suffix('.').unwrap_or(host);
+    sans.iter().any(|san| match san {
+        SubjectAltName::Dns(pattern) => {
+            dns_matches(pattern.strip_suffix('.').unwrap_or(pattern), host)
+        }
+        _ => false,
+    })
+}
+
+/// DNS comparison: case-insensitive; a `*.` prefix stands for exactly one
+/// non-empty label, and the rest of the pattern must itself be a name with at
+/// least two labels and no further `*`.
+fn dns_matches(pattern: &str, host: &str) -> bool {
+    if pattern.contains('*') {
+        let Some(suffix) = pattern.strip_prefix("*.") else {
+            return false;
+        };
+        if suffix.contains('*') || !suffix.contains('.') {
+            return false;
+        }
+        let Some((label, rest)) = host.split_once('.') else {
+            return false;
+        };
+        return !label.is_empty() && rest.eq_ignore_ascii_case(suffix);
+    }
+    pattern.eq_ignore_ascii_case(host)
+}
+
 /// The Basic Constraints extension.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicConstraints {
@@ -191,5 +233,81 @@ mod tests {
     fn quando_key_id_deve_dar_hex_maiusculo_sem_separador() {
         assert_eq!(KeyId(vec![0x0A, 0xFF, 0x00]).to_hex(), "0AFF00");
         assert_eq!(KeyId(Vec::new()).to_hex(), "");
+    }
+}
+
+#[cfg(test)]
+mod san_tests {
+    use super::*;
+
+    fn dns(name: &str) -> Vec<SubjectAltName> {
+        vec![SubjectAltName::Dns(name.to_owned())]
+    }
+
+    #[test]
+    fn quando_wildcard_cobre_um_rotulo_deve_casar_so_esse() {
+        let sans = dns("*.example.com");
+        assert!(san_matches(&sans, "a.example.com"));
+        assert!(!san_matches(&sans, "example.com"));
+        assert!(!san_matches(&sans, "a.b.example.com"));
+    }
+
+    #[test]
+    fn quando_wildcard_fora_do_primeiro_rotulo_deve_nao_casar() {
+        assert!(!san_matches(&dns("a.*.com"), "a.b.com"));
+        assert!(!san_matches(&dns("a.*.com"), "a.*.com"));
+        assert!(!san_matches(&dns("f*.example.com"), "foo.example.com"));
+        assert!(!san_matches(&dns("*.*.example.com"), "a.b.example.com"));
+    }
+
+    #[test]
+    fn quando_wildcard_cobre_so_um_sufixo_de_um_rotulo_deve_nao_casar() {
+        assert!(!san_matches(&dns("*.com"), "example.com"));
+    }
+
+    #[test]
+    fn quando_caixa_difere_deve_casar() {
+        assert!(san_matches(&dns("EXAMPLE.com"), "example.com"));
+        assert!(san_matches(&dns("example.com"), "EXAMPLE.COM"));
+        assert!(san_matches(&dns("*.Example.COM"), "A.example.com"));
+    }
+
+    #[test]
+    fn quando_ponto_final_deve_ignorar() {
+        assert!(san_matches(&dns("example.com"), "example.com."));
+        assert!(san_matches(&dns("example.com."), "example.com"));
+    }
+
+    #[test]
+    fn quando_nome_exato_diferente_deve_nao_casar() {
+        assert!(!san_matches(&dns("example.com"), "example.org"));
+        assert!(!san_matches(&dns("example.com"), "www.example.com"));
+    }
+
+    #[test]
+    fn quando_host_e_ip_deve_casar_so_com_san_ip() {
+        let ip = vec![SubjectAltName::Ip("192.0.2.1".parse().unwrap())];
+        assert!(san_matches(&ip, "192.0.2.1"));
+        assert!(!san_matches(&ip, "192.0.2.2"));
+        assert!(!san_matches(&dns("192.0.2.1"), "192.0.2.1"));
+        let v6 = vec![SubjectAltName::Ip("2001:db8::1".parse().unwrap())];
+        assert!(san_matches(&v6, "2001:db8::1"));
+        assert!(san_matches(&v6, "[2001:db8::1]"));
+    }
+
+    #[test]
+    fn quando_san_ip_e_host_dns_deve_nao_casar() {
+        let ip = vec![SubjectAltName::Ip("192.0.2.1".parse().unwrap())];
+        assert!(!san_matches(&ip, "example.com"));
+    }
+
+    #[test]
+    fn quando_so_tem_outros_tipos_de_san_deve_nao_casar() {
+        let sans = vec![
+            SubjectAltName::Email("example.com".to_owned()),
+            SubjectAltName::Uri("example.com".to_owned()),
+        ];
+        assert!(!san_matches(&sans, "example.com"));
+        assert!(!san_matches(&[], "example.com"));
     }
 }

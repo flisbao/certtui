@@ -14,7 +14,7 @@ pub mod summary;
 pub use chain::Chain;
 pub use extensions::{
     AuthorityInfoAccess, BasicConstraints, ExtendedKeyUsage, ExtensionSummary, KeyId, KeyUsage,
-    SctEntry, SubjectAltName, extension_name,
+    SctEntry, SubjectAltName, extension_name, san_matches,
 };
 pub use fingerprint::{Digest, FingerprintAlgorithm, FingerprintFormat, Fingerprints};
 pub use key::{HashAlgorithm, PublicKeyAlgorithm, PublicKeyInfo, SignatureAlgorithm};

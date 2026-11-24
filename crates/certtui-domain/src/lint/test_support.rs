@@ -125,17 +125,34 @@ pub(crate) fn self_signed_der() -> Vec<u8> {
         .to_vec()
 }
 
-/// A network-target fixture over `ders`, in presentation order.
-pub(crate) fn network_fixture(ders: &[&[u8]]) -> Fixture {
-    let records = ders
-        .iter()
+/// Records over `ders`, in presentation order.
+pub(crate) fn records_of(ders: &[&[u8]]) -> Vec<CertificateRecord> {
+    ders.iter()
         .enumerate()
         .map(|(position, der)| {
             CertificateRecord::from_der(der, CertOrigin::Presented { position }, &Limits::default())
                 .expect("record")
         })
-        .collect();
+        .collect()
+}
+
+/// A network-target fixture over `ders`, in presentation order.
+pub(crate) fn network_fixture(ders: &[&[u8]]) -> Fixture {
+    let mut fixture = Fixture::of(records_of(ders));
+    fixture.network = true;
+    fixture
+}
+
+/// A network-target fixture over already-built records.
+pub(crate) fn network_fixture_of(records: Vec<CertificateRecord>) -> Fixture {
     let mut fixture = Fixture::of(records);
     fixture.network = true;
     fixture
+}
+
+/// A record parsed from a file in `tests/fixtures`.
+pub(crate) fn fixture_record(file: &str) -> CertificateRecord {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/");
+    let der = std::fs::read(format!("{path}{file}")).expect("fixture");
+    records_of(&[&der]).remove(0)
 }

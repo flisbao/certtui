@@ -9,6 +9,9 @@ use crate::finding::FindingCode;
 
 mod chain;
 mod context;
+mod crypto;
+mod profile;
+mod trust;
 mod validity;
 
 #[cfg(test)]
@@ -19,6 +22,11 @@ pub use chain::{
     ChainRootSentLint, SelfSignedLeafLint,
 };
 pub use context::{LintContext, Thresholds};
+pub use crypto::{WeakKeyLint, WeakSignatureLint};
+pub use profile::{
+    BasicConstraintsViolationLint, LeafMissingServerAuthLint, MissingSanLint, NoEmbeddedSctLint,
+};
+pub use trust::{HostnameMismatchLint, TrustUntrustedLint};
 pub use validity::{
     ExpiredLint, ExpiresSoonCriticalLint, ExpiresSoonLint, NotYetValidLint, ValidityTooLongLint,
 };
@@ -42,6 +50,14 @@ pub fn registry() -> Vec<Box<dyn Lint>> {
         Box::new(ChainRootSentLint),
         Box::new(ChainExtraCertLint),
         Box::new(SelfSignedLeafLint),
+        Box::new(WeakSignatureLint),
+        Box::new(WeakKeyLint),
+        Box::new(MissingSanLint),
+        Box::new(LeafMissingServerAuthLint),
+        Box::new(BasicConstraintsViolationLint),
+        Box::new(NoEmbeddedSctLint),
+        Box::new(TrustUntrustedLint),
+        Box::new(HostnameMismatchLint),
         Box::new(ExpiredLint),
         Box::new(NotYetValidLint),
         Box::new(ExpiresSoonCriticalLint),
@@ -103,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn quando_registry_deve_ter_codigos_unicos() {
+    fn quando_registry_deve_ter_um_lint_por_codigo_do_m3() {
         let codes: Vec<&str> = registry().iter().map(|l| l.code().as_str()).collect();
         let mut unique = codes.clone();
         unique.sort_unstable();
@@ -113,8 +129,9 @@ mod tests {
 
     #[test]
     fn quando_run_lints_deve_ordenar_achados_reais() {
-        // Self-signed (rcgen), expired and, being public, valid for far more
-        // than 398 days: two errors ordered by code, then the warning.
+        // Self-signed, expired, without SAN or SCT, and (being public) valid
+        // for far more than 398 days: three errors ordered by code, then the
+        // warning, then the info.
         let fixture = Fixture::new(0, 500 * 86_400);
         let ctx = fixture.ctx(600 * 86_400, true);
         let findings = run_lints(&ctx);
@@ -123,8 +140,10 @@ mod tests {
             codes,
             [
                 FindingCode::Expired,
+                FindingCode::MissingSan,
                 FindingCode::SelfSignedLeaf,
-                FindingCode::ValidityTooLong
+                FindingCode::ValidityTooLong,
+                FindingCode::NoEmbeddedSct,
             ]
         );
     }
