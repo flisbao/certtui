@@ -1,0 +1,67 @@
+name: fuzz
+
+on:
+  pull_request:
+  schedule:
+    # Nightly, 03:17 UTC.
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_der_cert, extract_text_certs, parse_pkcs7]
+    env:
+      # 60 s on pull requests, 30 min on the nightly schedule.
+      FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '60' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Run fuzz target
+        working-directory: fuzz
+        run: >-
+          cargo +nightly fuzz run "${{ matrix.target }}"
+          -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=256 -timeout=2
+
+      # The fuzz run already fails on a crash; this also guards against a
+      # crash artifact left behind without a failing exit status.
+      - name: Fail on crash artifacts
+        if: always()
+        run: |
+          dir="fuzz/artifacts/${{ matrix.target }}"
+          if [ -d "$dir" ] && [ -n "$(find "$dir" -type f -print -quit)" ]; then
+            echo "crash artifacts found in $dir" >&2
+            find "$dir" -type f >&2
+            exit 1
+          fi
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

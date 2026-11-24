@@ -1,0 +1,54 @@
+[package]
+name = "certtui-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+certtui-domain = { path = "../crates/certtui-domain" }
+certtui-infra = { path = "../crates/certtui-infra", features = ["fuzzing"] }
+
+# Own workspace: keeps this package out of the root `members = ["crates/*"]`
+# workspace and gives it its own lockfile.
+[workspace]
+
+[profile.release]
+debug = 1
+
+# Same spirit as the main workspace lints. `unsafe_code` is not forbidden here
+# because the `libfuzzer-sys` macro expands to an unsafe FFI entry point.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+
+[[bin]]
+name = "parse_der_cert"
+path = "fuzz_targets/parse_der_cert.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_text_certs"
+path = "fuzz_targets/extract_text_certs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_pkcs7"
+path = "fuzz_targets/parse_pkcs7.rs"
+test = false
+doc = false
+bench = false

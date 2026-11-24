@@ -13,5 +13,9 @@ certtui-domain = { path = "../certtui-domain" }
 cms = { version = "0.2.3", features = ["std"] }
 der = { version = "0.7.10", features = ["std"] }
 
+[features]
+# Exposes internal entry points to the cargo-fuzz crate only. Not for normal builds.
+fuzzing = []
+
 [lints]
 workspace = true
