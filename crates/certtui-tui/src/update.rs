@@ -1,8 +1,11 @@
 //! The pure state transition.
 
-use crate::app_state::{AppState, Modal};
+use crossterm::event::KeyEvent;
+
+use crate::app_state::{AppState, Modal, Screen};
 use crate::keymap::{Action, Keymap};
 use crate::msg::{Command, Msg};
+use crate::update_home;
 use certtui_domain::model::FingerprintFormat;
 
 /// Applies `msg` to `state` and returns the side effects to run.
@@ -12,10 +15,13 @@ use certtui_domain::model::FingerprintFormat;
 #[allow(clippy::needless_pass_by_value)]
 pub fn update(state: &mut AppState, msg: Msg) -> Vec<Command> {
     match msg {
-        Msg::Key(key) => match Keymap::new().resolve(key) {
-            Some(action) => on_action(state, action),
-            None => Vec::new(),
-        },
+        Msg::Key(key) => on_key(state, key),
+        Msg::Paste(text) => {
+            if state.modal.is_none() && state.screen == Screen::Home {
+                update_home::on_paste(state, &text);
+            }
+            Vec::new()
+        }
         Msg::Resize(columns, rows) => {
             state.size = (columns, rows);
             Vec::new()
@@ -28,10 +34,32 @@ pub fn update(state: &mut AppState, msg: Msg) -> Vec<Command> {
     }
 }
 
+fn on_key(state: &mut AppState, key: KeyEvent) -> Vec<Command> {
+    if state.modal.is_none()
+        && state.screen == Screen::Home
+        && state.home.editing
+        && let Some(commands) = update_home::on_edit_key(state, key)
+    {
+        return commands;
+    }
+    match Keymap::new().resolve(key) {
+        Some(action) => on_action(state, action),
+        None => Vec::new(),
+    }
+}
+
 fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
     if state.modal.is_some() {
         return on_modal_action(state, action);
     }
+    match state.screen {
+        Screen::Home => update_home::on_action(state, action),
+        Screen::Inspect => on_global_action(state, action),
+    }
+}
+
+/// Actions that mean the same on every screen.
+pub(crate) fn on_global_action(state: &mut AppState, action: Action) -> Vec<Command> {
     match action {
         Action::Quit => state.should_quit = true,
         Action::Help => state.modal = Some(Modal::Help),

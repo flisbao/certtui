@@ -10,9 +10,11 @@ pub mod copy;
 pub mod keymap;
 pub mod msg;
 pub mod terminal;
+pub mod text;
 pub mod theme;
 pub mod toast;
 pub mod update;
+pub mod update_home;
 pub mod view;
 
 pub use app_state::{AppState, HomeState, InspectState, JobId, JobTracker, Modal, Screen};

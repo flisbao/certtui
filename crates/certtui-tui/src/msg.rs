@@ -16,6 +16,8 @@ use crate::copy::CopyPayload;
 pub enum Msg {
     /// A key press.
     Key(KeyEvent),
+    /// Text pasted into the terminal (bracketed paste).
+    Paste(String),
     /// The terminal was resized to `(columns, rows)`.
     Resize(u16, u16),
     /// Time moved forward; carries the clock reading.

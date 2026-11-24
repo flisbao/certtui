@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use certtui_domain::model::{FingerprintFormat, InspectionReport};
+use certtui_domain::target::Target;
 
 use crate::theme::ThemeKind;
 use crate::toast::Toast;
@@ -112,6 +113,11 @@ impl JobTracker {
     }
 }
 
+/// Turns text typed on Home into a target, or a user-facing error.
+///
+/// Injected so `update` stays free of file system access.
+pub type TargetParser = fn(&str) -> Result<Target, String>;
+
 /// Everything the views draw and `update` changes.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -137,9 +143,16 @@ pub struct AppState {
     pub now: Instant,
     /// Whether the main loop must end.
     pub should_quit: bool,
+    /// How text typed on Home becomes a target.
+    pub target_parser: TargetParser,
 }
 
 impl AppState {
+    /// Shows `toast` in place of any earlier one.
+    pub fn set_toast(&mut self, toast: Toast) {
+        self.toast = Some(toast);
+    }
+
     /// A fresh state on the Home screen.
     #[must_use]
     pub fn new(now: Instant) -> Self {
@@ -155,6 +168,7 @@ impl AppState {
             size: (80, 24),
             now,
             should_quit: false,
+            target_parser: crate::update_home::default_target_parser,
         }
     }
 }
