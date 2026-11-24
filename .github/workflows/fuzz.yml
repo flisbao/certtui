@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse_der_cert, extract_text_certs, parse_pkcs7]
+        target: [parse_der_cert, extract_text_certs, parse_pkcs7, parse_target]
     env:
       # 60 s on pull requests, 30 min on the nightly schedule.
       FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '60' }}
