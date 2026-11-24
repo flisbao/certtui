@@ -10,6 +10,8 @@ pub mod finding;
 
 pub mod limits;
 
+pub mod lint;
+
 pub mod model;
 
 pub mod sanitize;
