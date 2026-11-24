@@ -57,6 +57,89 @@ pub enum Phase {
     Failed(String),
 }
 
+/// A tab of the details pane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Tab {
+    /// Subject, issuer, validity and the short SHA-256.
+    #[default]
+    Overview,
+    /// Subject and issuer names.
+    SubjectIssuer,
+    /// Subject alternative names.
+    Sans,
+    /// Key usage, identifiers and the extension list.
+    Extensions,
+    /// SHA-1, SHA-256 and SHA-512.
+    Fingerprints,
+    /// Revocation status.
+    Revocation,
+    /// Lint findings.
+    Findings,
+    /// The certificate as PEM.
+    Raw,
+}
+
+impl Tab {
+    /// Every tab, in display order.
+    pub const ALL: [Tab; 8] = [
+        Tab::Overview,
+        Tab::SubjectIssuer,
+        Tab::Sans,
+        Tab::Extensions,
+        Tab::Fingerprints,
+        Tab::Revocation,
+        Tab::Findings,
+        Tab::Raw,
+    ];
+
+    /// Name shown in the tab bar.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Tab::Overview => "Overview",
+            Tab::SubjectIssuer => "Subject/Issuer",
+            Tab::Sans => "SANs",
+            Tab::Extensions => "Extensions",
+            Tab::Fingerprints => "Fingerprints",
+            Tab::Revocation => "Revocation",
+            Tab::Findings => "Findings",
+            Tab::Raw => "Raw",
+        }
+    }
+
+    fn position(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    /// The tab to the right, wrapping around.
+    #[must_use]
+    pub fn next(self) -> Tab {
+        Self::ALL
+            .get((self.position() + 1) % Self::ALL.len())
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The tab to the left, wrapping around.
+    #[must_use]
+    pub fn prev(self) -> Tab {
+        Self::ALL
+            .get((self.position() + Self::ALL.len() - 1) % Self::ALL.len())
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// Which pane of the Inspect screen has focus.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Pane {
+    /// The chain tree.
+    #[default]
+    Chain,
+    /// The detail rows.
+    Details,
+}
+
 /// State of the Inspect screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectState {
@@ -64,6 +147,16 @@ pub struct InspectState {
     pub job: JobId,
     /// Where the job stands.
     pub phase: Phase,
+    /// Index of the selected certificate in the chain.
+    pub selected_cert: usize,
+    /// Visible tab.
+    pub tab: Tab,
+    /// Pane with focus.
+    pub pane: Pane,
+    /// Row under the cursor in the details pane.
+    pub row_cursor: usize,
+    /// First visible row of the details pane.
+    pub scroll: u16,
 }
 
 impl InspectState {
@@ -73,6 +166,20 @@ impl InspectState {
         Self {
             job,
             phase: Phase::Loading,
+            selected_cert: 0,
+            tab: Tab::default(),
+            pane: Pane::default(),
+            row_cursor: 0,
+            scroll: 0,
+        }
+    }
+
+    /// The report, once the job finished successfully.
+    #[must_use]
+    pub fn report(&self) -> Option<&Arc<InspectionReport>> {
+        match &self.phase {
+            Phase::Ready(report) => Some(report),
+            Phase::Loading | Phase::Failed(_) => None,
         }
     }
 }

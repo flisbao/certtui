@@ -353,6 +353,7 @@ name = "certtui-app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "certtui-domain",
  "rcgen",
  "serde",
@@ -402,10 +403,12 @@ dependencies = [
 name = "certtui-tui"
 version = "0.1.0"
 dependencies = [
+ "certtui-app",
  "certtui-domain",
  "crossterm",
  "insta",
  "ratatui",
+ "rcgen",
  "tokio",
 ]
 

@@ -1,0 +1,28 @@
+---
+source: crates/certtui-tui/src/view/inspect.rs
+expression: "text(&render(&state, 80, 24))"
+---
+┌ Chain ──────────────────┐┌ Details ──────────────────────────────────────────┐
+│ ⚠ rsa2048.example.test  ││‹ Extensions  Fingerprints  Revocation  Findings  R│
+│    presented by server,…││EXPIRED:         error: EXPIRED happened           │
+│ ✔ ec-p256.example.test  ││TRUST_UNTRUSTED: error: TRUST_UNTRUSTED happened   │
+│    presented by server,…││                                                   │
+│▸✖ expired.example.test  ││                                                   │
+│    presented by server,…││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+│                         ││                                                   │
+└─────────────────────────┘└───────────────────────────────────────────────────┘
+TLSv1.3 · TLS_AES_256_GCM_SHA384 · 192.0.2.7 · handshake 42ms · total 120ms

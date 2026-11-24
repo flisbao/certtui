@@ -6,9 +6,10 @@ use certtui_domain::model::{CertificateRecord, FingerprintFormat, InspectionRepo
 pub mod check;
 pub mod field;
 pub mod json;
-mod labels;
 pub mod pem;
 pub mod text;
+
+use certtui_app::present::labels;
 
 pub use labels::{note_text, single_line};
 

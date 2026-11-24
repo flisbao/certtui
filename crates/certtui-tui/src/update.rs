@@ -5,14 +5,12 @@ use crossterm::event::KeyEvent;
 use crate::app_state::{AppState, Modal, Screen};
 use crate::keymap::{Action, Keymap};
 use crate::msg::{Command, Msg};
-use crate::update_home;
+use crate::{update_home, update_inspect};
 use certtui_domain::model::FingerprintFormat;
 
 /// Applies `msg` to `state` and returns the side effects to run.
 ///
 /// Pure: no I/O and no clock; time arrives through [`Msg::Tick`].
-// Justificativa: `Msg` carries owned job results that the next tasks consume.
-#[allow(clippy::needless_pass_by_value)]
 pub fn update(state: &mut AppState, msg: Msg) -> Vec<Command> {
     match msg {
         Msg::Key(key) => on_key(state, key),
@@ -30,7 +28,11 @@ pub fn update(state: &mut AppState, msg: Msg) -> Vec<Command> {
             state.now = now;
             Vec::new()
         }
-        Msg::InspectDone { .. } | Msg::Copied { .. } | Msg::CopyFailed { .. } => Vec::new(),
+        Msg::InspectDone { id, result } => {
+            update_inspect::on_inspect_done(state, id, result);
+            Vec::new()
+        }
+        Msg::Copied { .. } | Msg::CopyFailed { .. } => Vec::new(),
     }
 }
 
@@ -54,7 +56,7 @@ fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
     }
     match state.screen {
         Screen::Home => update_home::on_action(state, action),
-        Screen::Inspect => on_global_action(state, action),
+        Screen::Inspect => update_inspect::on_action(state, action),
     }
 }
 

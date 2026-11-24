@@ -1,6 +1,8 @@
 //! Pure rendering of [`AppState`].
 
 pub mod home;
+pub mod inspect;
+pub mod tabs;
 pub mod too_small;
 
 use ratatui::Frame;
@@ -8,6 +10,15 @@ use ratatui::Frame;
 use crate::app_state::{AppState, Screen};
 use crate::terminal::MIN_SIZE;
 use crate::theme::Theme;
+
+/// Rows of the details pane that fit on a terminal of `size`.
+///
+/// The pane loses two rows to its border, one to the tab bar and one to the
+/// footer line.
+#[must_use]
+pub fn details_viewport_rows(size: (u16, u16)) -> usize {
+    usize::from(size.1.saturating_sub(4))
+}
 
 /// Draws the whole screen for `state`.
 ///
@@ -21,7 +32,7 @@ pub fn view(state: &AppState, frame: &mut Frame) {
     }
     match state.screen {
         Screen::Home => home::render(state, frame, area, &theme),
-        Screen::Inspect => {}
+        Screen::Inspect => inspect::render(state, frame, area, &theme),
     }
 }
 

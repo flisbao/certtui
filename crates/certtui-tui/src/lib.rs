@@ -7,17 +7,23 @@
 pub mod app_state;
 pub mod clipboard;
 pub mod copy;
+pub mod detail_rows;
 pub mod keymap;
 pub mod msg;
 pub mod terminal;
+#[cfg(test)]
+mod test_fixtures;
 pub mod text;
 pub mod theme;
 pub mod toast;
 pub mod update;
 pub mod update_home;
+pub mod update_inspect;
 pub mod view;
 
-pub use app_state::{AppState, HomeState, InspectState, JobId, JobTracker, Modal, Screen};
+pub use app_state::{
+    AppState, HomeState, InspectState, JobId, JobTracker, Modal, Pane, Phase, Screen, Tab,
+};
 pub use keymap::{Action, Keymap};
 pub use msg::{Command, Msg};
 pub use terminal::{MIN_SIZE, TerminalGuard, install_panic_hook, install_signal_restore};

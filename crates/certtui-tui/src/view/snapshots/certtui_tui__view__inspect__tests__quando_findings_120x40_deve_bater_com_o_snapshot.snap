@@ -1,0 +1,44 @@
+---
+source: crates/certtui-tui/src/view/inspect.rs
+expression: "text(&render(&state, 120, 40))"
+---
+┌ Chain ────────────────────────────────┐┌ Details ────────────────────────────────────────────────────────────────────┐
+│ ⚠ rsa2048.example.test                ││‹ Subject/Issuer  SANs  Extensions  Fingerprints  Revocation  Findings  Raw  │
+│    presented by server, position 0    ││EXPIRED:         error: EXPIRED happened                                     │
+│ ✔ ec-p256.example.test                ││TRUST_UNTRUSTED: error: TRUST_UNTRUSTED happened                             │
+│    presented by server, position 1    ││                                                                             │
+│▸✖ expired.example.test                ││                                                                             │
+│    presented by server, position 2    ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+│                                       ││                                                                             │
+└───────────────────────────────────────┘└─────────────────────────────────────────────────────────────────────────────┘
+TLSv1.3 · TLS_AES_256_GCM_SHA384 · 192.0.2.7 · handshake 42ms · total 120ms
