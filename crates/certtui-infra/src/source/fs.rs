@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, stdin};
 use std::path::PathBuf;
@@ -6,10 +7,15 @@ use certtui_app::error::LoadError;
 use certtui_app::ports::{LoadedCerts, LocalSource, RawCert, SourceLoader};
 use certtui_domain::extract::{CandidateKind, scan_text};
 use certtui_domain::limits::Limits;
-use certtui_domain::model::{CertOrigin, LoadNote, parse_der_cert, retain_diagnostic_notes};
+use certtui_domain::model::{
+    CertOrigin, Digest, Fingerprints, LoadNote, parse_der_cert, retain_diagnostic_notes,
+};
 
 use super::bounded::read_limited;
 use super::format::{DetectedFormat, detect_format};
+use super::pkcs7::{
+    extract_pkcs7_certs_excluding, extract_pkcs7_certs_with_metadata, has_cms_content_info_prefix,
+};
 use super::text::utf16_to_utf8_bytes;
 
 /// Origin used while loading a local byte stream.
@@ -41,11 +47,9 @@ impl SourceLoader for FsSourceLoader {
                 load_reader(file, OriginKind::File(path.clone()), limits)
             }
             LocalSource::Stdin => load_reader(stdin().lock(), OriginKind::Stdin, limits),
-            // Directory traversal is introduced in Task 16. This interim
-            // outcome prevents the current loader from implying support.
-            LocalSource::Directory { .. } => Err(LoadError::Unsupported(
-                "directory sources arrive in a later release",
-            )),
+            LocalSource::Directory { path, recursive } => {
+                super::dir::load_directory(path, *recursive, limits)
+            }
         }
     }
 }
@@ -54,7 +58,7 @@ impl SourceLoader for FsSourceLoader {
 /// certificate candidates.
 // Justificativa: o contrato do helper no brief do Task 15 exige origem por valor.
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn load_reader<R: Read>(
+pub(super) fn load_reader<R: Read>(
     reader: R,
     origin: OriginKind,
     limits: &Limits,
@@ -85,29 +89,92 @@ fn load_binary_der(
     origin: &OriginKind,
     limits: &Limits,
 ) -> Result<LoadedCerts, LoadError> {
-    if parse_der_cert(bytes, limits).is_err() {
-        return Err(LoadError::Unsupported(
-            "PKCS#12 keystores arrive in a later release",
-        ));
+    if parse_der_cert(bytes, limits).is_ok() {
+        return Ok(LoadedCerts {
+            certs: vec![RawCert {
+                der: bytes.to_vec(),
+                origin: cert_origin(origin, 0),
+            }],
+            notes: Vec::new(),
+        });
     }
-    Ok(LoadedCerts {
-        certs: vec![RawCert {
-            der: bytes.to_vec(),
-            origin: cert_origin(origin, 0),
-        }],
-        notes: Vec::new(),
-    })
+    match extract_pkcs7_certs_with_metadata(bytes, limits) {
+        Ok(extraction) => {
+            let mut certs = Vec::new();
+            for der in extraction.certs {
+                let index = certs.len();
+                certs.push(RawCert {
+                    der,
+                    origin: cert_origin(origin, index),
+                });
+            }
+            let mut notes = Vec::new();
+            if extraction.truncated {
+                notes.push(LoadNote::TruncatedAtCertLimit {
+                    limit: limits.max_certs_per_source,
+                });
+            }
+            for _ in 0..extraction
+                .oversized
+                .min(limits.max_scan_diagnostics.saturating_add(1))
+            {
+                notes.push(LoadNote::Unparsable { offset: None });
+            }
+            if certs.is_empty() && notes.is_empty() {
+                notes.push(LoadNote::Unparsable { offset: None });
+            }
+            let notes = normalize_notes(notes, limits.max_scan_diagnostics);
+            if certs.is_empty() {
+                Err(LoadError::NoCertificatesFound { notes })
+            } else {
+                Ok(LoadedCerts { certs, notes })
+            }
+        }
+        Err(error) if has_cms_content_info_prefix(bytes) => Err(error),
+        Err(_) => Err(LoadError::Unsupported(
+            "PKCS#12 keystores arrive in a later release",
+        )),
+    }
 }
 
 fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<LoadedCerts, LoadError> {
     let outcome = scan_text(bytes, limits);
     let mut notes = Vec::from(&outcome);
     let mut certs = Vec::new();
+    let mut seen: HashSet<Digest<32>> = HashSet::new();
     for candidate in outcome.candidates {
         if candidate.kind == CandidateKind::Pkcs7 {
-            notes.push(LoadNote::Unparsable {
-                offset: Some(candidate.offset),
-            });
+            let mut candidate_limits = *limits;
+            candidate_limits.max_certs_per_source =
+                limits.max_certs_per_source.saturating_sub(certs.len());
+            match extract_pkcs7_certs_excluding(&candidate.der, &candidate_limits, &seen) {
+                Ok(extraction) => {
+                    for der in extraction.certs {
+                        seen.insert(Fingerprints::compute(&der).sha256);
+                        let index = certs.len();
+                        certs.push(RawCert {
+                            der,
+                            origin: cert_origin(origin, index),
+                        });
+                    }
+                    if extraction.truncated {
+                        notes.push(LoadNote::TruncatedAtCertLimit {
+                            limit: limits.max_certs_per_source,
+                        });
+                    }
+                    for _ in 0..extraction
+                        .oversized
+                        .min(limits.max_scan_diagnostics.saturating_add(1))
+                    {
+                        notes.push(LoadNote::Unparsable {
+                            offset: Some(candidate.offset),
+                        });
+                    }
+                }
+                Err(_) => notes.push(LoadNote::Unparsable {
+                    offset: Some(candidate.offset),
+                }),
+            }
             continue;
         }
         if parse_der_cert(&candidate.der, limits).is_err() {
@@ -115,6 +182,15 @@ fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<Loade
                 offset: Some(candidate.offset),
             });
             continue;
+        }
+        if !seen.insert(Fingerprints::compute(&candidate.der).sha256) {
+            continue;
+        }
+        if certs.len() >= limits.max_certs_per_source {
+            notes.push(LoadNote::TruncatedAtCertLimit {
+                limit: limits.max_certs_per_source,
+            });
+            break;
         }
         let index = certs.len();
         certs.push(RawCert {
@@ -132,7 +208,7 @@ fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<Loade
     Ok(LoadedCerts { certs, notes })
 }
 
-fn normalize_notes(notes: Vec<LoadNote>, limit: usize) -> Vec<LoadNote> {
+pub(super) fn normalize_notes(notes: Vec<LoadNote>, limit: usize) -> Vec<LoadNote> {
     let (mut notes, _, dropped) = retain_diagnostic_notes(notes, limit);
     if dropped
         && !notes
@@ -289,34 +365,220 @@ mod tests {
     }
 
     #[test]
-    fn quando_der_nao_x509_deve_informar_pkcs12_ainda_nao_suportado() {
-        assert_eq!(
-            load_bytes(
-                &fixture("chain-3.p7b"),
-                OriginKind::Stdin,
-                &Limits::default()
-            ),
-            Err(LoadError::Unsupported(
-                "PKCS#12 keystores arrive in a later release"
-            ))
+    fn quando_p7b_der_deve_extrair_3_certs() {
+        let result = load_bytes(
+            &fixture("chain-3.p7b"),
+            OriginKind::Stdin,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(result.certs.len(), 3);
+        assert_eq!(result.notes, []);
+        let pem_certs = load_bytes(
+            &fixture("chain-3.pem"),
+            OriginKind::Stdin,
+            &Limits::default(),
+        )
+        .unwrap()
+        .certs
+        .into_iter()
+        .map(|cert| cert.der)
+        .collect::<std::collections::BTreeSet<_>>();
+        let p7b_certs = result
+            .certs
+            .into_iter()
+            .map(|cert| cert.der)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(p7b_certs, pem_certs);
+    }
+
+    #[test]
+    fn quando_p7b_em_pem_com_label_pkcs7_deve_extrair() {
+        let encoded = base64_encode(&fixture("chain-3.p7b"));
+        let pem = format!("-----BEGIN PKCS7-----\n{encoded}\n-----END PKCS7-----\n");
+        let result = load_bytes(pem.as_bytes(), OriginKind::Stdin, &Limits::default()).unwrap();
+        assert_eq!(result.certs.len(), 3);
+    }
+
+    #[test]
+    fn quando_varios_pkcs7_excedem_limite_no_mesmo_arquivo_deve_truncar_cumulativamente() {
+        let encoded = base64_encode(&fixture("chain-3.p7b"));
+        let second_encoded = base64_encode(&pkcs7_for_der(&fixture("rsa2048-leaf.der")));
+        let pem = format!(
+            "-----BEGIN PKCS7-----\n{encoded}\n-----END PKCS7-----\n-----BEGIN PKCS7-----\n{second_encoded}\n-----END PKCS7-----\n"
+        );
+        let limits = Limits {
+            max_certs_per_source: 3,
+            ..Limits::default()
+        };
+        let result = load_bytes(pem.as_bytes(), OriginKind::Stdin, &limits).unwrap();
+        assert_eq!(result.certs.len(), 3);
+        assert!(
+            result
+                .notes
+                .contains(&certtui_domain::model::LoadNote::TruncatedAtCertLimit { limit: 3 })
         );
     }
 
     #[test]
-    fn quando_diretorio_e_recebido_antes_do_task16_deve_ser_unsupported() {
-        let result = FsSourceLoader::new().load(
-            &LocalSource::Directory {
-                path: PathBuf::from("certs"),
-                recursive: false,
-            },
-            &Limits::default(),
+    fn quando_certificado_pem_tambem_esta_em_pkcs7_deve_manter_primeiro() {
+        let der = fixture("rsa2048-leaf.der");
+        let mut input = fixture("rsa2048-leaf.pem");
+        let encoded = base64_encode(&pkcs7_for_der(&der));
+        input.extend(
+            format!("\n-----BEGIN PKCS7-----\n{encoded}\n-----END PKCS7-----\n").as_bytes(),
+        );
+        let result = load_bytes(&input, OriginKind::Stdin, &Limits::default()).unwrap();
+        assert_eq!(result.certs.len(), 1);
+        assert_eq!(
+            result.certs.first().map(|cert| cert.der.as_slice()),
+            Some(der.as_slice())
         );
         assert_eq!(
-            result,
-            Err(LoadError::Unsupported(
-                "directory sources arrive in a later release"
-            ))
+            result.certs.first().map(|cert| &cert.origin),
+            Some(&certtui_domain::model::CertOrigin::Stdin { index: 0 })
         );
+    }
+
+    #[test]
+    fn quando_pkcs7_sobrepostos_deve_deduplicar_certificados_expandidos() {
+        let chain = load_bytes(
+            &fixture("chain-3.pem"),
+            OriginKind::Stdin,
+            &Limits::default(),
+        )
+        .unwrap();
+        let repeated_der = chain.certs.first().map(|cert| cert.der.as_slice()).unwrap();
+        let encoded = base64_encode(&fixture("chain-3.p7b"));
+        let second_encoded = base64_encode(&pkcs7_for_der(repeated_der));
+        let input = format!(
+            "-----BEGIN PKCS7-----\n{encoded}\n-----END PKCS7-----\n-----BEGIN PKCS7-----\n{second_encoded}\n-----END PKCS7-----\n"
+        );
+        let result = load_bytes(input.as_bytes(), OriginKind::Stdin, &Limits::default()).unwrap();
+        assert_eq!(result.certs.len(), 3);
+        assert_eq!(
+            result
+                .certs
+                .iter()
+                .map(|cert| cert.der.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            chain
+                .certs
+                .iter()
+                .map(|cert| cert.der.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn quando_p7b_truncado_deve_dar_malformed() {
+        assert!(matches!(
+            load_bytes(
+                &fixture("chain-3.p7b")[..32],
+                OriginKind::Stdin,
+                &Limits::default()
+            ),
+            Err(LoadError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn quando_signed_data_valido_nao_tem_certificados_deve_dar_no_certificates_found() {
+        let result = load_bytes(&empty_signed_data(), OriginKind::Stdin, &Limits::default());
+        assert!(matches!(
+            result,
+            Err(LoadError::NoCertificatesFound { notes })
+                if notes.iter().any(|note| matches!(note, certtui_domain::model::LoadNote::Unparsable { .. }))
+        ));
+    }
+
+    #[test]
+    fn quando_pkcs7_tem_limite_exato_de_certificados_deve_aceitar_sem_nota() {
+        let limits = Limits {
+            max_certs_per_source: 3,
+            ..Limits::default()
+        };
+        let result = load_bytes(&fixture("chain-3.p7b"), OriginKind::Stdin, &limits).unwrap();
+        assert_eq!(result.certs.len(), 3);
+        assert!(!result.notes.iter().any(|note| matches!(
+            note,
+            certtui_domain::model::LoadNote::TruncatedAtCertLimit { .. }
+        )));
+    }
+
+    #[test]
+    fn quando_pkcs7_excede_limite_de_certificados_deve_anotar_truncamento() {
+        let limits = Limits {
+            max_certs_per_source: 2,
+            ..Limits::default()
+        };
+        let result = load_bytes(&fixture("chain-3.p7b"), OriginKind::Stdin, &limits).unwrap();
+        assert_eq!(result.certs.len(), 2);
+        assert!(
+            result
+                .notes
+                .contains(&certtui_domain::model::LoadNote::TruncatedAtCertLimit { limit: 2 })
+        );
+    }
+
+    fn base64_encode(input: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut output = String::new();
+        for chunk in input.chunks(3) {
+            let first = usize::from(chunk.first().copied().unwrap_or_default());
+            let second = usize::from(chunk.get(1).copied().unwrap_or_default());
+            let third = usize::from(chunk.get(2).copied().unwrap_or_default());
+            let bits = (first << 16) | (second << 8) | third;
+            for index in (0..4).map(|shift| (bits >> (18 - shift * 6)) & 0x3f) {
+                output.push(char::from(TABLE[index]));
+            }
+            if chunk.len() < 3 {
+                output.replace_range(output.len() - 1.., "=");
+            }
+            if chunk.len() < 2 {
+                output.replace_range(output.len() - 2.., "==");
+            }
+        }
+        output
+    }
+
+    fn empty_signed_data() -> Vec<u8> {
+        use cms::content_info::{CmsVersion, ContentInfo};
+        use cms::signed_data::{EncapsulatedContentInfo, SignedData, SignerInfos};
+        use der::Encode;
+        use der::asn1::{Any, AnyRef, ObjectIdentifier, SetOfVec};
+
+        let signed_data = SignedData {
+            version: CmsVersion::V1,
+            digest_algorithms: SetOfVec::default(),
+            encap_content_info: EncapsulatedContentInfo {
+                econtent_type: ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1"),
+                econtent: None,
+            },
+            certificates: None,
+            crls: None,
+            signer_infos: SignerInfos(SetOfVec::default()),
+        };
+        let encoded_signed_data = signed_data.to_der().unwrap();
+        let content = Any::from(AnyRef::try_from(encoded_signed_data.as_slice()).unwrap());
+        ContentInfo {
+            content_type: ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.2"),
+            content,
+        }
+        .to_der()
+        .unwrap()
+    }
+
+    fn pkcs7_for_der(der: &[u8]) -> Vec<u8> {
+        use cms::cert::x509::Certificate;
+        use cms::content_info::ContentInfo;
+        use der::{Decode, Encode};
+
+        ContentInfo::try_from(Certificate::from_der(der).unwrap())
+            .unwrap()
+            .to_der()
+            .unwrap()
     }
 
     #[test]
