@@ -277,6 +277,7 @@ dependencies = [
  "base64",
  "idna",
  "proptest",
+ "rcgen",
  "serde",
  "serde_json",
  "sha1",
