@@ -20,7 +20,9 @@ tokio = { version = "1.54.1", default-features = false }
 
 [dev-dependencies]
 rcgen = "0.14"
-tokio = { version = "1.54.1", features = ["io-util", "macros", "rt"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "time"] }
+# Test server only for now (`TlsAcceptor`); promoted to `[dependencies]` with the fetcher.
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 
 [features]
 # Exposes internal entry points to the cargo-fuzz crate only. Not for normal builds.
