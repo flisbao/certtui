@@ -28,18 +28,33 @@ pub fn inspect_local(
     limits: &Limits,
 ) -> Result<InspectionReport, LoadError> {
     let found = loader.load(src, limits)?;
-    let (records, unparsable) = parse_all(found.certs, limits);
-    let mut notes = found.notes;
-    notes.extend(unparsable);
+    let (loader_notes, diagnostic_slots, loader_dropped) =
+        retain_loader_notes(found.notes, limits.max_scan_diagnostics);
+    let (records, unparsable, app_dropped) = parse_all(found.certs, limits, diagnostic_slots)?;
+    let notes = combine_notes(
+        loader_notes,
+        unparsable,
+        loader_dropped || app_dropped,
+        limits,
+    );
     if records.is_empty() {
         return Err(LoadError::NoCertificatesFound { notes });
     }
-    let chain = Chain::new(records, limits).map_err(|e| match e {
-        certtui_domain::error::ChainError::TooLong { len, max } => {
-            LoadError::TooManyCerts { len, max }
-        }
-    })?;
-    Ok(InspectionReport {
+    let chain = Chain::new(records, limits).map_err(|error| map_chain_error(&error))?;
+    Ok(build_report(target, chain, notes))
+}
+
+fn map_chain_error(error: &certtui_domain::error::ChainError) -> LoadError {
+    match error {
+        certtui_domain::error::ChainError::TooLong { len, max } => LoadError::TooManyCerts {
+            len: *len,
+            max: *max,
+        },
+    }
+}
+
+fn build_report(target: Target, chain: Chain, notes: Vec<LoadNote>) -> InspectionReport {
+    InspectionReport {
         target,
         tls: None,
         chain,
@@ -48,21 +63,79 @@ pub fn inspect_local(
         findings: Vec::new(),
         timings: Timings::default(),
         notes,
-    })
+    }
 }
 
-/// Parses every raw certificate; failures become `Unparsable` notes, in
-/// order, carrying no bytes.
-fn parse_all(raws: Vec<RawCert>, limits: &Limits) -> (Vec<CertificateRecord>, Vec<LoadNote>) {
+/// Parses candidates, retaining only the chain and diagnostic budgets.
+fn parse_all(
+    raws: Vec<RawCert>,
+    limits: &Limits,
+    diagnostic_slots: usize,
+) -> Result<(Vec<CertificateRecord>, Vec<LoadNote>, bool), LoadError> {
     let mut records = Vec::new();
     let mut notes = Vec::new();
+    let mut dropped = false;
     for raw in raws {
         match CertificateRecord::from_der(&raw.der, raw.origin, limits) {
+            Ok(_record) if records.len() >= limits.max_chain_len => {
+                return Err(LoadError::TooManyCerts {
+                    len: limits.max_chain_len.saturating_add(1),
+                    max: limits.max_chain_len,
+                });
+            }
             Ok(record) => records.push(record),
-            Err(_) => notes.push(LoadNote::Unparsable { offset: None }),
+            Err(_) if notes.len() < diagnostic_slots => {
+                notes.push(LoadNote::Unparsable { offset: None });
+            }
+            Err(_) => dropped = true,
         }
     }
-    (records, notes)
+    Ok((records, notes, dropped))
+}
+
+/// Retains individual loader diagnostics within the shared scan budget.
+fn retain_loader_notes(notes: Vec<LoadNote>, max: usize) -> (Vec<LoadNote>, usize, bool) {
+    let mut kept = Vec::new();
+    let mut count = 0;
+    let mut dropped = false;
+    let mut has_marker = false;
+    for note in notes {
+        match note {
+            LoadNote::Rejected { .. } | LoadNote::Unparsable { .. } if count < max => {
+                count += 1;
+                kept.push(note);
+            }
+            LoadNote::DiagnosticsTruncated { .. } if !has_marker => {
+                has_marker = true;
+                dropped = true;
+                kept.push(note);
+            }
+            LoadNote::Rejected { .. }
+            | LoadNote::Unparsable { .. }
+            | LoadNote::DiagnosticsTruncated { .. } => dropped = true,
+            _ => kept.push(note),
+        }
+    }
+    (kept, max.saturating_sub(count), dropped)
+}
+
+fn combine_notes(
+    mut loader_notes: Vec<LoadNote>,
+    unparsable: Vec<LoadNote>,
+    dropped: bool,
+    limits: &Limits,
+) -> Vec<LoadNote> {
+    loader_notes.extend(unparsable);
+    if dropped
+        && !loader_notes
+            .iter()
+            .any(|note| matches!(note, LoadNote::DiagnosticsTruncated { .. }))
+    {
+        loader_notes.push(LoadNote::DiagnosticsTruncated {
+            limit: limits.max_scan_diagnostics,
+        });
+    }
+    loader_notes
 }
 
 #[cfg(test)]
@@ -195,6 +268,129 @@ mod tests {
                 max: limits.max_chain_len
             }
         );
+    }
+
+    #[test]
+    fn quando_varios_validos_passam_do_teto_deve_contar_so_validos_ate_o_primeiro_excesso() {
+        let limits = Limits {
+            max_chain_len: 2,
+            ..Limits::default()
+        };
+        let certs = vec![
+            raw("rsa2048-leaf.der", 0),
+            garbage(1),
+            raw("expired.der", 2),
+            raw("rsa2048-leaf.der", 3),
+            raw("expired.der", 4),
+        ];
+
+        let err = run(certs, Vec::new(), &limits).unwrap_err();
+
+        assert_eq!(err, LoadError::TooManyCerts { len: 3, max: 2 });
+    }
+
+    #[test]
+    fn quando_diagnosticos_do_loader_e_parse_excedem_teto_em_sucesso_deve_truncar_combinado() {
+        let limits = Limits {
+            max_scan_diagnostics: 1,
+            ..Limits::default()
+        };
+        let loader_rejection = LoadNote::Rejected {
+            offset: 4,
+            reason: RejectReason::InvalidBase64,
+        };
+        let metadata = LoadNote::PrivateKeyBlocksIgnored { count: 2 };
+
+        let report = run(
+            vec![garbage(0), raw("rsa2048-leaf.der", 1), garbage(2)],
+            vec![loader_rejection.clone(), metadata.clone()],
+            &limits,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.notes,
+            vec![
+                loader_rejection,
+                metadata,
+                LoadNote::DiagnosticsTruncated { limit: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn quando_diagnosticos_excedem_teto_sem_certificados_deve_truncar_combinado() {
+        let limits = Limits {
+            max_scan_diagnostics: 2,
+            ..Limits::default()
+        };
+        let rejection = LoadNote::Rejected {
+            offset: 4,
+            reason: RejectReason::InvalidBase64,
+        };
+        let err = run(
+            vec![garbage(0), garbage(1)],
+            vec![rejection.clone()],
+            &limits,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            LoadError::NoCertificatesFound {
+                notes: vec![
+                    rejection,
+                    LoadNote::Unparsable { offset: None },
+                    LoadNote::DiagnosticsTruncated { limit: 2 },
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn quando_orcamento_de_diagnosticos_e_zero_deve_preservar_metadados_e_marcar_truncamento() {
+        let limits = Limits {
+            max_scan_diagnostics: 0,
+            ..Limits::default()
+        };
+        let metadata = LoadNote::PrivateKeyBlocksIgnored { count: 1 };
+        let report = run(
+            vec![garbage(0), raw("rsa2048-leaf.der", 1)],
+            vec![metadata.clone()],
+            &limits,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.notes,
+            vec![metadata, LoadNote::DiagnosticsTruncated { limit: 0 }]
+        );
+    }
+
+    #[test]
+    fn quando_loader_ja_truncou_diagnosticos_deve_manter_um_so_marcador() {
+        let limits = Limits {
+            max_scan_diagnostics: 1,
+            ..Limits::default()
+        };
+        let marker = LoadNote::DiagnosticsTruncated { limit: 1 };
+        let report = run(
+            vec![garbage(0), raw("rsa2048-leaf.der", 1)],
+            vec![marker.clone(), marker.clone()],
+            &limits,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.notes,
+            vec![marker, LoadNote::Unparsable { offset: None }]
+        );
+    }
+
+    #[test]
+    fn quando_loader_retorna_vazio_deve_dar_no_certificates_found() {
+        let err = run(Vec::new(), Vec::new(), &Limits::default()).unwrap_err();
+        assert_eq!(err, LoadError::NoCertificatesFound { notes: Vec::new() });
     }
 
     #[test]

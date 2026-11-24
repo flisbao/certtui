@@ -36,8 +36,8 @@ pub enum LocalSource {
 
 /// A DER blob extracted from a source, not yet parsed as X.509.
 ///
-/// `Debug` prints only the length: the bytes may belong to anything a
-/// loader mistook for a certificate.
+/// `Debug` prints the length and origin, but not the bytes: the bytes may
+/// belong to anything a loader mistook for a certificate.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RawCert {
     /// The DER bytes.
