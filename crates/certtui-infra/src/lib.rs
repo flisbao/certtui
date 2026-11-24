@@ -7,3 +7,6 @@ pub mod source;
 
 /// TLS chain fetching: the `ChainFetcher` adapter and its building blocks.
 pub mod tls;
+
+/// Trust anchor loading: system, Mozilla and custom CA files.
+pub mod trust;

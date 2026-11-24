@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use x509_parser::asn1_rs::Tag;
+use x509_parser::asn1_rs::{FromDer, Tag};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::extensions::SignedCertificateTimestamp;
 use x509_parser::extensions::{
@@ -72,6 +72,15 @@ pub fn parse_der_cert(der: &[u8], limits: &Limits) -> Result<CertificateSummary,
         return Err(ParseError::TrailingData { extra: rest.len() });
     }
     summarize(&cert)
+}
+
+/// Parses a DER-encoded `Name` (e.g. a trust anchor subject) for display.
+///
+/// Returns `None` when `der` is not a well-formed name or has trailing bytes.
+#[must_use]
+pub fn parse_name_der(der: &[u8]) -> Option<DistinguishedName> {
+    let (rest, name) = X509Name::from_der(der).ok()?;
+    rest.is_empty().then(|| distinguished_name(&name))
 }
 
 /// Builds the summary from an already-parsed certificate.

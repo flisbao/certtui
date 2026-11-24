@@ -24,6 +24,9 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
 ]
+exceptions = [
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@=1.0.12" },
+]
 confidence-threshold = 0.93
 
 [bans]
