@@ -68,6 +68,38 @@ pub enum LoadNote {
     },
 }
 
+/// Retains loader diagnostics within the shared per-source diagnostic budget.
+///
+/// Non-diagnostic metadata is always kept, and only one existing
+/// [`LoadNote::DiagnosticsTruncated`] marker is retained. The returned tuple
+/// contains the notes, remaining individual-diagnostic slots, and whether
+/// any diagnostic or duplicate marker was dropped.
+#[must_use]
+pub fn retain_diagnostic_notes(notes: Vec<LoadNote>, max: usize) -> (Vec<LoadNote>, usize, bool) {
+    let mut kept = Vec::new();
+    let mut count = 0;
+    let mut dropped = false;
+    let mut has_marker = false;
+    for note in notes {
+        match note {
+            LoadNote::Rejected { .. } | LoadNote::Unparsable { .. } if count < max => {
+                count += 1;
+                kept.push(note);
+            }
+            LoadNote::DiagnosticsTruncated { .. } if !has_marker => {
+                has_marker = true;
+                dropped = true;
+                kept.push(note);
+            }
+            LoadNote::Rejected { .. }
+            | LoadNote::Unparsable { .. }
+            | LoadNote::DiagnosticsTruncated { .. } => dropped = true,
+            _ => kept.push(note),
+        }
+    }
+    (kept, max.saturating_sub(count), dropped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +130,31 @@ mod tests {
             serde_json::to_string(&LoadNote::DiagnosticsTruncated { limit: 100 }).unwrap(),
             r#"{"kind":"diagnostics_truncated","limit":100}"#
         );
+    }
+
+    #[test]
+    fn quando_notas_excedem_orcamento_deve_preservar_metadados_e_slots() {
+        let metadata = LoadNote::PrivateKeyBlocksIgnored { count: 2 };
+        let notes = vec![
+            metadata.clone(),
+            LoadNote::Rejected {
+                offset: 1,
+                reason: RejectReason::InvalidBase64,
+            },
+            LoadNote::Unparsable { offset: Some(2) },
+        ];
+        let (kept, remaining, dropped) = retain_diagnostic_notes(notes, 1);
+        assert_eq!(
+            kept,
+            vec![
+                metadata,
+                LoadNote::Rejected {
+                    offset: 1,
+                    reason: RejectReason::InvalidBase64,
+                },
+            ]
+        );
+        assert_eq!(remaining, 0);
+        assert!(dropped);
     }
 }

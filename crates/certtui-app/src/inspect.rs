@@ -3,6 +3,7 @@
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{
     CertificateRecord, Chain, InspectionReport, LoadNote, Timings, TrustVerdict,
+    retain_diagnostic_notes,
 };
 use certtui_domain::target::Target;
 
@@ -29,7 +30,7 @@ pub fn inspect_local(
 ) -> Result<InspectionReport, LoadError> {
     let found = loader.load(src, limits)?;
     let (loader_notes, diagnostic_slots, loader_dropped) =
-        retain_loader_notes(found.notes, limits.max_scan_diagnostics);
+        retain_diagnostic_notes(found.notes, limits.max_scan_diagnostics);
     let (records, unparsable, app_dropped) = parse_all(found.certs, limits, diagnostic_slots)?;
     let notes = combine_notes(
         loader_notes,
@@ -91,32 +92,6 @@ fn parse_all(
         }
     }
     Ok((records, notes, dropped))
-}
-
-/// Retains individual loader diagnostics within the shared scan budget.
-fn retain_loader_notes(notes: Vec<LoadNote>, max: usize) -> (Vec<LoadNote>, usize, bool) {
-    let mut kept = Vec::new();
-    let mut count = 0;
-    let mut dropped = false;
-    let mut has_marker = false;
-    for note in notes {
-        match note {
-            LoadNote::Rejected { .. } | LoadNote::Unparsable { .. } if count < max => {
-                count += 1;
-                kept.push(note);
-            }
-            LoadNote::DiagnosticsTruncated { .. } if !has_marker => {
-                has_marker = true;
-                dropped = true;
-                kept.push(note);
-            }
-            LoadNote::Rejected { .. }
-            | LoadNote::Unparsable { .. }
-            | LoadNote::DiagnosticsTruncated { .. } => dropped = true,
-            _ => kept.push(note),
-        }
-    }
-    (kept, max.saturating_sub(count), dropped)
 }
 
 fn combine_notes(

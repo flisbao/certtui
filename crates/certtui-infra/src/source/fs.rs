@@ -6,7 +6,7 @@ use certtui_app::error::LoadError;
 use certtui_app::ports::{LoadedCerts, LocalSource, RawCert, SourceLoader};
 use certtui_domain::extract::{CandidateKind, scan_text};
 use certtui_domain::limits::Limits;
-use certtui_domain::model::{CertOrigin, LoadNote, parse_der_cert};
+use certtui_domain::model::{CertOrigin, LoadNote, parse_der_cert, retain_diagnostic_notes};
 
 use super::bounded::read_limited;
 use super::format::{DetectedFormat, detect_format};
@@ -52,7 +52,7 @@ impl SourceLoader for FsSourceLoader {
 
 /// Reads one stream under its source-specific byte limit, then extracts its
 /// certificate candidates.
-// Justificativa: a interface da porta requer que o helper receba a origem por valor.
+// Justificativa: o contrato do helper no brief do Task 15 exige origem por valor.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn load_reader<R: Read>(
     reader: R,
@@ -122,13 +122,26 @@ fn load_text(bytes: &[u8], origin: &OriginKind, limits: &Limits) -> Result<Loade
             origin: cert_origin(origin, index),
         });
     }
+    if certs.is_empty() && notes.is_empty() {
+        notes.push(LoadNote::Unparsable { offset: None });
+    }
+    let notes = normalize_notes(notes, limits.max_scan_diagnostics);
     if certs.is_empty() {
-        if notes.is_empty() {
-            notes.push(LoadNote::Unparsable { offset: None });
-        }
         return Err(LoadError::NoCertificatesFound { notes });
     }
     Ok(LoadedCerts { certs, notes })
+}
+
+fn normalize_notes(notes: Vec<LoadNote>, limit: usize) -> Vec<LoadNote> {
+    let (mut notes, _, dropped) = retain_diagnostic_notes(notes, limit);
+    if dropped
+        && !notes
+            .iter()
+            .any(|note| matches!(note, LoadNote::DiagnosticsTruncated { .. }))
+    {
+        notes.push(LoadNote::DiagnosticsTruncated { limit });
+    }
+    notes
 }
 
 fn cert_origin(origin: &OriginKind, index: usize) -> CertOrigin {
@@ -346,6 +359,23 @@ mod tests {
     }
 
     #[test]
+    fn quando_pem_termina_sem_end_deve_preservar_nota_de_scan_no_loader() {
+        let result = load_bytes(
+            &fixture("messy/truncated.txt"),
+            OriginKind::Stdin,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert!(result.notes.iter().any(|note| matches!(
+            note,
+            certtui_domain::model::LoadNote::Rejected {
+                reason: certtui_domain::model::RejectReason::UnterminatedPem,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn quando_origem_e_arquivo_deve_indexar_certificados_na_ordem_de_saida() {
         let result = load_bytes(
             &fixture("messy/bundle-mixed.txt"),
@@ -381,19 +411,98 @@ mod tests {
 
     #[test]
     fn quando_utf16_contem_prefixo_nao_ascii_deve_preservar_certificado_posterior() {
-        let mut text = "日本語🙂\n"
+        let prefix = "日".repeat(2_000);
+        let pem = fixture("rsa2048-leaf.pem");
+        let utf8 = format!("{prefix}\n{}", String::from_utf8(pem.clone()).unwrap());
+        let mut text = prefix
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>();
-        text.extend(
-            fixture("rsa2048-leaf.pem")
-                .iter()
-                .flat_map(|byte| u16::from(*byte).to_le_bytes()),
-        );
+        text.extend("\n".encode_utf16().flat_map(u16::to_le_bytes));
+        text.extend(pem.iter().flat_map(|byte| u16::from(*byte).to_le_bytes()));
         let mut input = vec![0xFF, 0xFE];
         input.extend(text);
+        assert!(utf8.len() > input.len());
+        let max_output = input.len().saturating_sub(2).div_ceil(2).saturating_mul(3);
+        let decoded = utf16_to_utf8_bytes(&input);
+        assert!(decoded.len() <= max_output);
+        assert_eq!(decoded, utf8.as_bytes());
         let loaded = load_bytes(&input, OriginKind::Stdin, &Limits::default()).unwrap();
         assert_eq!(loaded.certs.len(), 1);
+    }
+
+    fn malformed_pem() -> Vec<u8> {
+        b"-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----\n".to_vec()
+    }
+
+    fn non_der_pem() -> &'static [u8] {
+        b"-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n"
+    }
+
+    #[test]
+    fn quando_notes_do_loader_sucesso_passam_do_limite_deve_limitar_com_marcador() {
+        let limits = Limits {
+            max_scan_diagnostics: 1,
+            ..Limits::default()
+        };
+        let mut input = non_der_pem().to_vec();
+        input.extend(malformed_pem());
+        input.extend(malformed_pem());
+        input.extend(fixture("rsa2048-leaf.pem"));
+        let result = load_bytes(&input, OriginKind::Stdin, &limits).unwrap();
+        assert_eq!(result.certs.len(), 1);
+        assert_eq!(
+            result.notes,
+            vec![
+                certtui_domain::model::LoadNote::Rejected {
+                    offset: 0,
+                    reason: certtui_domain::model::RejectReason::NotDerSequence,
+                },
+                certtui_domain::model::LoadNote::DiagnosticsTruncated { limit: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn quando_notes_do_loader_sem_certificados_passam_do_limite_deve_limitar_com_marcador() {
+        let limits = Limits {
+            max_scan_diagnostics: 1,
+            ..Limits::default()
+        };
+        let mut input = non_der_pem().to_vec();
+        input.extend(malformed_pem());
+        input.extend(malformed_pem());
+        assert_eq!(
+            load_bytes(&input, OriginKind::Stdin, &limits),
+            Err(LoadError::NoCertificatesFound {
+                notes: vec![
+                    certtui_domain::model::LoadNote::Rejected {
+                        offset: 0,
+                        reason: certtui_domain::model::RejectReason::NotDerSequence,
+                    },
+                    certtui_domain::model::LoadNote::DiagnosticsTruncated { limit: 1 },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn quando_limite_de_notes_e_zero_deve_preservar_metadados_e_um_marcador() {
+        let limits = Limits {
+            max_scan_diagnostics: 0,
+            ..Limits::default()
+        };
+        let mut input = malformed_pem();
+        input.extend(b"-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n");
+        assert_eq!(
+            load_bytes(&input, OriginKind::Stdin, &limits),
+            Err(LoadError::NoCertificatesFound {
+                notes: vec![
+                    certtui_domain::model::LoadNote::PrivateKeyBlocksIgnored { count: 1 },
+                    certtui_domain::model::LoadNote::DiagnosticsTruncated { limit: 0 },
+                ],
+            })
+        );
     }
 
     #[test]
