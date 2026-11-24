@@ -1,0 +1,270 @@
+---
+source: crates/certtui/tests/cli_inspect.rs
+expression: "String::from_utf8(out.stdout).unwrap()"
+---
+{
+  "schema_version": 1,
+  "target": {
+    "kind": "file",
+    "path": "chain-3.pem"
+  },
+  "notes": [],
+  "certificates": [
+    {
+      "index": 0,
+      "origin": {
+        "kind": "file",
+        "path": "chain-3.pem",
+        "index": 0
+      },
+      "version": 3,
+      "serial": "37C48FF0E58FAB99F29687F5F6219848215AFA4A",
+      "subject": {
+        "rfc4514": "CN=chain.example.test,O=CertTui Test,C=BR",
+        "common_name": "chain.example.test"
+      },
+      "issuer": {
+        "rfc4514": "CN=CertTui Test Intermediate CA,O=CertTui Test,C=BR",
+        "common_name": "CertTui Test Intermediate CA"
+      },
+      "not_before": "2026-11-23T21:05:35Z",
+      "not_after": "2031-11-22T21:05:35Z",
+      "public_key": {
+        "algorithm": "RSA",
+        "bits": 2048,
+        "curve": null
+      },
+      "signature_algorithm": {
+        "oid": "1.2.840.10045.4.3.2",
+        "name": "ecdsa-with-SHA256",
+        "hash": "sha256"
+      },
+      "subject_alt_names": [
+        {
+          "type": "dns",
+          "value": "chain.example.test"
+        }
+      ],
+      "basic_constraints": {
+        "ca": false,
+        "path_len": null
+      },
+      "key_usage": [
+        "digitalSignature",
+        "keyEncipherment"
+      ],
+      "extended_key_usage": [
+        "serverAuth"
+      ],
+      "subject_key_id": "DE3EBE9024C7DD7B5327767947D287556F8F226F",
+      "authority_key_id": "7200591B8E3AAF1CEEE245605169C5A7B841B113",
+      "aia": {
+        "ocsp": [],
+        "ca_issuers": []
+      },
+      "crl_distribution_points": [],
+      "scts": [],
+      "extensions": [
+        {
+          "oid": "2.5.29.19",
+          "critical": true,
+          "name": "Basic Constraints",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.15",
+          "critical": true,
+          "name": "Key Usage",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.37",
+          "critical": false,
+          "name": "Extended Key Usage",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.17",
+          "critical": false,
+          "name": "Subject Alternative Name",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.14",
+          "critical": false,
+          "name": "Subject Key Identifier",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.35",
+          "critical": false,
+          "name": "Authority Key Identifier",
+          "decode_error": false
+        }
+      ],
+      "fingerprints": {
+        "sha1": "76:AC:37:CE:A1:F9:CE:38:12:2E:DF:FE:32:F7:40:54:CE:0E:96:88",
+        "sha256": "42:3A:5E:B8:10:15:E6:EC:DF:52:2C:5C:B4:9A:D4:82:FC:4A:5C:17:5F:B0:AF:39:97:21:F2:C2:61:C1:DE:BD",
+        "sha512": "FD:DD:48:7C:1F:6D:99:9F:26:07:38:F6:6E:54:B8:D0:7A:11:B4:F1:D1:2F:A1:C5:71:4C:C4:18:73:58:12:5C:07:65:9A:D1:1E:EE:6A:7C:27:27:34:E7:B4:CD:25:71:70:BB:71:E8:76:78:B9:C2:7B:C4:7A:1D:4C:CB:EE:2B"
+      }
+    },
+    {
+      "index": 1,
+      "origin": {
+        "kind": "file",
+        "path": "chain-3.pem",
+        "index": 1
+      },
+      "version": 3,
+      "serial": "37C48FF0E58FAB99F29687F5F6219848215AFA49",
+      "subject": {
+        "rfc4514": "CN=CertTui Test Intermediate CA,O=CertTui Test,C=BR",
+        "common_name": "CertTui Test Intermediate CA"
+      },
+      "issuer": {
+        "rfc4514": "CN=CertTui Test Root CA,O=CertTui Test,C=BR",
+        "common_name": "CertTui Test Root CA"
+      },
+      "not_before": "2026-11-23T21:05:35Z",
+      "not_after": "2036-11-20T21:05:35Z",
+      "public_key": {
+        "algorithm": "EC P-256",
+        "bits": 256,
+        "curve": "prime256v1"
+      },
+      "signature_algorithm": {
+        "oid": "1.2.840.10045.4.3.2",
+        "name": "ecdsa-with-SHA256",
+        "hash": "sha256"
+      },
+      "subject_alt_names": [],
+      "basic_constraints": {
+        "ca": true,
+        "path_len": 0
+      },
+      "key_usage": [
+        "keyCertSign",
+        "cRLSign"
+      ],
+      "extended_key_usage": [],
+      "subject_key_id": "7200591B8E3AAF1CEEE245605169C5A7B841B113",
+      "authority_key_id": "4DC615388BEDD1AB353C532A2D2DF3018DF2145D",
+      "aia": {
+        "ocsp": [],
+        "ca_issuers": []
+      },
+      "crl_distribution_points": [],
+      "scts": [],
+      "extensions": [
+        {
+          "oid": "2.5.29.19",
+          "critical": true,
+          "name": "Basic Constraints",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.15",
+          "critical": true,
+          "name": "Key Usage",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.14",
+          "critical": false,
+          "name": "Subject Key Identifier",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.35",
+          "critical": false,
+          "name": "Authority Key Identifier",
+          "decode_error": false
+        }
+      ],
+      "fingerprints": {
+        "sha1": "ED:32:AD:5D:B1:76:55:03:8D:59:B5:08:BF:C8:D2:8F:CC:A1:DC:92",
+        "sha256": "AB:58:93:DA:64:CD:59:BD:9C:30:8A:11:9C:6F:E3:C4:9C:C5:85:61:83:74:CB:01:AA:29:A8:A0:72:12:A0:58",
+        "sha512": "AC:97:7F:3E:CE:36:CD:4F:79:42:94:6E:28:99:4B:28:3B:A3:54:0F:2C:9B:3B:0E:75:0C:41:E3:2B:2B:E2:4C:43:40:90:07:FE:60:B5:C6:21:4C:0F:E7:30:AA:3B:57:AA:B0:BA:4B:3F:DA:53:34:91:98:02:C5:7A:C4:CA:AF"
+      }
+    },
+    {
+      "index": 2,
+      "origin": {
+        "kind": "file",
+        "path": "chain-3.pem",
+        "index": 2
+      },
+      "version": 3,
+      "serial": "16AAF067113F213137E45678A7E6EB323AD2B931",
+      "subject": {
+        "rfc4514": "CN=CertTui Test Root CA,O=CertTui Test,C=BR",
+        "common_name": "CertTui Test Root CA"
+      },
+      "issuer": {
+        "rfc4514": "CN=CertTui Test Root CA,O=CertTui Test,C=BR",
+        "common_name": "CertTui Test Root CA"
+      },
+      "not_before": "2026-11-23T21:05:35Z",
+      "not_after": "2046-11-18T21:05:35Z",
+      "public_key": {
+        "algorithm": "EC P-256",
+        "bits": 256,
+        "curve": "prime256v1"
+      },
+      "signature_algorithm": {
+        "oid": "1.2.840.10045.4.3.2",
+        "name": "ecdsa-with-SHA256",
+        "hash": "sha256"
+      },
+      "subject_alt_names": [],
+      "basic_constraints": {
+        "ca": true,
+        "path_len": null
+      },
+      "key_usage": [
+        "keyCertSign",
+        "cRLSign"
+      ],
+      "extended_key_usage": [],
+      "subject_key_id": "4DC615388BEDD1AB353C532A2D2DF3018DF2145D",
+      "authority_key_id": "4DC615388BEDD1AB353C532A2D2DF3018DF2145D",
+      "aia": {
+        "ocsp": [],
+        "ca_issuers": []
+      },
+      "crl_distribution_points": [],
+      "scts": [],
+      "extensions": [
+        {
+          "oid": "2.5.29.14",
+          "critical": false,
+          "name": "Subject Key Identifier",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.35",
+          "critical": false,
+          "name": "Authority Key Identifier",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.19",
+          "critical": true,
+          "name": "Basic Constraints",
+          "decode_error": false
+        },
+        {
+          "oid": "2.5.29.15",
+          "critical": true,
+          "name": "Key Usage",
+          "decode_error": false
+        }
+      ],
+      "fingerprints": {
+        "sha1": "67:33:9D:7A:1E:16:51:FE:8A:AB:85:86:01:7F:44:46:B6:02:5F:90",
+        "sha256": "FE:DE:52:95:D9:B8:5C:67:AE:CE:1C:BC:17:32:EA:0D:2A:72:FE:26:78:76:5D:58:37:C1:B7:F7:15:3C:D5:D2",
+        "sha512": "04:31:88:5A:EB:12:0E:6A:17:AD:14:C0:EA:27:E5:14:F2:08:12:3E:29:4F:3F:21:06:08:30:EC:1C:D6:CB:59:AA:92:CD:E9:D0:7A:C2:0B:D0:DD:D6:80:CB:93:3C:4A:B7:E4:7E:C8:84:01:BA:BB:C4:B5:96:D5:C0:D8:71:A1"
+      }
+    }
+  ]
+}

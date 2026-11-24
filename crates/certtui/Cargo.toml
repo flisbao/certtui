@@ -7,5 +7,20 @@ repository.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+anyhow = "1"
+base64 = "0.23.1"
+certtui-app = { path = "../certtui-app" }
+certtui-domain = { path = "../certtui-domain" }
+certtui-infra = { path = "../certtui-infra" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+insta = "1"
+rcgen = "0.14"
+
 [lints]
 workspace = true
