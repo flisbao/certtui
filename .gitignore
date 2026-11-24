@@ -3,3 +3,8 @@ target/
 *.key
 fuzz/artifacts/
 fuzz/target/
+
+# Local docs (specs, plans, ADRs) are never committed; only README.md files are.
+docs/
+*.md
+!README.md
