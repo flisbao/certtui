@@ -110,6 +110,11 @@ pub enum LoadNote {
     /// A JKS keystore was read without a password, so its integrity check
     /// (a SHA-1 over the content keyed by the password) was skipped.
     KeystoreIntegrityUnverified,
+    /// Keystore entries that are not X.509 certificates were skipped.
+    KeystoreEntriesIgnored {
+        /// How many entries were skipped.
+        count: usize,
+    },
 }
 
 impl LoadNote {

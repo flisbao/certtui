@@ -71,6 +71,7 @@ impl KeystoreReader for Pkcs12Reader {
         Ok(KeystoreContents {
             entries,
             integrity_unverified: false,
+            ignored: 0,
         })
     }
 }

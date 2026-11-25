@@ -234,6 +234,9 @@ fn reject_reason(reason: RejectReason) -> &'static str {
 #[must_use]
 pub fn note_text(note: &LoadNote) -> String {
     match note {
+        LoadNote::KeystoreEntriesIgnored { count } => {
+            format!("{count} keystore entries are not X.509 certificates and were skipped")
+        }
         LoadNote::KeystoreIntegrityUnverified => {
             "keystore read without a password: its integrity was not verified".to_owned()
         }

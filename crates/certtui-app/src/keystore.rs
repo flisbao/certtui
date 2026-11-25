@@ -61,6 +61,8 @@ pub struct KeystoreContents {
     /// `true` when the integrity check was skipped (a JKS read without a
     /// password): the certificates are listed but not authenticated.
     pub integrity_unverified: bool,
+    /// Entries skipped because they are not X.509 certificates.
+    pub ignored: usize,
 }
 
 /// Why a keystore could not be read. Messages carry no password and no bytes.
