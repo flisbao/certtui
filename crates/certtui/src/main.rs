@@ -3,6 +3,7 @@
 mod cli;
 mod command_executor;
 mod exit_code;
+mod logging;
 mod network_args;
 mod output;
 mod password;

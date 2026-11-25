@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use certtui_app::check::FailOn;
 use certtui_app::config::{
-    CliOverrides, Config, ConfigError, FingerprintFormatConfig, ResolvedConfig, RevocationMode,
-    ThresholdsConfig, UiConfig,
+    CliOverrides, Config, ConfigError, FingerprintFormatConfig, LogLevel, ResolvedConfig,
+    RevocationMode, ThresholdsConfig, UiConfig,
 };
 use certtui_app::enrich::{ReportEnricher, RevocationOptions};
 use certtui_app::error::{InspectError, LoadError};
@@ -37,6 +37,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
 
 use crate::exit_code::ExitCode;
+use crate::logging::{LogGuard, LoggingError};
 use crate::network_args::{ConnectTo, parse_connect_to, parse_sni, parse_timeout};
 use crate::output::check::TargetResult;
 use crate::output::field::Field;
@@ -61,6 +62,9 @@ pub struct Cli {
     /// either, `~/.config/certtui/config.json` is read if it exists.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
+    /// Write a log to this file (appended; nothing is logged without one).
+    #[arg(long, global = true, value_name = "PATH")]
+    log_file: Option<PathBuf>,
     /// Reach TLS servers, OCSP, CRL and AIA through this HTTP CONNECT proxy,
     /// `http://host:port` (no credentials, no https or socks).
     #[arg(long, global = true, value_name = "URL")]
@@ -379,6 +383,9 @@ impl NetworkOptions {
     }
 }
 
+/// Starts file logging for a run; see [`crate::logging::init_logging`].
+pub type LogStarter = dyn Fn(Option<&Path>, LogLevel) -> Result<LogGuard, LoggingError>;
+
 /// What the command needs from the outside world; the composition root
 /// supplies the real adapters and tests supply fakes.
 #[derive(Clone, Copy)]
@@ -403,6 +410,8 @@ pub struct Env<'a> {
     pub config: &'a dyn Fn(Option<&Path>) -> Result<Config, ConfigError>,
     /// The environment variables the proxy settings read.
     pub variables: &'a EnvVars,
+    /// Starts file logging: the log file, the configured level.
+    pub log: &'a LogStarter,
 }
 
 /// Trust-related options shared by every command.
@@ -564,12 +573,10 @@ pub fn run(
         Ok(resolved) => resolved,
         Err(code) => return Ok(code),
     };
-    let proxy = match proxy_settings(&resolved, env.variables) {
-        Ok(proxy) => proxy,
-        Err(error) => return usage(err, &error.to_string()),
+    let (_log, proxy) = match start_services(&cli, &resolved, env, err)? {
+        Ok(started) => started,
+        Err(code) => return Ok(code),
     };
-    env.fetcher.use_proxy(proxy.clone());
-    env.enricher.use_proxy(proxy.clone());
     let network_options = match cli.sni.as_deref().map(parse_sni).transpose() {
         Ok(sni) => NetworkOptions {
             sni,
@@ -677,6 +684,69 @@ fn read_password(
     }
 }
 
+/// Starts the log and points the network adapters at the proxy, or gives the
+/// exit code of a setting that cannot be used. The guard must outlive the run.
+fn start_services(
+    cli: &Cli,
+    resolved: &ResolvedConfig,
+    env: &Env<'_>,
+    err: &mut dyn Write,
+) -> anyhow::Result<Result<(LogGuard, Option<ProxySettings>), ExitCode>> {
+    let guard = match (env.log)(resolved.log_file.as_deref(), resolved.log_level) {
+        Ok(guard) => guard,
+        Err(error) => return usage(err, &output::single_line(&error.to_string())).map(Err),
+    };
+    log_start(cli, resolved);
+    let proxy = match proxy_settings(resolved, env.variables) {
+        Ok(proxy) => proxy,
+        Err(error) => return usage(err, &error.to_string()).map(Err),
+    };
+    env.fetcher.use_proxy(proxy.clone());
+    env.enricher.use_proxy(proxy.clone());
+    Ok(Ok((guard, proxy)))
+}
+
+/// What the log says about this run: version, command, and every limit the
+/// configuration asked for above its hard cap. Never a password or a path
+/// that came from a certificate.
+fn log_start(cli: &Cli, resolved: &ResolvedConfig) {
+    let command = match &cli.command {
+        Some(Command::Inspect(_)) => "inspect",
+        Some(Command::Check(_)) => "check",
+        Some(Command::Batch(_)) => "batch",
+        Some(Command::Export(_)) => "export",
+        Some(Command::External(_)) | None => "interactive",
+    };
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        command,
+        "certtui started"
+    );
+    for warning in &resolved.limit_warnings {
+        tracing::warn!(
+            field = warning.field,
+            requested = warning.requested,
+            applied = warning.applied,
+            "limit override above its hard cap; truncated"
+        );
+    }
+    if let Some(variable) = &cli.password_env {
+        tracing::debug!(
+            variable = variable.as_str(),
+            "keystore password read from the environment"
+        );
+    }
+    if cli.password_file.is_some() {
+        tracing::debug!("keystore password read from a file");
+    }
+    tracing::debug!(
+        trust_sources = resolved.trust_sources.len(),
+        proxy = resolved.proxy.is_some(),
+        aia = resolved.aia,
+        "settings resolved"
+    );
+}
+
 /// The configuration file merged with the command line, or the exit code of
 /// a configuration that cannot be used.
 fn load_settings(
@@ -729,6 +799,7 @@ fn overrides_from(cli: &Cli) -> CliOverrides {
         fail_on,
         timeout_secs: cli.timeout.map(|timeout| timeout.as_secs()),
         proxy: cli.proxy.clone(),
+        log_file: cli.log_file.clone(),
         aia: cli.aia.then_some(true),
         revocation: match (cli.no_revocation, cli.revocation) {
             (true, _) => Some(RevocationMode::Off),
@@ -1427,6 +1498,7 @@ mod tests {
             enricher,
             config: &|_| Ok(Config::default()),
             variables: &EnvVars::default(),
+            log: &|_, _| Ok(LogGuard::none()),
         };
         let mut out = Vec::new();
         let mut err = Vec::new();

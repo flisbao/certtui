@@ -19,6 +19,7 @@ use certtui_infra::trust::NativeTrustProvider;
 
 use crate::cli;
 use crate::exit_code::ExitCode;
+use crate::logging::init_logging;
 use crate::system_inspector::real_enricher;
 use crate::tui_launch::ProcessLauncher;
 
@@ -55,6 +56,7 @@ pub fn run_process() -> std::process::ExitCode {
         enricher: &enricher,
         config: &config,
         variables: &process_env,
+        log: &|file, level| init_logging(file, level, std::env::var("RUST_LOG").ok().as_deref()),
     };
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();
