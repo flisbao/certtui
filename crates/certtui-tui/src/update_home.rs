@@ -12,6 +12,9 @@ use crate::toast::{Toast, ToastKind};
 /// Most characters the target field accepts.
 pub const MAX_INPUT_CHARS: usize = 2048;
 
+/// Most suggestions shown under the target field.
+const MAX_SUGGESTIONS: usize = 8;
+
 /// Parser used when none is injected: `-` is standard input, anything else
 /// must be a network target. The binary injects one that also knows files.
 ///
@@ -40,6 +43,12 @@ pub fn default_batch_loader(_path: &str) -> Result<Vec<NetworkTarget>, String> {
 /// Handles a key while the target field has focus; `None` when the key is
 /// not an editing key and should go through the keymap.
 pub fn on_edit_key(state: &mut AppState, key: KeyEvent) -> Option<Vec<Command>> {
+    let handled = edit_key(state, key);
+    refresh_suggestions(state);
+    handled
+}
+
+fn edit_key(state: &mut AppState, key: KeyEvent) -> Option<Vec<Command>> {
     if key.kind == KeyEventKind::Release {
         return Some(Vec::new());
     }
@@ -50,6 +59,7 @@ pub fn on_edit_key(state: &mut AppState, key: KeyEvent) -> Option<Vec<Command>> 
         KeyCode::Char(c) if !ctrl_or_alt => insert(state, c),
         KeyCode::Enter => return Some(submit(state)),
         KeyCode::Esc => stop_editing(state),
+        KeyCode::Tab if !state.home.suggestions.is_empty() => complete(state),
         KeyCode::Backspace => backspace(state),
         KeyCode::Delete => delete(state),
         KeyCode::Left => state.home.cursor = state.home.cursor.saturating_sub(1),
@@ -71,6 +81,26 @@ pub fn on_paste(state: &mut AppState, text: &str) {
     for c in text.chars().filter(|c| !c.is_control()) {
         insert(state, c);
     }
+    refresh_suggestions(state);
+}
+
+/// Recomputes the suggestions for what is typed: only while typing a target.
+fn refresh_suggestions(state: &mut AppState) {
+    state.home.suggestions = if state.home.editing && state.home.mode == HomeMode::Target {
+        state
+            .history
+            .suggestions(&state.home.input, MAX_SUGGESTIONS)
+    } else {
+        Vec::new()
+    };
+}
+
+/// Replaces the text with the first suggestion.
+fn complete(state: &mut AppState) {
+    if let Some(first) = state.home.suggestions.first() {
+        state.home.input = first.chars().take(MAX_INPUT_CHARS).collect();
+        state.home.cursor = state.home.input.chars().count();
+    }
 }
 
 /// Handles an action while no field has focus.
@@ -88,11 +118,22 @@ pub fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
             state.home.editing = true;
         }
         Action::Enter => return submit(state),
+        Action::Favorite => return favorite_selected(state),
         Action::Down => move_selection(state, true),
         Action::Up => move_selection(state, false),
         _ => return crate::update::on_global_action(state, action),
     }
     Vec::new()
+}
+
+/// Toggles the favorite mark of the selected row and asks to save it.
+fn favorite_selected(state: &mut AppState) -> Vec<Command> {
+    let Some(target) = selected_row(state).cloned() else {
+        return Vec::new();
+    };
+    state.history.toggle_favorite(&target);
+    state.sync_history_lists();
+    vec![Command::SaveHistory(state.history.clone())]
 }
 
 fn move_selection(state: &mut AppState, down: bool) {
@@ -213,7 +254,15 @@ fn submit(state: &mut AppState) -> Vec<Command> {
         return Vec::new();
     }
     match (state.target_parser)(&text) {
-        Ok(target) => start_inspect(state, target),
+        Ok(target) => {
+            let now = (state.wall_clock)();
+            state.history.record(&text, now, state.history_max_entries);
+            state.sync_history_lists();
+            let mut commands = start_inspect(state, target);
+            commands.push(Command::SaveHistory(state.history.clone()));
+            refresh_suggestions(state);
+            commands
+        }
         Err(message) => {
             let toast = Toast::new(message, ToastKind::Error, state.now);
             state.set_toast(toast);
@@ -270,7 +319,129 @@ mod tests {
         assert_eq!(state.screen, Screen::Inspect);
         assert_eq!(state.inspect.as_ref().map(|i| i.job), Some(*id));
         assert!(state.jobs.is_active(*id));
+        // The inspection, then the history that now holds the target.
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(commands.get(1), Some(Command::SaveHistory(_))));
+    }
+
+    #[test]
+    fn quando_enter_deve_registrar_o_alvo_no_historico_e_emitir_save_history() {
+        let mut state = editing_state();
+        type_text(&mut state, "Example.com");
+        let commands = update(&mut state, key(KeyCode::Enter));
+        let Some(Command::SaveHistory(history)) = commands.get(1) else {
+            unreachable!("expected SaveHistory, got {commands:?}");
+        };
+        assert_eq!(history, &state.history);
+        assert_eq!(state.history.recents.len(), 1);
+        assert_eq!(
+            state.history.recents.first().map(|e| e.target.as_str()),
+            Some("Example.com")
+        );
+        assert_eq!(state.home.recents, ["Example.com"]);
+    }
+
+    #[test]
+    fn quando_alvo_invalido_nao_deve_registrar_no_historico() {
+        let mut state = editing_state();
+        type_text(&mut state, "ftp://example.com");
+        let commands = update(&mut state, key(KeyCode::Enter));
+        assert_eq!(commands, Vec::new());
+        assert_eq!(state.history.recents, []);
+    }
+
+    fn state_with_history() -> AppState {
+        let mut state = AppState::new(Instant::now());
+        let now = (state.wall_clock)();
+        for target in ["alpha.example", "alps.example", "beta.example"] {
+            state.history.record(target, now, 200);
+        }
+        state.history.toggle_favorite("alps.example");
+        state.sync_history_lists();
+        state
+    }
+
+    #[test]
+    fn quando_digita_prefixo_deve_sugerir_do_historico_e_favoritos() {
+        let mut state = state_with_history();
+        update(&mut state, key(KeyCode::Char('o')));
+        type_text(&mut state, "al");
+        assert_eq!(state.home.suggestions, ["alps.example", "alpha.example"]);
+        type_text(&mut state, "pha");
+        assert_eq!(state.home.suggestions, ["alpha.example"]);
+        for _ in 0..5 {
+            update(&mut state, key(KeyCode::Backspace));
+        }
+        assert_eq!(state.home.input, "");
+        assert_eq!(state.home.suggestions, Vec::<String>::new());
+    }
+
+    #[test]
+    fn quando_tab_com_sugestao_deve_completar_o_campo() {
+        let mut state = state_with_history();
+        update(&mut state, key(KeyCode::Char('o')));
+        type_text(&mut state, "be");
+        update(&mut state, key(KeyCode::Tab));
+        assert_eq!(state.home.input, "beta.example");
+        assert_eq!(state.home.cursor, "beta.example".chars().count());
+    }
+
+    #[test]
+    fn quando_esc_deve_limpar_as_sugestoes() {
+        let mut state = state_with_history();
+        update(&mut state, key(KeyCode::Char('o')));
+        type_text(&mut state, "al");
+        assert_ne!(state.home.suggestions, Vec::<String>::new());
+        update(&mut state, key(KeyCode::Esc));
+        assert_eq!(state.home.suggestions, Vec::<String>::new());
+    }
+
+    #[test]
+    fn quando_f_deve_favoritar_alvo_selecionado_e_emitir_save_history() {
+        let mut state = state_with_history();
+        // Rows: favorites first (alps), then recents (beta, alps, alpha).
+        update(&mut state, key(KeyCode::Down));
+        update(&mut state, key(KeyCode::Down));
+        assert_eq!(state.home.selected, Some(1));
+        let commands = update(&mut state, key(KeyCode::Char('f')));
+        let Some(Command::SaveHistory(history)) = commands.first() else {
+            unreachable!("expected SaveHistory, got {commands:?}");
+        };
+        assert!(history.is_favorite("beta.example"));
+        assert_eq!(history, &state.history);
+        assert_eq!(state.home.favorites, ["alps.example", "beta.example"]);
         assert_eq!(commands.len(), 1);
+    }
+
+    #[test]
+    fn quando_f_no_favorito_deve_desfavoritar() {
+        let mut state = state_with_history();
+        update(&mut state, key(KeyCode::Down));
+        assert_eq!(state.home.selected, Some(0));
+        let commands = update(&mut state, key(KeyCode::Char('f')));
+        assert!(matches!(commands.first(), Some(Command::SaveHistory(_))));
+        assert!(!state.history.is_favorite("alps.example"));
+        assert_eq!(state.home.favorites, Vec::<String>::new());
+    }
+
+    #[test]
+    fn quando_f_sem_selecao_nao_deve_emitir_nada() {
+        let mut state = state_with_history();
+        let commands = update(&mut state, key(KeyCode::Char('f')));
+        assert_eq!(commands, Vec::new());
+    }
+
+    #[test]
+    fn quando_save_history_falha_deve_mostrar_toast_e_manter_estado() {
+        let mut state = state_with_history();
+        let before = state.history.clone();
+        let commands = update(&mut state, Msg::HistorySaveFailed);
+        assert_eq!(commands, Vec::new());
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert_eq!(toast.text, "could not save history");
+        assert_eq!(state.history, before);
+        assert_eq!(state.home.recents.len(), 3);
     }
 
     #[test]

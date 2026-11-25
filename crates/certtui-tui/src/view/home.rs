@@ -38,6 +38,33 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(Paragraph::new(hint).style(theme.dim), hint_area);
 }
 
+/// The known targets that match what is typed, in place of the two lists.
+fn render_suggestions(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let items: Vec<ListItem> = state
+        .home
+        .suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let style = if i == 0 { theme.selected } else { theme.base };
+            let star = if state.history.is_favorite(row) {
+                "\u{2605} "
+            } else {
+                "  "
+            };
+            let text = format!("{star}{}", crate::text::display(row));
+            ListItem::new(Span::styled(text, style))
+        })
+        .collect();
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border)
+            .title(" Suggestions (Tab completes) "),
+    );
+    frame.render_widget(list, area);
+}
+
 fn render_input(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     let border = if state.home.editing {
         theme.title
@@ -70,6 +97,10 @@ fn render_input(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) 
 }
 
 fn render_lists(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
+    if !state.home.suggestions.is_empty() {
+        render_suggestions(state, frame, area, theme);
+        return;
+    }
     let [recents_area, favorites_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
     let favorites = state.home.favorites.len();

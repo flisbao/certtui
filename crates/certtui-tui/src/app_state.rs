@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use certtui_app::export::{ExportFormat, ExportSelection};
+use certtui_app::history::History;
 use certtui_domain::batch_row::BatchRow;
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{FingerprintFormat, InspectionReport};
 use certtui_domain::target::{NetworkTarget, Target};
+use certtui_domain::time::Timestamp;
 
 use zeroize::Zeroizing;
 
@@ -162,10 +164,12 @@ pub struct HomeState {
     pub cursor: usize,
     /// Whether keys type into `input` instead of acting as commands.
     pub editing: bool,
-    /// Recent targets (filled from the history in a later milestone).
+    /// Recent targets, newest first (a view of the history).
     pub recents: Vec<String>,
-    /// Favorite targets (filled from the history in a later milestone).
+    /// Favorite targets (a view of the history).
     pub favorites: Vec<String>,
+    /// Known targets that start with what is typed (Tab completes the first).
+    pub suggestions: Vec<String>,
     /// Selected row of the recents and favorites list.
     pub selected: Option<usize>,
 }
@@ -542,9 +546,37 @@ pub struct AppState {
     pub batch_loader: BatchLoader,
     /// Largest text a copy may put on the clipboard, in bytes.
     pub max_clipboard_bytes: usize,
+    /// Recent targets and favorites.
+    pub history: History,
+    /// Most recent targets the history keeps.
+    pub history_max_entries: usize,
+    /// The wall clock, injected so `update` stays deterministic.
+    pub wall_clock: WallClock,
+}
+
+/// Reads the wall clock for the history's timestamps.
+pub type WallClock = fn() -> Timestamp;
+
+/// Clock used when none is injected: the epoch.
+fn epoch() -> Timestamp {
+    Timestamp::from_unix_saturating(0)
 }
 
 impl AppState {
+    /// Refreshes the Home lists from the history, keeping the selection in
+    /// range.
+    pub fn sync_history_lists(&mut self) {
+        self.home.recents = self
+            .history
+            .recents
+            .iter()
+            .map(|entry| entry.target.clone())
+            .collect();
+        self.home.favorites = self.history.favorites.clone();
+        let rows = self.home.recents.len() + self.home.favorites.len();
+        self.home.selected = self.home.selected.filter(|&i| i < rows);
+    }
+
     /// Shows `toast` in place of any earlier one.
     pub fn set_toast(&mut self, toast: Toast) {
         self.toast = Some(toast);
@@ -571,6 +603,9 @@ impl AppState {
             target_parser: crate::update_home::default_target_parser,
             batch_loader: crate::update_home::default_batch_loader,
             max_clipboard_bytes: Limits::default().max_clipboard_bytes,
+            history: History::default(),
+            history_max_entries: Limits::default().history_entries,
+            wall_clock: epoch,
         }
     }
 }

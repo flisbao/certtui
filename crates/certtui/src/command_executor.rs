@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use certtui_app::batch::{BatchRunner, TargetInspector};
 use certtui_app::export::{FileWriter, WriteError, render_export};
+use certtui_app::history::{History, HistoryRepository};
 use certtui_app::keystore::SecretString;
 use certtui_domain::limits::Limits;
 use certtui_domain::model::InspectionReport;
@@ -43,6 +44,8 @@ pub struct CommandExecutor {
     batch_concurrency: usize,
     /// Token of every inspect job still running.
     jobs: Arc<Mutex<HashMap<JobId, CancellationToken>>>,
+    /// Where the history is saved; without one saving is a no-op.
+    history: Option<Arc<dyn HistoryRepository>>,
 }
 
 impl CommandExecutor {
@@ -62,7 +65,15 @@ impl CommandExecutor {
             writer,
             batch_concurrency: Limits::default().batch_concurrency,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            history: None,
         }
+    }
+
+    /// Saves the history to `repository` when the UI asks for it.
+    #[must_use]
+    pub fn with_history(mut self, repository: Arc<dyn HistoryRepository>) -> Self {
+        self.history = Some(repository);
+        self
     }
 
     /// Sets how many targets a batch inspects at once (at least 1, at most
@@ -87,6 +98,7 @@ impl CommandExecutor {
             Command::RunBatch { id, targets } => self.batch(id, targets, tx),
             Command::Export(request) => self.export(request, tx),
             Command::CancelJob(id) => self.cancel(id),
+            Command::SaveHistory(history) => self.save_history(history, tx),
             Command::CopyToClipboard(payload) => {
                 let clipboard = Arc::clone(&self.clipboard);
                 let timeout = self.clipboard_timeout;
@@ -108,6 +120,21 @@ impl CommandExecutor {
                 });
             }
         }
+    }
+
+    fn save_history(&self, history: History, tx: mpsc::Sender<Msg>) {
+        let Some(repository) = self.history.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            // The write touches the disk: off the async threads.
+            let saved = tokio::task::spawn_blocking(move || repository.save(&history))
+                .await
+                .is_ok_and(|result| result.is_ok());
+            if !saved {
+                let _ = tx.send(Msg::HistorySaveFailed).await;
+            }
+        });
     }
 
     fn export(&self, request: ExportRequest, tx: mpsc::Sender<Msg>) {
@@ -743,6 +770,82 @@ mod tests {
                 other => unreachable!("expected PasswordNeeded, got {other:?}"),
             }
         }
+    }
+
+    struct FakeHistoryRepo {
+        result: Result<(), certtui_app::history::HistoryError>,
+        saved: Mutex<Vec<certtui_app::history::History>>,
+    }
+
+    impl certtui_app::history::HistoryRepository for FakeHistoryRepo {
+        fn load(
+            &self,
+        ) -> Result<certtui_app::history::LoadedHistory, certtui_app::history::HistoryError>
+        {
+            Ok(certtui_app::history::LoadedHistory::default())
+        }
+
+        fn save(
+            &self,
+            history: &certtui_app::history::History,
+        ) -> Result<(), certtui_app::history::HistoryError> {
+            lock(&self.saved).push(history.clone());
+            self.result.clone()
+        }
+    }
+
+    fn history_executor(repo: Option<Arc<FakeHistoryRepo>>) -> CommandExecutor {
+        let exec = executor(
+            FakeInspector::new(Duration::ZERO, Err(InspectFailure::Message("x".to_owned()))),
+            sink(Ok(CopyMethod::Native), Duration::ZERO),
+            Duration::from_secs(1),
+        );
+        match repo {
+            Some(repo) => exec.with_history(repo),
+            None => exec,
+        }
+    }
+
+    fn one_favorite() -> certtui_app::history::History {
+        let mut history = certtui_app::history::History::default();
+        history.toggle_favorite("a.example");
+        history
+    }
+
+    #[tokio::test]
+    async fn quando_save_history_deve_gravar_no_repositorio_sem_mensagem() {
+        let repo = Arc::new(FakeHistoryRepo {
+            result: Ok(()),
+            saved: Mutex::new(Vec::new()),
+        });
+        let exec = history_executor(Some(Arc::clone(&repo)));
+        let (tx, mut rx) = mpsc::channel(8);
+        exec.run(Command::SaveHistory(one_favorite()), tx);
+        // The sender is dropped once the task ends: no message, channel closed.
+        assert!(rx.recv().await.is_none());
+        assert_eq!(*lock(&repo.saved), vec![one_favorite()]);
+    }
+
+    #[tokio::test]
+    async fn quando_save_history_falha_deve_devolver_history_save_failed() {
+        let repo = Arc::new(FakeHistoryRepo {
+            result: Err(certtui_app::history::HistoryError::Io(
+                "disk full".to_owned(),
+            )),
+            saved: Mutex::new(Vec::new()),
+        });
+        let exec = history_executor(Some(repo));
+        let (tx, mut rx) = mpsc::channel(8);
+        exec.run(Command::SaveHistory(one_favorite()), tx);
+        assert!(matches!(rx.recv().await, Some(Msg::HistorySaveFailed)));
+    }
+
+    #[tokio::test]
+    async fn quando_nao_ha_repositorio_deve_ignorar_save_history() {
+        let exec = history_executor(None);
+        let (tx, mut rx) = mpsc::channel(8);
+        exec.run(Command::SaveHistory(one_favorite()), tx);
+        assert!(rx.recv().await.is_none());
     }
 
     fn export_request(overwrite: certtui_app::export::Overwrite) -> ExportRequest {

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use certtui_app::batch::BatchEvent;
 use certtui_app::export::{ExportFormat, ExportSelection, Overwrite};
+use certtui_app::history::History;
 use certtui_app::keystore::{ExposeSecret, SecretString};
 use certtui_domain::model::InspectionReport;
 use certtui_domain::target::{NetworkTarget, Target};
@@ -141,6 +142,8 @@ pub enum Msg {
         /// Why, for the toast.
         reason: String,
     },
+    /// The history could not be written; the one in memory is intact.
+    HistorySaveFailed,
 }
 
 /// A side effect requested by [`crate::update`].
@@ -175,4 +178,6 @@ pub enum Command {
     CancelJob(JobId),
     /// Put text on the clipboard.
     CopyToClipboard(CopyPayload),
+    /// Write the history to disk.
+    SaveHistory(History),
 }

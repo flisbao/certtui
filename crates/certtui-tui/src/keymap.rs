@@ -101,7 +101,7 @@ impl Action {
             Action::NewTarget => "enter a new target",
             Action::Refresh => "inspect again (not yet)",
             Action::ToggleFingerprintFormat => "cycle fingerprint format",
-            Action::Favorite => "favorite the target (not yet)",
+            Action::Favorite => "favorite or unfavorite the selected target (Home)",
             Action::CopyFocused => "copy the field under the cursor (Batch: the row as TSV)",
             Action::CopyView => "copy the visible tab as text (Batch: the table as CSV)",
             Action::CopyPem => "copy the certificate as PEM",

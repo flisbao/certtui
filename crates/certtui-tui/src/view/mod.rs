@@ -117,6 +117,38 @@ mod tests {
         insta::assert_snapshot!(text(&render(&s, 80, 24)));
     }
 
+    fn state_with_history() -> crate::AppState {
+        let mut s = state();
+        let now = (s.wall_clock)();
+        for target in ["alpha.example", "beta.example:8443", "./certs/chain.pem"] {
+            s.history.record(target, now, 200);
+        }
+        s.history.toggle_favorite("alpha.example");
+        s.sync_history_lists();
+        s.home.selected = Some(1);
+        s
+    }
+
+    #[test]
+    fn quando_home_tem_historico_deve_bater_com_o_snapshot() {
+        let s = state_with_history();
+        let screen = text(&render(&s, 80, 24));
+        assert!(screen.contains("beta.example:8443"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn quando_digita_prefixo_deve_mostrar_sugestoes_no_snapshot() {
+        let mut s = state_with_history();
+        s.home.editing = true;
+        s.home.input = "al".to_owned();
+        s.home.cursor = 2;
+        s.home.suggestions = s.history.suggestions("al", 8);
+        let screen = text(&render(&s, 80, 24));
+        assert!(screen.contains("Suggestions"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
     #[test]
     fn quando_79x24_deve_mostrar_terminal_too_small() {
         let s = state();

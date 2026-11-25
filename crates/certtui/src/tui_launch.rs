@@ -8,8 +8,9 @@ use std::sync::Arc;
 use certtui_app::config::{Theme, UiConfig};
 use certtui_app::enrich::RevocationOptions;
 use certtui_app::error::LoadError;
+use certtui_app::history::HistoryRepository;
 use certtui_app::keystore::SecretString;
-use certtui_app::ports::{LoadedCerts, LocalSource, SourceLoader};
+use certtui_app::ports::{Clock as _, LoadedCerts, LocalSource, SourceLoader};
 use certtui_app::trust::TrustSource;
 use certtui_domain::limits::Limits;
 use certtui_domain::lint::Thresholds;
@@ -17,6 +18,7 @@ use certtui_domain::target::{NetworkTarget, Target};
 use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
 use certtui_infra::clock::SystemClock;
+use certtui_infra::history::FileHistoryRepository;
 use certtui_infra::source::FsSourceLoader;
 use certtui_infra::tls::RustlsChainFetcher;
 use certtui_infra::trust::NativeTrustProvider;
@@ -141,6 +143,10 @@ impl TuiLauncher for ProcessLauncher {
                 limits,
                 target_parser: parse_for_tui,
                 batch_loader: crate::cli::load_batch_list,
+                history: certtui_infra::paths::history_path().map(|path| {
+                    Arc::new(FileHistoryRepository::new(path)) as Arc<dyn HistoryRepository>
+                }),
+                wall_clock: || SystemClock.now(),
             },
             Arc::new(inspector),
             Arc::new(AtomicFileWriter),

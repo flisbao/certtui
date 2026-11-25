@@ -8,6 +8,9 @@ pub mod clock;
 /// Reading the configuration file.
 pub mod config;
 
+/// The history file: recents and favorites.
+pub mod history;
+
 /// The environment variables the adapters read.
 pub mod env;
 

@@ -20,6 +20,8 @@ pub mod export;
 
 pub mod fetch;
 
+pub mod history;
+
 pub mod http;
 
 pub mod inspect;

@@ -17,7 +17,7 @@ expression: "text(&render_state(&s, 80, 24))"
 ││  b             inspect a list of targets from a file (Home)                ││
 ││  r             inspect again (not yet)                                     ││
 ││  x             cycle fingerprint format                                    ││
-││  f             favorite the target (not yet)                               ││
+││  f             favorite or unfavorite the selected target (Home)           ││
 ││  /             filter rows (Batch)                                         ││
 ││  s             sort by the next column (Batch)                             ││
 ││  S             reverse the order (Batch)                                   ││

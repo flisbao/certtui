@@ -74,6 +74,11 @@ pub fn update(state: &mut AppState, msg: Msg) -> Vec<Command> {
             state.set_toast(toast);
             Vec::new()
         }
+        Msg::HistorySaveFailed => {
+            let toast = Toast::new("could not save history", ToastKind::Error, state.now);
+            state.set_toast(toast);
+            Vec::new()
+        }
     }
 }
 
