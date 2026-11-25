@@ -234,6 +234,16 @@ def main():
         "ocsp-unauthorized.der": bytes([0x30, 0x03, 0x0A, 0x01, 0x06]),
     }
 
+    # Cadeia de 3: folha -> intermediária -> `ca`; ambas com AIA/CRL DP.
+    int_key = new_key()
+    inter = build_cert(
+        "CertTui Intermediate CA", int_key, ca, ca_key, 0x4001, ca=True,
+        extra=[(x509.KeyUsage(False, False, False, False, False, True, True, False, False), True)] + leaf_extras("intermediate.example.test"),
+    )
+    leaf_int = build_cert("leaf-int.example.test", new_key(), inter, int_key, 0x4002, extra=leaf_extras("leaf-int.example.test"))
+    write_cert("intermediate", inter)
+    write_cert("leaf-int", leaf_int)
+
     # CA cujo keyUsage não tem cRLSign, com uma folha e uma CRL assinadas por ela.
     ca2_key = new_key()
     ca2 = build_cert(

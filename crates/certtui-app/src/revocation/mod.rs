@@ -2,6 +2,11 @@
 
 pub mod cache;
 pub mod protocol;
+pub mod service;
 
 pub use cache::{CacheKey, CachedItem, CachedPayload, RevocationCache};
 pub use protocol::{OcspRequest, RevocationError, RevocationProtocol};
+pub use service::{
+    REVOCATION_PARALLELISM, RevocationOutcome, RevocationScope, RevocationService, StapleState,
+    check_revocation,
+};

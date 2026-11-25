@@ -43,6 +43,8 @@ SHA-1, como manda o RFC 6960 (só identificação).
 | `leaf-unknown` | serial `0x1003`, mesmas extensões |
 | `responder` | responder delegado, assinado pela CA, EKU `OCSPSigning` |
 | `responder-noeku` | responder delegado, assinado pela CA, **sem** EKU |
+| `intermediate` | CA intermediária (serial `0x4001`) emitida pela `ca`, com AIA/CRL DP e `cRLSign` |
+| `leaf-int` | folha `0x4002` emitida pela `intermediate`, com AIA/CRL DP (cadeia de 3: `leaf-int`, `intermediate`, `ca`) |
 | `ca-no-crlsign` | segunda CA (serial 2) cujo `keyUsage` tem só `keyCertSign` (sem `cRLSign`) |
 | `leaf-no-crlsign` | folha `0x3001` emitida por `ca-no-crlsign`, com os mesmos CRL DP/AIA |
 | `leaf-forged` | serial `0x1002`, **issuer name = o da `ca`**, mas assinada por outra chave (não foi emitida pela `ca`) |

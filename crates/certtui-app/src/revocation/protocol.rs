@@ -124,15 +124,15 @@ mod tests {
 
     #[test]
     fn quando_fake_e_usado_como_dyn_deve_devolver_os_resultados_prontos() {
-        let fake = FakeRevocationProtocol {
-            request: Ok(OcspRequest {
+        let fake = FakeRevocationProtocol::new(
+            Ok(OcspRequest {
                 body: vec![1],
                 get_url_suffix: "AQ==".to_owned(),
                 cache_key: (vec![2], vec![3]),
             }),
-            ocsp: Ok(RevocationStatus::Good),
-            crl: Err(RevocationError::Stale),
-        };
+            Ok(RevocationStatus::Good),
+            Err(RevocationError::Stale),
+        );
         let proto: &dyn RevocationProtocol = &fake;
 
         let req = proto.build_ocsp_request(b"c", b"i").unwrap();

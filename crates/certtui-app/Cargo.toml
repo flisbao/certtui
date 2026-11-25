@@ -19,7 +19,7 @@ tokio-util = { version = "0.7.20", default-features = false }
 [dev-dependencies]
 proptest = "1.12.0"
 rcgen = "0.14"
-tokio = { version = "1.54.1", features = ["macros", "rt"] }
+tokio = { version = "1.54.1", features = ["macros", "rt", "time"] }
 
 [features]
 # Exposes test doubles (e.g. `FixedClock`) to downstream crates' tests.
