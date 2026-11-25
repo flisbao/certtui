@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use certtui_app::export::FileWriter;
 use certtui_domain::limits::Limits;
-use certtui_domain::target::Target;
-use certtui_tui::app_state::TargetParser;
+use certtui_domain::target::{NetworkTarget, Target};
+use certtui_tui::app_state::{BatchLoader, TargetParser};
 use certtui_tui::clipboard::{ClipboardStrategy, EnvView, FallbackSink, build_sinks};
 use certtui_tui::{
     AppState, Command, Msg, TerminalGuard, ThemeKind, install_panic_hook, install_signal_restore,
-    start_inspect, update, view,
+    start_batch, start_inspect, update, view,
 };
 use crossterm::event::{Event, KeyEventKind};
 use futures_util::{Stream, StreamExt as _};
@@ -40,6 +40,8 @@ pub const CHANNEL_CAPACITY: usize = 256;
 pub struct TuiOptions {
     /// A target to inspect at once; `None` opens the Home screen.
     pub initial: Option<Target>,
+    /// A batch to run at once, instead of `initial`.
+    pub initial_batch: Option<Vec<NetworkTarget>>,
     /// Colors; `NO_COLOR` is applied by the caller.
     pub theme: ThemeKind,
     /// Which clipboard methods to use.
@@ -48,6 +50,8 @@ pub struct TuiOptions {
     pub limits: Limits,
     /// How text typed on Home becomes a target.
     pub target_parser: TargetParser,
+    /// How the path typed for a batch on Home becomes its targets.
+    pub batch_loader: BatchLoader,
 }
 
 /// Runs the TUI until the user quits.
@@ -82,6 +86,7 @@ pub fn run(
         state.theme = options.theme;
         state.size = (columns, rows);
         state.target_parser = options.target_parser;
+        state.batch_loader = options.batch_loader;
         state.max_clipboard_bytes = options.limits.max_clipboard_bytes;
         let (msg_tx, msgs) = mpsc::channel(CHANNEL_CAPACITY);
         let executor = CommandExecutor::new(
@@ -90,7 +95,11 @@ pub fn run(
             options.limits.clipboard_timeout,
             writer,
         );
-        if let Some(target) = options.initial {
+        if let Some(targets) = options.initial_batch {
+            for command in start_batch(&mut state, targets) {
+                executor.run(command, msg_tx.clone());
+            }
+        } else if let Some(target) = options.initial {
             for command in start_inspect(&mut state, target) {
                 executor.run(command, msg_tx.clone());
             }

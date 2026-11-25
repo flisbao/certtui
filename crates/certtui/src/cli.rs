@@ -38,7 +38,7 @@ use crate::target_parse::{local_source, parse_target};
 use crate::tui_launch::{InspectorOptions, TuiLauncher, TuiRequest};
 
 mod batch;
-pub use batch::BatchArgs;
+pub use batch::{BatchArgs, load_batch_list};
 
 /// Inspect and analyze X.509 certificates.
 #[derive(Debug, Parser)]
@@ -667,19 +667,28 @@ fn open_tui(
     let request = TuiRequest {
         target,
         stdin,
-        options: InspectorOptions {
-            sni: network_options.sni.clone(),
-            connect_to: network_options.connect_to,
-            timeout: network_options.timeout,
-            trust_sources: trust_options.sources.clone(),
-            ca_files: trust_options.ca_files.clone(),
-            host_check: trust_options.host_check.clone(),
-            revocation: trust_options.revocation,
-            password: trust_options.password.clone(),
-        },
+        batch: None,
+        options: inspector_options(network_options, trust_options),
     };
     env.tui.launch(request)?;
     Ok(ExitCode::Ok)
+}
+
+/// The command line options an inspection inside the TUI honors.
+fn inspector_options(
+    network_options: &NetworkOptions,
+    trust_options: &TrustOptions,
+) -> InspectorOptions {
+    InspectorOptions {
+        sni: network_options.sni.clone(),
+        connect_to: network_options.connect_to,
+        timeout: network_options.timeout,
+        trust_sources: trust_options.sources.clone(),
+        ca_files: trust_options.ca_files.clone(),
+        host_check: trust_options.host_check.clone(),
+        revocation: trust_options.revocation,
+        password: trust_options.password.clone(),
+    }
 }
 
 fn inspect(
@@ -1939,6 +1948,79 @@ mod tests {
     fn quando_subcomando_inspect_deve_continuar_sem_abrir_a_tui() {
         let launcher = FakeLauncher::new(true);
         let (_, _, _) = run_tui(&launcher, &no_files(), &["inspect", "x.pem"]);
+        assert!(launcher.requests().is_empty());
+    }
+
+    /// A list file in a scratch directory, removed when dropped.
+    struct ListFile(PathBuf);
+
+    impl ListFile {
+        fn new(tag: &str, content: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "certtui-batch-unit-{tag}-{}.txt",
+                std::process::id()
+            ));
+            std::fs::write(&path, content).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for ListFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn quando_batch_com_terminal_e_sem_flag_deve_abrir_a_tui_com_a_lista() {
+        let list = ListFile::new("tty", "a.test\nb.test:8443\n# c\na.test\n");
+        let launcher = FakeLauncher::new(true);
+        let (code, out, err) = run_tui(&launcher, &no_files(), &["batch", list.path()]);
+        assert_eq!((code, out.as_str(), err.as_str()), (ExitCode::Ok, "", ""));
+        let request = launcher.requests().remove(0);
+        assert_eq!(request.target, None);
+        let hosts: Vec<(String, u16)> = request
+            .batch
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.host, t.port))
+            .collect();
+        assert_eq!(
+            hosts,
+            [("a.test".to_owned(), 443), ("b.test".to_owned(), 8443)]
+        );
+    }
+
+    #[test]
+    fn quando_batch_com_terminal_e_json_deve_continuar_headless() {
+        let list = ListFile::new("tty-json", "a.test\n");
+        let launcher = FakeLauncher::new(true);
+        let (code, out, _) = run_tui(&launcher, &no_files(), &["batch", list.path(), "--json"]);
+        assert_eq!(code, ExitCode::Input, "the fake fetcher fails every target");
+        assert!(out.contains("\"schema_version\""), "{out}");
+        assert!(launcher.requests().is_empty());
+    }
+
+    #[test]
+    fn quando_batch_sem_terminal_e_sem_flag_deve_cair_em_json() {
+        let list = ListFile::new("notty", "a.test\n");
+        let launcher = FakeLauncher::new(false);
+        let (_, out, _) = run_tui(&launcher, &no_files(), &["batch", list.path()]);
+        assert!(out.contains("\"schema_version\""), "{out}");
+        assert!(launcher.requests().is_empty());
+    }
+
+    #[test]
+    fn quando_batch_com_terminal_e_lista_vazia_deve_sair_2_sem_abrir_a_tui() {
+        let list = ListFile::new("tty-empty", "# nothing\n");
+        let launcher = FakeLauncher::new(true);
+        let (code, _, err) = run_tui(&launcher, &no_files(), &["batch", list.path()]);
+        assert_eq!(code, ExitCode::Usage);
+        assert!(err.contains("no targets"), "{err}");
         assert!(launcher.requests().is_empty());
     }
 }

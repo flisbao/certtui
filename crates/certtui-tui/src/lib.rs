@@ -24,8 +24,8 @@ pub mod update_modal;
 pub mod view;
 
 pub use app_state::{
-    AppState, BatchPhase, BatchState, HomeState, InspectState, JobId, JobTracker, Modal, Pane,
-    Phase, Screen, SortKey, Tab,
+    AppState, BatchLoader, BatchPhase, BatchState, HomeMode, HomeState, InspectState, JobId,
+    JobTracker, Modal, Pane, Phase, Screen, SortKey, Tab,
 };
 pub use keymap::{Action, HelpEntry, Keymap};
 pub use msg::{Command, ExportFailure, ExportRequest, InspectFailure, Msg, Password};

@@ -14,6 +14,7 @@ expression: "text(&render_state(&s, 80, 24))"
 ││  Enter         open / confirm                                              ││
 ││  Esc           back, cancel, stop typing                                   ││
 ││  o             enter a new target                                          ││
+││  b             inspect a list of targets from a file (Home)                ││
 ││  r             inspect again (not yet)                                     ││
 ││  x             cycle fingerprint format                                    ││
 ││  f             favorite the target (not yet)                               ││
@@ -23,6 +24,5 @@ expression: "text(&render_state(&s, 80, 24))"
 ││  e             export to a file                                            ││
 ││  y             copy the field under the cursor (Batch: the row as TSV)     ││
 ││  Y             copy the visible tab as text (Batch: the table as CSV)      ││
-││  c             copy the certificate as PEM                                 ││
 │└────────────────────────────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────────────────┘

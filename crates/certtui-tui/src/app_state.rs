@@ -141,9 +141,21 @@ impl Modal {
     }
 }
 
+/// What the Home input field asks for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HomeMode {
+    /// A target to inspect.
+    #[default]
+    Target,
+    /// The path of a file listing the targets of a batch.
+    BatchFile,
+}
+
 /// State of the Home screen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HomeState {
+    /// What `input` is being typed for.
+    pub mode: HomeMode,
     /// Text typed so far.
     pub input: String,
     /// Cursor position inside `input`, in characters.
@@ -487,6 +499,12 @@ impl JobTracker {
 /// Injected so `update` stays free of file system access.
 pub type TargetParser = fn(&str) -> Result<Target, String>;
 
+/// Reads the list of targets of a batch from the file at the given path, or
+/// says why it cannot.
+///
+/// Injected so `update` stays free of file system access.
+pub type BatchLoader = fn(&str) -> Result<Vec<NetworkTarget>, String>;
+
 /// Everything the views draw and `update` changes.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -520,6 +538,8 @@ pub struct AppState {
     pub should_quit: bool,
     /// How text typed on Home becomes a target.
     pub target_parser: TargetParser,
+    /// How the path typed for a batch becomes its targets.
+    pub batch_loader: BatchLoader,
     /// Largest text a copy may put on the clipboard, in bytes.
     pub max_clipboard_bytes: usize,
 }
@@ -549,6 +569,7 @@ impl AppState {
             now,
             should_quit: false,
             target_parser: crate::update_home::default_target_parser,
+            batch_loader: crate::update_home::default_batch_loader,
             max_clipboard_bytes: Limits::default().max_clipboard_bytes,
         }
     }

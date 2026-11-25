@@ -51,11 +51,13 @@ pub enum Action {
     Sort,
     /// Reverse the order of the rows.
     ReverseSort,
+    /// Open a batch from a file listing targets.
+    OpenBatch,
 }
 
 impl Action {
     /// Every action, in the order the help lists them.
-    pub const ALL: [Action; 23] = [
+    pub const ALL: [Action; 24] = [
         Action::Down,
         Action::Up,
         Action::NextPane,
@@ -65,6 +67,7 @@ impl Action {
         Action::Enter,
         Action::Back,
         Action::NewTarget,
+        Action::OpenBatch,
         Action::Refresh,
         Action::ToggleFingerprintFormat,
         Action::Favorite,
@@ -108,6 +111,7 @@ impl Action {
             Action::Filter => "filter rows (Batch)",
             Action::Sort => "sort by the next column (Batch)",
             Action::ReverseSort => "reverse the order (Batch)",
+            Action::OpenBatch => "inspect a list of targets from a file (Home)",
         }
     }
 }
@@ -150,6 +154,7 @@ impl Keymap {
             (KeyCode::Char(']'), Action::NextTab),
             (KeyCode::Char('/'), Action::Filter),
             (KeyCode::Char('o'), Action::NewTarget),
+            (KeyCode::Char('b'), Action::OpenBatch),
             (KeyCode::Char('r'), Action::Refresh),
             (KeyCode::Char('e'), Action::Export),
             (KeyCode::Char('x'), Action::ToggleFingerprintFormat),

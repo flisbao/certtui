@@ -330,3 +330,12 @@ fn quando_sni_ou_connect_to_deve_sair_2() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(stderr(&out).contains("--sni"), "{}", stderr(&out));
 }
+
+#[test]
+fn quando_batch_sem_tty_e_sem_flag_deve_cair_em_json() {
+    let fixture = Fixture::start(vec![Behavior::Ok], "notty");
+    let list = fixture.list(&[fixture.target(0)]);
+    let out = fixture.batch(&list, &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(json(&out)["schema_version"], 1);
+}

@@ -5,10 +5,11 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, HomeMode};
 use crate::theme::Theme;
 
 const PLACEHOLDER: &str = "host[:port], https://host, a file or directory, or - for stdin";
+const BATCH_PLACEHOLDER: &str = "path of a file with one target per line, or a JSON array";
 
 /// Draws the Home screen.
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -29,10 +30,10 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
 
     render_input(state, frame, input_area, theme);
     render_lists(state, frame, lists_area, theme);
-    let hint = if state.home.editing {
-        "Enter inspect · Esc stop typing"
-    } else {
-        "o new target · Enter inspect · ? help · q quit"
+    let hint = match (state.home.editing, state.home.mode) {
+        (true, HomeMode::BatchFile) => "Enter open the list · Esc stop typing",
+        (true, HomeMode::Target) => "Enter inspect · Esc stop typing",
+        (false, _) => "o new target · b batch list · Enter inspect · ? help · q quit",
     };
     frame.render_widget(Paragraph::new(hint).style(theme.dim), hint_area);
 }
@@ -43,12 +44,16 @@ fn render_input(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) 
     } else {
         theme.border
     };
+    let (title, placeholder) = match state.home.mode {
+        HomeMode::Target => (" Target ", PLACEHOLDER),
+        HomeMode::BatchFile => (" Batch list file ", BATCH_PLACEHOLDER),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)
-        .title(" Target ");
+        .title(title);
     let line = if state.home.input.is_empty() {
-        Line::from(Span::styled(PLACEHOLDER, theme.dim))
+        Line::from(Span::styled(placeholder, theme.dim))
     } else {
         Line::from(Span::styled(state.home.input.as_str(), theme.base))
     };

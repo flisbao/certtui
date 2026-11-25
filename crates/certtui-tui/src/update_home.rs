@@ -1,10 +1,10 @@
 //! Keys and pastes on the Home screen.
 
-use certtui_domain::target::Target;
+use certtui_domain::target::{NetworkTarget, Target};
 use certtui_domain::target_parse::parse_network_target;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::app_state::{AppState, InspectState, Screen};
+use crate::app_state::{AppState, HomeMode, InspectState, Screen};
 use crate::keymap::Action;
 use crate::msg::Command;
 use crate::toast::{Toast, ToastKind};
@@ -27,6 +27,16 @@ pub fn default_target_parser(text: &str) -> Result<Target, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Loader used when none is injected: a build without a file system cannot
+/// read a list. The binary injects one that can.
+///
+/// # Errors
+///
+/// Always.
+pub fn default_batch_loader(_path: &str) -> Result<Vec<NetworkTarget>, String> {
+    Err("this build cannot read a list of targets".to_owned())
+}
+
 /// Handles a key while the target field has focus; `None` when the key is
 /// not an editing key and should go through the keymap.
 pub fn on_edit_key(state: &mut AppState, key: KeyEvent) -> Option<Vec<Command>> {
@@ -39,7 +49,7 @@ pub fn on_edit_key(state: &mut AppState, key: KeyEvent) -> Option<Vec<Command>> 
     match key.code {
         KeyCode::Char(c) if !ctrl_or_alt => insert(state, c),
         KeyCode::Enter => return Some(submit(state)),
-        KeyCode::Esc => state.home.editing = false,
+        KeyCode::Esc => stop_editing(state),
         KeyCode::Backspace => backspace(state),
         KeyCode::Delete => delete(state),
         KeyCode::Left => state.home.cursor = state.home.cursor.saturating_sub(1),
@@ -67,8 +77,15 @@ pub fn on_paste(state: &mut AppState, text: &str) {
 pub fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
     match action {
         Action::NewTarget => {
+            state.home.mode = HomeMode::Target;
             state.home.editing = true;
             state.home.cursor = state.home.input.chars().count();
+        }
+        Action::OpenBatch => {
+            state.home.mode = HomeMode::BatchFile;
+            state.home.input.clear();
+            state.home.cursor = 0;
+            state.home.editing = true;
         }
         Action::Enter => return submit(state),
         Action::Down => move_selection(state, true),
@@ -146,7 +163,47 @@ pub fn start_inspect(state: &mut AppState, target: Target) -> Vec<Command> {
     vec![Command::Inspect { id, target }]
 }
 
+/// Leaves the field; a path typed for a batch does not stay behind as a
+/// target.
+fn stop_editing(state: &mut AppState) {
+    state.home.editing = false;
+    if state.home.mode == HomeMode::BatchFile {
+        state.home.mode = HomeMode::Target;
+        state.home.input.clear();
+        state.home.cursor = 0;
+    }
+}
+
+/// Reads the list named in the field and opens the batch, or says why not.
+fn submit_batch(state: &mut AppState) -> Vec<Command> {
+    let path = state.home.input.trim().to_owned();
+    if path.is_empty() {
+        return Vec::new();
+    }
+    let loaded = (state.batch_loader)(&path).and_then(|targets| {
+        if targets.is_empty() {
+            Err("no targets in the list".to_owned())
+        } else {
+            Ok(targets)
+        }
+    });
+    match loaded {
+        Ok(targets) => {
+            stop_editing(state);
+            crate::update_batch::start_batch(state, targets)
+        }
+        Err(message) => {
+            let toast = Toast::new(message, ToastKind::Error, state.now);
+            state.set_toast(toast);
+            Vec::new()
+        }
+    }
+}
+
 fn submit(state: &mut AppState) -> Vec<Command> {
+    if state.home.mode == HomeMode::BatchFile {
+        return submit_batch(state);
+    }
     let text = if state.home.input.trim().is_empty() {
         selected_row(state).cloned().unwrap_or_default()
     } else {
@@ -297,5 +354,144 @@ mod tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use std::time::Instant;
+
+    use certtui_domain::target::NetworkTarget;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+    use crate::app_state::HomeMode;
+    use crate::msg::Msg;
+    use crate::update::update;
+
+    fn key(code: KeyCode) -> Msg {
+        Msg::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn type_text(state: &mut AppState, text: &str) {
+        for c in text.chars() {
+            update(state, key(KeyCode::Char(c)));
+        }
+    }
+
+    fn target(host: &str) -> NetworkTarget {
+        NetworkTarget {
+            host: host.to_owned(),
+            port: 443,
+            sni: None,
+            connect_to: None,
+        }
+    }
+
+    fn fake_loader(path: &str) -> Result<Vec<NetworkTarget>, String> {
+        match path {
+            "list.txt" => Ok(vec![target("a.test"), target("b.test")]),
+            "empty.txt" => Ok(Vec::new()),
+            _ => Err(format!("cannot read {path}")),
+        }
+    }
+
+    fn state() -> AppState {
+        let mut state = AppState::new(Instant::now());
+        state.batch_loader = fake_loader;
+        state
+    }
+
+    #[test]
+    fn quando_b_na_home_e_caminho_valido_deve_emitir_run_batch() {
+        let mut state = state();
+        update(&mut state, key(KeyCode::Char('b')));
+        assert!(state.home.editing);
+        assert_eq!(state.home.mode, HomeMode::BatchFile);
+        type_text(&mut state, "list.txt");
+        let commands = update(&mut state, key(KeyCode::Enter));
+        assert_eq!(state.screen, Screen::Batch);
+        let job = state.batch.as_ref().unwrap().job;
+        assert_eq!(
+            commands,
+            vec![Command::RunBatch {
+                id: job,
+                targets: vec![target("a.test"), target("b.test")]
+            }]
+        );
+        assert!(!state.home.editing);
+        assert_eq!(state.home.mode, HomeMode::Target);
+    }
+
+    #[test]
+    fn quando_caminho_invalido_deve_mostrar_toast() {
+        let mut state = state();
+        update(&mut state, key(KeyCode::Char('b')));
+        type_text(&mut state, "missing.txt");
+        let commands = update(&mut state, key(KeyCode::Enter));
+        assert_eq!(commands, Vec::new());
+        assert_eq!(state.screen, Screen::Home);
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast.text.contains("cannot read missing.txt"),
+            "{}",
+            toast.text
+        );
+        assert!(state.home.editing, "the user can fix the path");
+    }
+
+    #[test]
+    fn quando_lista_sem_alvos_deve_mostrar_toast_e_nao_abrir_batch() {
+        let mut state = state();
+        update(&mut state, key(KeyCode::Char('b')));
+        type_text(&mut state, "empty.txt");
+        let commands = update(&mut state, key(KeyCode::Enter));
+        assert_eq!(commands, Vec::new());
+        assert_eq!(state.screen, Screen::Home);
+        assert!(state.toast.as_ref().unwrap().text.contains("no targets"));
+    }
+
+    #[test]
+    fn quando_b_e_esc_deve_voltar_ao_modo_alvo_e_limpar_o_campo() {
+        let mut state = state();
+        update(&mut state, key(KeyCode::Char('b')));
+        type_text(&mut state, "list");
+        update(&mut state, key(KeyCode::Esc));
+        assert!(!state.home.editing);
+        assert_eq!(state.home.mode, HomeMode::Target);
+        assert_eq!(state.home.input, "");
+    }
+
+    #[test]
+    fn quando_b_depois_de_digitar_alvo_deve_comecar_com_o_campo_vazio() {
+        let mut state = state();
+        update(&mut state, key(KeyCode::Char('o')));
+        type_text(&mut state, "example.com");
+        update(&mut state, key(KeyCode::Esc));
+        update(&mut state, key(KeyCode::Char('b')));
+        assert_eq!(state.home.input, "");
+        update(&mut state, key(KeyCode::Esc));
+    }
+
+    #[test]
+    fn quando_b_deve_mostrar_o_campo_da_lista_e_a_dica() {
+        use crate::view::test_support::{render, text};
+
+        let mut state = state();
+        update(&mut state, key(KeyCode::Char('b')));
+        let screen = text(&render(&state, 80, 24));
+        assert!(screen.contains("Batch list file"), "{screen}");
+        assert!(screen.contains("one target per line"), "{screen}");
+        assert!(screen.contains("Enter open the list"), "{screen}");
+    }
+
+    #[test]
+    fn quando_b_no_modo_digitacao_deve_ser_texto_e_nao_comando() {
+        let mut state = state();
+        update(&mut state, key(KeyCode::Char('o')));
+        update(&mut state, key(KeyCode::Char('b')));
+        assert_eq!(state.home.mode, HomeMode::Target);
+        assert_eq!(state.home.input, "b");
     }
 }

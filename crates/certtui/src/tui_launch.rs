@@ -12,7 +12,7 @@ use certtui_app::keystore::SecretString;
 use certtui_app::ports::{LoadedCerts, LocalSource, SourceLoader};
 use certtui_app::trust::TrustSource;
 use certtui_domain::limits::Limits;
-use certtui_domain::target::Target;
+use certtui_domain::target::{NetworkTarget, Target};
 use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
 use certtui_infra::clock::SystemClock;
@@ -56,6 +56,8 @@ pub struct TuiRequest {
     pub target: Option<Target>,
     /// Standard input, read before the terminal entered raw mode.
     pub stdin: Option<LoadedCerts>,
+    /// The targets of a batch to run at once; `target` is `None` then.
+    pub batch: Option<Vec<NetworkTarget>>,
     /// The options of the command line.
     pub options: InspectorOptions,
 }
@@ -114,6 +116,7 @@ impl TuiLauncher for ProcessLauncher {
         tui_runner::run(
             TuiOptions {
                 initial: request.target,
+                initial_batch: request.batch,
                 theme: if no_color {
                     ThemeKind::Mono
                 } else {
@@ -122,6 +125,7 @@ impl TuiLauncher for ProcessLauncher {
                 clipboard: ClipboardStrategy::default(),
                 limits: Limits::default(),
                 target_parser: parse_for_tui,
+                batch_loader: crate::cli::load_batch_list,
             },
             Arc::new(inspector),
             Arc::new(AtomicFileWriter),

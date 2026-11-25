@@ -22,12 +22,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Env, FailOnArg, NetworkOptions, TrustOptions, load_anchors, usage, validate_for_target,
+    Env, FailOnArg, NetworkOptions, TrustOptions, inspector_options, load_anchors, usage,
+    validate_for_target,
 };
 use crate::exit_code::ExitCode;
 use crate::network_args::with_timeout;
 use crate::output;
 use crate::runtime;
+use crate::tui_launch::TuiRequest;
 
 /// Capacity of the channel between the runner and the collector.
 const CHANNEL_CAPACITY: usize = 256;
@@ -110,6 +112,17 @@ pub fn run(
     if input.targets.is_empty() {
         return usage(err, "no targets in the list");
     }
+    if !args.json && !args.csv && env.tui.is_interactive() {
+        // The screen takes over: the list is read already, the terminal is
+        // free for keys.
+        env.tui.launch(TuiRequest {
+            target: None,
+            stdin: None,
+            batch: Some(input.targets),
+            options: inspector_options(network_options, trust_options),
+        })?;
+        return Ok(ExitCode::Ok);
+    }
     let anchors = match load_anchors(trust_options, env, err)? {
         Ok(anchors) => anchors,
         Err(code) => return Ok(code),
@@ -181,6 +194,23 @@ fn read_list(path: &str, limit: usize) -> std::io::Result<Vec<u8>> {
         .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+/// The targets of the list in the file at `path`, for the Home screen: the
+/// lines that are not targets are left out, and the reason a list cannot be
+/// used is one line fit for a toast.
+///
+/// # Errors
+///
+/// The file cannot be read, is too large or malformed, or has too many
+/// targets.
+pub fn load_batch_list(path: &str) -> Result<Vec<NetworkTarget>, String> {
+    let limits = Limits::default();
+    let bytes = read_list(path, limits.max_input_file_bytes)
+        .map_err(|error| output::single_line(&format!("cannot read the list: {error}")))?;
+    parse_batch_input(&bytes, &limits)
+        .map(|input| input.targets)
+        .map_err(|error| output::single_line(&error.to_string()))
 }
 
 fn warn_skipped(err: &mut dyn Write, entry: &SkippedLine) -> anyhow::Result<()> {
