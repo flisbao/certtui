@@ -1,5 +1,7 @@
 //! Domain layer: pure certificate types and rules, no I/O.
 
+pub mod batch_input;
+
 pub mod chain_analysis;
 
 pub mod error;
