@@ -14,8 +14,8 @@ use thiserror::Error;
 pub struct OcspRequest {
     /// DER of the `OCSPRequest`, for a POST body.
     pub body: Vec<u8>,
-    /// Base64url (padding kept, as RFC 6960 appendix A allows) of the request,
-    /// to be appended to the responder URL for a GET.
+    /// Base64 of the request, percent-encoded (`+`, `/`, `=`) as RFC 6960
+    /// appendix A.1 requires, to be appended to the responder URL for a GET.
     pub get_url_suffix: String,
     /// `(issuer_key_hash, serial)`: the identity of the question, used as the
     /// cache key.

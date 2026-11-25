@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
+base64 = "0.23.1"
 certtui-app = { path = "../certtui-app" }
 certtui-domain = { path = "../certtui-domain" }
 cms = { version = "0.2.3", features = ["std"] }
@@ -19,6 +20,8 @@ der = { version = "0.7.10", features = ["std"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.5"
+sha1 = "0.11.0"
+sha2 = "0.11.1"
 rustls-pki-types = { version = "1.16.0", features = ["std"] }
 webpki = { package = "rustls-webpki", version = "0.103.17", default-features = false, features = ["ring", "std"] }
 # Runtime pieces the fetcher needs: TCP/DNS (`net`), timeouts (`time`), async
@@ -29,6 +32,10 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 # `CancellationToken` of the `ChainFetcher` port (same version as `certtui-app`).
 tokio-util = { version = "0.7.20", default-features = false }
 webpki-roots = "1.0.12"
+# OCSP wire format (RFC 6960), no `builder` feature: requests are encoded by hand.
+x509-ocsp = { version = "0.2.1", default-features = false, features = ["std"] }
+# `verify` checks OCSP/CRL/delegated-responder signatures (ring provider, already in the tree).
+x509-parser = { version = "0.18.1", features = ["verify"] }
 
 [dev-dependencies]
 rcgen = "0.14"
