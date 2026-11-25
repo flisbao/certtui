@@ -1,0 +1,54 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' (cargo-dist), PINNED to 0.33.1: 0.34.0 generates an invalid
+# `uses: $/.github/workflows/...` for custom jobs. `.github/workflows/release.yml` is GENERATED from
+# this file: never edit it by hand, run `dist generate` after changing anything here
+# (`dist generate --check` verifies it; the release workflow also runs `dist plan` on
+# every pull request).
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.33.1"
+# CI backends to support
+ci = "github"
+# GitHub Releases host the archives, installers and checksums
+hosting = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "homebrew"]
+# Homebrew tap that receives the generated formula (needs the HOMEBREW_TAP_TOKEN
+# repository secret; the token is read by the generated workflow, never stored here)
+tap = "flisbao/homebrew-tap"
+publish-jobs = ["homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax). The Linux
+# targets are musl (static, zero OpenSSL, no glibc requirement).
+targets = [
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+# Build `-p certtui` alone instead of `--workspace`: a workspace build unifies the
+# default features of every member, and `certtui-tui` defaults to `native-clipboard`,
+# which would leave the clipboard ON in the musl binaries.
+precise-builds = true
+# One sha256 file per artifact
+checksum = "sha256"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
+# Pull requests only run `dist plan`; releases are triggered by a version tag.
+pr-run-mode = "plan"
+# Extension points (generated release.yml calls these, they are not hand-edited in it):
+#  - build-setup.yml: steps run before every build; turns the `native-clipboard`
+#    default feature OFF for the musl targets (dist has no per-target feature
+#    setting, see the comment in that file)
+github-build-setup = "../build-setup.yml"
+#  - sbom.yml: CycloneDX SBOM `certtui.cdx.json` attached to the release
+#  - smoke.yml: runs scripts/smoke.sh on every built archive, on a native runner.
+#    It is a GLOBAL artifacts job on purpose: the generated `host` job (which
+#    creates the GitHub Release) only runs when every global job succeeded, so a
+#    failed smoke test blocks the release and the Homebrew publish. (A host-job
+#    would not: dist 0.33 does not gate `announce` on host-jobs.)
+global-artifacts-jobs = ["./sbom", "./smoke"]

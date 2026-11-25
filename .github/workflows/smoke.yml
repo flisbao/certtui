@@ -1,0 +1,105 @@
+# Custom global-artifacts job of the release workflow (dist-workspace.toml:
+# global-artifacts-jobs). Runs after every local build job and BEFORE the `host`
+# job, which only runs when this job succeeded and is the one that creates the
+# GitHub Release: each archive built by dist is unpacked on a native runner of its
+# platform and exercised with scripts/smoke.sh, so a broken binary is never
+# released.
+name: smoke
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: dist plan manifest (unused, required by the dist job contract)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            archive: tar.xz
+            exe: certtui
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            archive: tar.xz
+            exe: certtui
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            archive: tar.xz
+            exe: certtui
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            archive: tar.xz
+            exe: certtui
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+            exe: certtui.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download release archive
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-build-local-${{ matrix.target }}
+          path: dist
+          merge-multiple: true
+
+      - name: Verify sha256
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          archive="certtui-${{ matrix.target }}.${{ matrix.archive }}"
+          expected="$(cut -d' ' -f1 "${archive}.sha256")"
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$archive" | cut -d' ' -f1)"
+          else
+            actual="$(shasum -a 256 "$archive" | cut -d' ' -f1)"
+          fi
+          test "$expected" = "$actual"
+
+      - name: Unpack
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          if [ "${{ matrix.archive }}" = zip ]; then
+            7z x -y "certtui-${{ matrix.target }}.zip" >/dev/null
+          else
+            tar -xJf "certtui-${{ matrix.target }}.tar.xz"
+          fi
+          test -f "certtui-${{ matrix.target }}/${{ matrix.exe }}"
+
+      - name: Smoke test
+        shell: bash
+        run: bash scripts/smoke.sh "dist/certtui-${{ matrix.target }}/${{ matrix.exe }}"
+
+      - name: Static linkage and no native clipboard (musl)
+        if: ${{ contains(matrix.target, '-linux-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Policy: native-clipboard (arboard) is OFF on the musl targets.
+          if strings "dist/certtui-${{ matrix.target }}/certtui" | grep -qi arboard; then
+            echo "arboard found in a musl binary: native-clipboard must be off" >&2
+            exit 1
+          fi
+          out="$(ldd "dist/certtui-${{ matrix.target }}/certtui" 2>&1 || true)"
+          echo "$out"
+          echo "$out" | grep -Eq 'not a dynamic executable|statically linked'

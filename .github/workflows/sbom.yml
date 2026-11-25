@@ -1,0 +1,48 @@
+# Custom global-artifacts job of the release workflow (dist-workspace.toml:
+# global-artifacts-jobs). Builds the CycloneDX SBOM and uploads it as a workflow
+# artifact; the generated release.yml attaches every `artifacts-*` artifact to the
+# GitHub Release.
+name: sbom
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: dist plan manifest (unused, required by the dist job contract)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: sbom
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked --version 0.5.10 cargo-cyclonedx
+
+      - name: Generate SBOM
+        run: bash scripts/sbom.sh
+
+      - name: Checksum
+        run: sha256sum certtui.cdx.json > certtui.cdx.json.sha256
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-sbom
+          path: |
+            certtui.cdx.json
+            certtui.cdx.json.sha256
+          if-no-files-found: error

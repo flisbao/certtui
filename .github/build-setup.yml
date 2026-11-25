@@ -1,0 +1,17 @@
+# Extra steps injected by `dist generate` at the start of every build-local-artifacts
+# job (dist-workspace.toml: github-build-setup).
+#
+# Policy (M9): the `native-clipboard` feature of the `certtui` binary is OFF on the
+# musl targets and ON everywhere else. dist 0.34 takes `features` /
+# `default-features` per package, not per target, so the musl matrix entries
+# switch the default feature off here, in the CI checkout only (never committed).
+- name: Disable native-clipboard on musl targets
+  if: ${{ contains(join(matrix.targets, ','), '-linux-musl') }}
+  shell: bash
+  run: |
+    set -euo pipefail
+    manifest=crates/certtui/Cargo.toml
+    grep -qx 'default = \["native-clipboard"\]' "$manifest"
+    sed -i 's/^default = \["native-clipboard"\]$/default = []/' "$manifest"
+    grep -qx 'default = \[\]' "$manifest"
+    git diff -- "$manifest"
