@@ -11,6 +11,7 @@ mod chain;
 mod context;
 mod crypto;
 mod profile;
+mod revocation;
 mod trust;
 mod validity;
 
@@ -25,6 +26,10 @@ pub use context::{LintContext, Thresholds};
 pub use crypto::{WeakKeyLint, WeakSignatureLint};
 pub use profile::{
     BasicConstraintsViolationLint, LeafMissingServerAuthLint, MissingSanLint, NoEmbeddedSctLint,
+};
+pub use revocation::{
+    AiaFetchedLint, OcspStapleInvalidLint, OcspStapleMissingLint, RevocationUnknownLint,
+    RevokedLint,
 };
 pub use trust::{HostnameMismatchLint, TrustUntrustedLint};
 pub use validity::{
@@ -56,6 +61,11 @@ pub fn registry() -> Vec<Box<dyn Lint>> {
         Box::new(LeafMissingServerAuthLint),
         Box::new(BasicConstraintsViolationLint),
         Box::new(NoEmbeddedSctLint),
+        Box::new(RevokedLint),
+        Box::new(RevocationUnknownLint),
+        Box::new(OcspStapleInvalidLint),
+        Box::new(OcspStapleMissingLint),
+        Box::new(AiaFetchedLint),
         Box::new(TrustUntrustedLint),
         Box::new(HostnameMismatchLint),
         Box::new(ExpiredLint),

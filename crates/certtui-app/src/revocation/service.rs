@@ -11,7 +11,7 @@ use std::task::Poll;
 
 use certtui_domain::chain_analysis::analyze_chain;
 use certtui_domain::limits::Limits;
-use certtui_domain::model::{CertificateRecord, Chain, RevocationStatus};
+use certtui_domain::model::{CertificateRecord, Chain, RevocationStatus, StapleState};
 use tokio_util::sync::CancellationToken;
 
 use crate::http::HttpError;
@@ -25,6 +25,10 @@ pub const REVOCATION_PARALLELISM: usize = 4;
 /// Longest `why` kept for an `Unknown` built from several failed attempts.
 const MAX_WHY_CHARS: usize = 300;
 
+/// Only the first few OCSP (and CRL) URLs of a certificate are tried: a hostile
+/// certificate can list thousands, each costing up to `http_timeout`.
+const MAX_URLS_PER_SOURCE: usize = 3;
+
 const OCSP_CONTENT_TYPE: &str = "application/ocsp-request";
 
 /// Which certificates of the path are checked.
@@ -36,19 +40,6 @@ pub enum RevocationScope {
     Full,
     /// Nothing (`--no-revocation`).
     Off,
-}
-
-/// What became of the stapled OCSP response.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StapleState {
-    /// The server sent none.
-    Missing,
-    /// Verified (signature, `CertID`, freshness).
-    Valid,
-    /// Present but rejected, with the reason.
-    Invalid(String),
-    /// Not a network target, or revocation is off.
-    NotApplicable,
 }
 
 /// The result of one revocation run.
@@ -298,7 +289,7 @@ impl RevocationService {
             return Ok(Step::Answer(status.clone()));
         }
         let mut reasons = Vec::new();
-        for url in &cert.summary.aia.ocsp {
+        for url in cert.summary.aia.ocsp.iter().take(MAX_URLS_PER_SOURCE) {
             let body = match self.ocsp_exchange(url, &request, cancel).await? {
                 Ok(body) => body,
                 Err(err) => {
@@ -350,7 +341,12 @@ impl RevocationService {
         cancel: &CancellationToken,
     ) -> Result<Step, Cancelled> {
         let mut reasons = Vec::new();
-        for url in &cert.summary.crl_distribution_points {
+        for url in cert
+            .summary
+            .crl_distribution_points
+            .iter()
+            .take(MAX_URLS_PER_SOURCE)
+        {
             let bytes = match self.crl_bytes(url, cancel).await? {
                 Ok(bytes) => bytes,
                 Err(why) => {
@@ -775,6 +771,28 @@ mod tests {
         assert!(why_of(&got, 0).contains("crl too large"));
         let crl_call = http.calls().into_iter().find(|c| c.url == CRL_URL).unwrap();
         assert_eq!(crl_call.max_bytes, Limits::default().max_crl_bytes);
+    }
+
+    #[tokio::test]
+    async fn quando_certificado_lista_dezenas_de_urls_deve_limitar_as_requisicoes() {
+        let http = Arc::new(FakeHttpFetcher::new());
+        let svc = service(
+            &http,
+            protocol(Ok(RevocationStatus::Good), Ok(RevocationStatus::Good)),
+        );
+        let chain = chain(&[fixture!("leaf-many-urls.der"), fixture!("ca.der")]);
+
+        let got = run(&svc, &chain, None, RevocationScope::Leaf).await;
+
+        // OCSP: POST then GET per URL; CRL: one GET per URL; all answer 404.
+        assert_eq!(
+            http.calls().len(),
+            MAX_URLS_PER_SOURCE * 2 + MAX_URLS_PER_SOURCE
+        );
+        assert!(matches!(
+            got.statuses.first(),
+            Some((0, RevocationStatus::Unknown { .. }))
+        ));
     }
 
     #[tokio::test]

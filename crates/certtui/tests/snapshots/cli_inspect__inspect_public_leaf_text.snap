@@ -1,6 +1,6 @@
 ---
 source: crates/certtui/tests/cli_inspect.rs
-expression: "String::from_utf8(out.stdout).unwrap()"
+expression: "without_validation_text(&String::from_utf8(out.stdout).unwrap())"
 ---
 [0] Subject: CN=example.com
     Issuer: CN=Cloudflare TLS Issuing ECC CA 3,O=SSL Corporation,C=US
@@ -20,6 +20,8 @@ expression: "String::from_utf8(out.stdout).unwrap()"
     CA Issuers: http://i.cf-i.ssl.com/Cloudflare-TLS-I-E3.cer
     CRL Distribution Points: http://c.cf-i.ssl.com/ae801ed1c55bb579d79208b0d772acfb8cc3a208.crl
     Embedded SCTs: 2
+    SCT 1: log 944E4387FAECC1EF81F3192426A8186501C7D35F3802013F72677D55372E19D8 at 2026-09-26T22:59:12Z (v1)
+    SCT 2: log CB38F715897C84A1445F5BC1DDFBC96EF29A59CD470A690585B0CB14C31458E7 at 2026-09-26T22:59:12Z (v1)
     Extensions:
       2.5.29.19 Basic Constraints (critical)
       2.5.29.35 Authority Key Identifier

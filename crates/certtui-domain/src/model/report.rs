@@ -80,6 +80,29 @@ pub enum RevocationStatus {
     },
 }
 
+/// The revocation status of the certificate at `cert_index` of the chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CertRevocation {
+    /// Index of the certificate in the chain (presentation order).
+    pub cert_index: usize,
+    /// Its status.
+    #[serde(flatten)]
+    pub status: RevocationStatus,
+}
+
+/// What became of the stapled OCSP response of a network target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StapleState {
+    /// The server sent none.
+    Missing,
+    /// Verified (signature, `CertID`, freshness).
+    Valid,
+    /// Present but rejected, with the reason.
+    Invalid(String),
+    /// Not a network target, or revocation checking is off.
+    NotApplicable,
+}
+
 /// Everything learned about one target.
 ///
 /// `Debug` prints the length of the stapled OCSP response, not its bytes.
@@ -96,8 +119,10 @@ pub struct InspectionReport {
     pub chain: Chain,
     /// Trust verdict.
     pub trust: TrustVerdict,
-    /// Revocation status per verified certificate.
-    pub revocation: Vec<RevocationStatus>,
+    /// Revocation status of each certificate that was checked.
+    pub revocation: Vec<CertRevocation>,
+    /// What became of the stapled OCSP response.
+    pub staple: StapleState,
     /// Findings, ordered by descending severity.
     pub findings: Vec<Finding>,
     /// Phase durations.
@@ -115,6 +140,7 @@ impl fmt::Debug for InspectionReport {
             .field("chain", &self.chain)
             .field("trust", &self.trust)
             .field("revocation", &self.revocation)
+            .field("staple", &self.staple)
             .field("findings", &self.findings)
             .field("timings", &self.timings)
             .field("notes", &self.notes)
@@ -198,6 +224,7 @@ mod tests {
             chain: Chain::new(Vec::new(), &Limits::default()).unwrap(),
             trust: TrustVerdict::NotEvaluated,
             revocation: Vec::new(),
+            staple: crate::model::StapleState::NotApplicable,
             findings: Vec::new(),
             timings: Timings::default(),
             notes: Vec::new(),

@@ -16,6 +16,10 @@ use tokio_util::sync::CancellationToken;
 use crate::cancel::cancellable;
 use crate::ports::HttpFetcher;
 
+/// Only the first few `caIssuers` URLs of a certificate are tried: a hostile
+/// certificate can list thousands, each costing up to `http_timeout`.
+const MAX_AIA_URLS_PER_CERT: usize = 3;
+
 /// Completes the chain with issuers fetched from `Authority Information Access`.
 ///
 /// Returns the (possibly longer) chain and the URLs that supplied a
@@ -32,6 +36,8 @@ pub async fn chase_aia(
     let mut chain = chain;
     let mut used = Vec::new();
     let mut tried: HashSet<String> = HashSet::new();
+    // Total downloads for the whole chase: one per certificate the chain may still gain.
+    let mut budget = limits.max_chain_len;
     let mut seen: HashSet<[u8; 32]> = chain
         .records()
         .iter()
@@ -47,8 +53,19 @@ pub async fn chase_aia(
         };
         let urls: Vec<String> = tail.summary.aia.ca_issuers.clone();
         let wanted = tail.summary.issuer.rfc4514.clone();
-        let Some((record, url)) =
-            fetch_issuer(http, &urls, &wanted, &mut tried, &mut seen, limits, &cancel).await
+        let Some((record, url)) = fetch_issuer(
+            http,
+            &urls,
+            &wanted,
+            &mut Fetching {
+                tried: &mut tried,
+                seen: &mut seen,
+                budget: &mut budget,
+            },
+            limits,
+            &cancel,
+        )
+        .await
         else {
             break;
         };
@@ -63,21 +80,34 @@ pub async fn chase_aia(
     (chain, used)
 }
 
+/// What the chase remembers between iterations.
+struct Fetching<'a> {
+    /// URLs already requested (each is fetched once).
+    tried: &'a mut HashSet<String>,
+    /// SHA-256 of every certificate already in the chain.
+    seen: &'a mut HashSet<[u8; 32]>,
+    /// Downloads still allowed.
+    budget: &'a mut usize,
+}
+
 /// The first new certificate, among the downloads of `urls` not yet tried,
 /// whose subject is `wanted`.
 async fn fetch_issuer(
     http: &dyn HttpFetcher,
     urls: &[String],
     wanted: &str,
-    tried: &mut HashSet<String>,
-    seen: &mut HashSet<[u8; 32]>,
+    state: &mut Fetching<'_>,
     limits: &Limits,
     cancel: &CancellationToken,
 ) -> Option<(CertificateRecord, String)> {
-    for url in urls {
-        if !tried.insert(url.clone()) {
+    for url in urls.iter().take(MAX_AIA_URLS_PER_CERT) {
+        if *state.budget == 0 {
+            return None;
+        }
+        if !state.tried.insert(url.clone()) {
             continue;
         }
+        *state.budget -= 1;
         let download = cancellable(
             cancel,
             http.get(url, limits.max_aia_cert_bytes, limits.http_timeout),
@@ -94,7 +124,8 @@ async fn fetch_issuer(
             let Ok(record) = CertificateRecord::from_der(&der, origin, limits) else {
                 continue;
             };
-            if record.summary.subject.rfc4514 == wanted && seen.insert(record.fingerprints.sha256.0)
+            if record.summary.subject.rfc4514 == wanted
+                && state.seen.insert(record.fingerprints.sha256.0)
             {
                 return Some((record, url.clone()));
             }
@@ -313,6 +344,22 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(urls, Vec::<String>::new());
         assert_eq!(http.calls(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn quando_certificado_lista_dezenas_de_urls_deve_tentar_so_as_primeiras() {
+        let http = FakeHttpFetcher::new();
+        let chain = chain_of(&[fixture!("orphan-many-urls.der")]);
+
+        let (got, _) = chase(&http, chain, &[]).await;
+
+        assert_eq!(got.len(), 1);
+        let urls: Vec<_> = http.calls().into_iter().map(|c| c.url).collect();
+        assert_eq!(urls.len(), MAX_AIA_URLS_PER_CERT, "{urls:?}");
+        assert_eq!(
+            urls.first().map(String::as_str),
+            Some("http://many.example.test/issuer/0")
+        );
     }
 
     #[tokio::test]

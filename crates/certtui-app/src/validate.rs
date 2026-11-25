@@ -56,6 +56,8 @@ pub fn validate(report: InspectionReport, inputs: ValidationInputs<'_>) -> Inspe
         trust: &verification.trust,
         hostname_ok: verification.hostname_ok,
         publicly_trusted,
+        revocation: &report.revocation,
+        staple: &report.staple,
     });
     InspectionReport {
         trust: verification.trust,
@@ -171,6 +173,7 @@ mod tests {
             chain: Chain::new(records, &Limits::default()).expect("chain"),
             trust: TrustVerdict::NotEvaluated,
             revocation: Vec::new(),
+            staple: certtui_domain::model::StapleState::NotApplicable,
             findings: Vec::new(),
             timings: Timings::default(),
             notes: Vec::new(),

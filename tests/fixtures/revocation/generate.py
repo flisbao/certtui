@@ -273,6 +273,21 @@ def main():
     write_cert("aia-loop-a", loop_a)
     write_cert("aia-loop-b", loop_b)
 
+    # Folha hostil com 50 URLs de cada tipo (OCSP, CA Issuers, CRL DP), emitida pela `ca`.
+    many = lambda kind: [x509.UniformResourceIdentifier(f"http://many.example.test/{kind}/{i}") for i in range(50)]
+    many_ext = [
+        (x509.AuthorityInformationAccess(
+            [x509.AccessDescription(AuthorityInformationAccessOID.OCSP, u) for u in many("ocsp")]
+            + [x509.AccessDescription(AuthorityInformationAccessOID.CA_ISSUERS, u) for u in many("issuer")]
+        ), False),
+        (x509.CRLDistributionPoints([x509.DistributionPoint(full_name=many("crl"), relative_name=None, reasons=None, crl_issuer=None)]), False),
+    ]
+    leaf_many = build_cert("many.example.test", new_key(), ca, ca_key, 0x7001, extra=many_ext)
+    write_cert("leaf-many-urls", leaf_many)
+    # Mesma ideia, mas "emitida" por um nome que ninguém tem (AIA nunca resolve).
+    orphan_many = build_cert("orphan-many.example.test", new_key(), None, new_key(), 0x7002, extra=many_ext, issuer_name=name("CertTui Nowhere"))
+    write_cert("orphan-many-urls", orphan_many)
+
     # CA cujo keyUsage não tem cRLSign, com uma folha e uma CRL assinadas por ela.
     ca2_key = new_key()
     ca2 = build_cert(

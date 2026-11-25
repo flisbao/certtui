@@ -1,7 +1,7 @@
 //! The read-only input every lint receives.
 
 use crate::chain_analysis::ChainAnalysis;
-use crate::model::{CertificateRecord, Chain, TrustVerdict};
+use crate::model::{CertRevocation, CertificateRecord, Chain, StapleState, TrustVerdict};
 use crate::time::Timestamp;
 
 /// Day-based limits that drive the validity lints.
@@ -47,6 +47,10 @@ pub struct LintContext<'a> {
     pub hostname_ok: Option<bool>,
     /// The chain is anchored in a public store (system or Mozilla).
     pub publicly_trusted: bool,
+    /// Revocation status of each certificate that was checked.
+    pub revocation: &'a [CertRevocation],
+    /// What became of the stapled OCSP response.
+    pub staple: &'a StapleState,
 }
 
 impl<'a> LintContext<'a> {

@@ -197,6 +197,9 @@ fn write_identifiers(out: &mut dyn Write, record: &CertificateRecord) -> io::Res
             "Embedded SCTs",
             &summary.embedded_scts.len().to_string(),
         )?;
+        for (n, sct) in summary.embedded_scts.iter().enumerate() {
+            line(out, &format!("SCT {}", n + 1), &labels::sct_text(sct))?;
+        }
     }
     Ok(())
 }

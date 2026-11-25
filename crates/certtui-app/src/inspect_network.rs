@@ -64,6 +64,7 @@ pub async fn inspect_network(
         chain,
         trust: TrustVerdict::NotEvaluated,
         revocation: Vec::new(),
+        staple: certtui_domain::model::StapleState::NotApplicable,
         findings: Vec::new(),
         timings: fetched_chain.timings,
         notes,

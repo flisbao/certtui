@@ -225,6 +225,12 @@ fn extension_rows(record: &CertificateRecord) -> Vec<DetailRow> {
             "Embedded SCTs",
             &summary.embedded_scts.len().to_string(),
         ));
+        rows.extend(
+            summary
+                .embedded_scts
+                .iter()
+                .map(|sct| DetailRow::item(&labels::sct_text(sct))),
+        );
     }
     let extensions: Vec<String> = summary
         .extensions
@@ -259,7 +265,12 @@ fn fingerprint_rows(record: &CertificateRecord, format: FingerprintFormat) -> Ve
 }
 
 fn revocation_rows(report: &InspectionReport, cert: usize) -> Vec<DetailRow> {
-    let text = match report.revocation.get(cert) {
+    let status = report
+        .revocation
+        .iter()
+        .find(|r| r.cert_index == cert)
+        .map(|r| &r.status);
+    let text = match status {
         None => "not evaluated".to_owned(),
         Some(RevocationStatus::Good) => "good".to_owned(),
         Some(RevocationStatus::Revoked { reason, at }) => {
@@ -343,7 +354,7 @@ mod tests {
     use certtui_domain::finding::{FindingCode, Severity};
 
     use super::*;
-    use crate::test_fixtures::{finding, record_with_cn, report_of, sample_report};
+    use crate::test_fixtures::{finding, fixture_record, record_with_cn, report_of, sample_report};
 
     #[test]
     fn quando_aba_fingerprints_deve_ter_tres_linhas_sha1_sha256_sha512() {
@@ -444,6 +455,28 @@ mod tests {
         report.findings = vec![finding(FindingCode::WeakKey, Severity::Warning, Some(1))];
         let rows = rows_for_tab(&report, 0, Tab::Findings, FingerprintFormat::default());
         assert_eq!(rows, vec![DetailRow::new("Findings", "none")]);
+    }
+
+    #[test]
+    fn quando_cert_tem_scts_deve_listar_cada_um_na_aba_extensions() {
+        let report = report_of(vec![fixture_record("public-leaf-with-sct", 0)]);
+        let rows = rows_for_tab(&report, 0, Tab::Extensions, FingerprintFormat::default());
+        let header = rows
+            .iter()
+            .position(|row| row.label == "Embedded SCTs")
+            .unwrap();
+        assert_eq!(rows.get(header).map(|row| row.value.as_str()), Some("2"));
+        let items: Vec<_> = rows
+            .iter()
+            .skip(header + 1)
+            .take(2)
+            .map(|row| row.value.as_str())
+            .collect();
+        assert_eq!(items.len(), 2);
+        for item in items {
+            assert!(item.starts_with("log "), "{item}");
+            assert!(item.contains(" at "), "{item}");
+        }
     }
 
     #[test]

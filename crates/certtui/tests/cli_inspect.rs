@@ -481,6 +481,30 @@ fn quando_text_do_chain_3_deve_bater_com_snapshot() {
 }
 
 #[test]
+fn quando_cert_tem_scts_deve_listar_log_id_e_timestamp_no_text() {
+    let out = certtui()
+        .current_dir(FIXTURES)
+        .args(["inspect", "public-leaf-with-sct.pem", "--text"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let scts: Vec<&str> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("SCT "))
+        .collect();
+    assert_eq!(scts.len(), 2, "{text}");
+    for sct in scts {
+        // `SCT 1: log <64 hex digits> at <RFC 3339 time> (v1)`
+        let rest = sct.split_once(": log ").expect(sct).1;
+        let (id, tail) = rest.split_once(" at ").expect(sct);
+        assert_eq!(id.len(), 64, "{sct}");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{sct}");
+        assert!(tail.ends_with("(v1)") && tail.contains('T'), "{sct}");
+    }
+}
+
+#[test]
 fn quando_text_de_leaf_com_scts_deve_bater_com_snapshot() {
     let out = certtui()
         .current_dir(FIXTURES)
