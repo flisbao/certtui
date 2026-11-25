@@ -17,10 +17,7 @@ use x509_parser::prelude::FromDer;
 use x509_parser::time::ASN1Time;
 use x509_parser::x509::{AlgorithmIdentifier, SubjectPublicKeyInfo};
 
-use super::parse_cert;
-
-/// How far a response's clock may differ from ours (5 minutes), in seconds.
-const OCSP_CLOCK_SKEW_SECS: i64 = 5 * 60;
+use super::{CLOCK_SKEW_SECS, parse_cert};
 
 /// A response without `nextUpdate` cannot say how long it stays valid; accept
 /// it only when it is this fresh (7 days), in seconds.
@@ -277,11 +274,11 @@ fn verify_by_authorized_signer(
 
 fn check_freshness(single: &SingleResponse, now: i64) -> Result<(), RevocationError> {
     let this_update = unix(&single.this_update);
-    if this_update > now.saturating_add(OCSP_CLOCK_SKEW_SECS) {
+    if this_update > now.saturating_add(CLOCK_SKEW_SECS) {
         return Err(RevocationError::NotYetValid);
     }
     let stale = match &single.next_update {
-        Some(next) => unix(next) < now.saturating_sub(OCSP_CLOCK_SKEW_SECS),
+        Some(next) => unix(next) < now.saturating_sub(CLOCK_SKEW_SECS),
         None => this_update < now.saturating_sub(OCSP_MAX_AGE_WITHOUT_NEXT_UPDATE_SECS),
     };
     if stale {

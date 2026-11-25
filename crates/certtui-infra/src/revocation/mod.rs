@@ -3,7 +3,11 @@
 //! Pure and synchronous: bytes in, verdicts out. Every input is hostile, so
 //! each failure is a typed [`RevocationError`], never a panic and never `Good`.
 
+mod crl;
 mod ocsp;
+
+/// How far a response's or CRL's clock may differ from ours (5 minutes), in seconds.
+const CLOCK_SKEW_SECS: i64 = 5 * 60;
 
 use certtui_app::revocation::{OcspRequest, RevocationError, RevocationProtocol};
 use certtui_domain::model::RevocationStatus;
@@ -36,14 +40,12 @@ impl RevocationProtocol for X509RevocationProtocol {
 
     fn evaluate_crl(
         &self,
-        _crl: &[u8],
-        _cert_der: &[u8],
-        _issuer_der: &[u8],
-        _now: Timestamp,
+        crl: &[u8],
+        cert_der: &[u8],
+        issuer_der: &[u8],
+        now: Timestamp,
     ) -> Result<RevocationStatus, RevocationError> {
-        Err(RevocationError::Malformed(
-            "CRL evaluation is not available yet".to_owned(),
-        ))
+        crl::evaluate(crl, cert_der, issuer_der, now)
     }
 }
 
