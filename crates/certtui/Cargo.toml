@@ -1,9 +1,14 @@
 [package]
 name = "certtui"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
+description = "Inspect TLS certificate chains from the terminal: interactive TUI plus headless inspect, check, batch and export commands."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["tls", "certificate", "x509", "tui", "cli"]
+categories = ["command-line-utilities", "cryptography", "network-programming"]
 rust-version.workspace = true
 publish.workspace = true
 
@@ -11,10 +16,10 @@ publish.workspace = true
 anyhow = "1"
 async-trait = "0.1.92"
 base64 = "0.23.1"
-certtui-app = { path = "../certtui-app" }
-certtui-domain = { path = "../certtui-domain" }
-certtui-infra = { path = "../certtui-infra" }
-certtui-tui = { path = "../certtui-tui", default-features = false }
+certtui-app = { workspace = true }
+certtui-domain = { workspace = true }
+certtui-infra = { workspace = true }
+certtui-tui = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 # `event-stream` for the async key reader; `use-dev-tty` reads keys from the
 # terminal device when standard input is a pipe (`cat cert.pem | certtui -`).
@@ -43,7 +48,7 @@ native-clipboard = ["certtui-tui/native-clipboard"]
 [dev-dependencies]
 assert_cmd = "2"
 # `FakeChainFetcher` and friends for the CLI unit tests.
-certtui-app = { path = "../certtui-app", features = ["testing"] }
+certtui-app = { workspace = true, features = ["testing"] }
 insta = "1"
 # The PKCS#12 end-to-end test reads the fixture key back to prove it never leaks.
 p12-keystore = { version = "0.4.1", default-features = false }

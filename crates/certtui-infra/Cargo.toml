@@ -1,17 +1,22 @@
 [package]
 name = "certtui-infra"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
+description = "Infrastructure adapters of CertTui: TLS chain fetching, OCSP/CRL revocation, trust stores, config and history on disk."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["tls", "x509", "ocsp", "crl", "certificate"]
+categories = ["cryptography", "network-programming"]
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
 base64 = "0.23.1"
-certtui-app = { path = "../certtui-app" }
-certtui-domain = { path = "../certtui-domain" }
+certtui-app = { workspace = true }
+certtui-domain = { workspace = true }
 cms = { version = "0.2.3", features = ["std"] }
 der = { version = "0.7.10", features = ["std"] }
 # Provider `ring` only (no aws-lc / C build); TLS 1.2 and 1.3.
@@ -45,7 +50,7 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
-certtui-app = { path = "../certtui-app", features = ["testing"] }
+certtui-app = { workspace = true, features = ["testing"] }
 rcgen = "0.14"
 wiremock = "0.6"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "time"] }

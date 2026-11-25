@@ -34,8 +34,10 @@ confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
-# Registry deps must pin a version; path deps (workspace crates) have no
-# version requirement and are exempt.
+# Registry deps must pin a version. The workspace crates are publishable, so
+# their internal deps carry `version` besides `path` (see `[workspace.dependencies]`
+# in Cargo.toml); `allow-wildcard-paths` only covers non-published path deps
+# (the fuzz crate).
 wildcards = "deny"
 allow-wildcard-paths = true
 deny = [

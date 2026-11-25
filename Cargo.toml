@@ -3,12 +3,23 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
+version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/flisbao/certtui"
+homepage = "https://github.com/flisbao/certtui"
+readme = "README.md"
 rust-version = "1.97.0"
-# Not published yet; also lets cargo-deny exempt internal path deps (bans.wildcards).
-publish = false
+publish = true
+
+# Internal crates: `path` for the workspace, `version` for the registry (cargo-deny
+# `bans.wildcards` rejects a dependency without a version requirement once the
+# crates are publishable). Bump the version here, in one place, on every release.
+[workspace.dependencies]
+certtui-domain = { path = "crates/certtui-domain", version = "1.0.0" }
+certtui-app = { path = "crates/certtui-app", version = "1.0.0" }
+certtui-infra = { path = "crates/certtui-infra", version = "1.0.0" }
+certtui-tui = { path = "crates/certtui-tui", version = "1.0.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

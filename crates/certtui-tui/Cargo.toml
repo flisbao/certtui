@@ -1,9 +1,14 @@
 [package]
 name = "certtui-tui"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
+description = "Terminal user interface of CertTui, built with ratatui: certificate chain viewer, batch panel and clipboard support."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["tui", "ratatui", "tls", "certificate", "x509"]
+categories = ["command-line-utilities", "cryptography"]
 rust-version.workspace = true
 publish.workspace = true
 
@@ -11,8 +16,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-certtui-app = { path = "../certtui-app" }
-certtui-domain = { path = "../certtui-domain" }
+certtui-app = { workspace = true }
+certtui-domain = { workspace = true }
 crossterm = "0.29"
 base64 = "0.23.1"
 thiserror = "2"
