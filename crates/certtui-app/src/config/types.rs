@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use certtui_domain::limits::{LimitWarning, Limits, LimitsOverrides};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -73,7 +74,7 @@ pub trait ConfigRepository: Send + Sync {
 }
 
 /// Revocation checking mode (`network.revocation`, `--revocation`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RevocationMode {
     /// Only the leaf certificate.
@@ -86,7 +87,7 @@ pub enum RevocationMode {
 }
 
 /// Color theme (`ui.theme`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
     /// Light text on a dark background.
@@ -99,7 +100,7 @@ pub enum Theme {
 }
 
 /// Fingerprint display format (`ui.fingerprint_format`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FingerprintFormatConfig {
     /// Upper-case hex pairs separated by colons.
@@ -112,7 +113,7 @@ pub enum FingerprintFormatConfig {
 }
 
 /// Log verbosity (`logging.level`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Nothing is logged.
@@ -131,7 +132,7 @@ pub enum LogLevel {
 }
 
 /// `trust` section.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct TrustConfig {
     /// Trust sources, in order.
@@ -150,7 +151,7 @@ impl Default for TrustConfig {
 }
 
 /// `thresholds` section; also the resolved form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct ThresholdsConfig {
     /// Warn when a certificate expires within this many days.
@@ -172,7 +173,7 @@ impl Default for ThresholdsConfig {
 }
 
 /// `network` section.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct NetworkConfig {
     /// Overall time limit for one target, in seconds.
@@ -204,7 +205,7 @@ impl Default for NetworkConfig {
 }
 
 /// `batch` section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct BatchConfig {
     /// Targets inspected at the same time.
@@ -218,7 +219,7 @@ impl Default for BatchConfig {
 }
 
 /// `ui` section; also the resolved form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct UiConfig {
     /// Color theme.
@@ -247,7 +248,7 @@ impl Default for UiConfig {
 }
 
 /// `logging` section.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct LoggingConfig {
     /// Log file; without one nothing is logged.
@@ -265,8 +266,38 @@ impl Default for LoggingConfig {
     }
 }
 
+/// The schema of `limits`: every override of [`LimitsOverrides`] is an optional
+/// whole number. The field names come from the type itself, so the schema
+/// cannot drift from it (the type lives in the domain, which does not know
+/// `schemars`).
+fn limits_schema(_: &mut SchemaGenerator) -> Schema {
+    let names: Vec<String> = serde_json::to_value(LimitsOverrides::default())
+        .ok()
+        .and_then(|value| match value {
+            Value::Object(map) => Some(map.keys().cloned().collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let properties: serde_json::Map<String, Value> = names
+        .into_iter()
+        .map(|name| {
+            (
+                name,
+                serde_json::json!({ "type": ["integer", "null"], "minimum": 0 }),
+            )
+        })
+        .collect();
+    Schema::try_from(serde_json::json!({
+        "type": "object",
+        "description": "Resource limit overrides (spec section 9); above the hard cap they are truncated.",
+        "properties": properties,
+        "additionalProperties": false,
+    }))
+    .unwrap_or_default()
+}
+
 /// The configuration file (spec section 11).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     /// Version of this schema.
@@ -280,6 +311,7 @@ pub struct Config {
     /// Batch behavior.
     pub batch: BatchConfig,
     /// Resource limit overrides (spec section 9).
+    #[schemars(schema_with = "limits_schema")]
     pub limits: LimitsOverrides,
     /// Interface settings.
     pub ui: UiConfig,

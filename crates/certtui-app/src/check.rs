@@ -1,10 +1,11 @@
 //! Policy of the `check` command: which findings fail a run.
 
 use certtui_domain::finding::{Finding, Severity};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The lowest severity that makes a check fail (`--fail-on`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FailOn {
     /// Warnings and errors fail the check.

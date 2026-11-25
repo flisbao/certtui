@@ -1,0 +1,586 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "The configuration file (spec section 11).",
+  "type": "object",
+  "properties": {
+    "batch": {
+      "description": "Batch behavior.",
+      "$ref": "#/$defs/BatchConfig",
+      "default": {
+        "concurrency": 32
+      }
+    },
+    "limits": {
+      "description": "Resource limit overrides (spec section 9).",
+      "type": "object",
+      "properties": {
+        "batch_concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "channel_capacity": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "clipboard_timeout_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "connect_timeout_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "dns_timeout_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "handshake_timeout_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "history_entries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "http_timeout_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_aia_cert_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_batch_targets": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_ca_file_certs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_cert_der_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_certs_per_source": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_chain_len": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_clipboard_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_crl_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_dir_depth": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_dir_entries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_handshake_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_http_redirects": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_input_file_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_keystore_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_ocsp_response_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_revocation_cache_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_scan_diagnostics": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_stdin_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "target_total_timeout_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "default": {
+        "batch_concurrency": null,
+        "channel_capacity": null,
+        "clipboard_timeout_secs": null,
+        "connect_timeout_secs": null,
+        "dns_timeout_secs": null,
+        "handshake_timeout_secs": null,
+        "history_entries": null,
+        "http_timeout_secs": null,
+        "max_aia_cert_bytes": null,
+        "max_batch_targets": null,
+        "max_ca_file_certs": null,
+        "max_cert_der_bytes": null,
+        "max_certs_per_source": null,
+        "max_chain_len": null,
+        "max_clipboard_bytes": null,
+        "max_crl_bytes": null,
+        "max_dir_depth": null,
+        "max_dir_entries": null,
+        "max_handshake_bytes": null,
+        "max_http_redirects": null,
+        "max_input_file_bytes": null,
+        "max_keystore_bytes": null,
+        "max_ocsp_response_bytes": null,
+        "max_revocation_cache_bytes": null,
+        "max_scan_diagnostics": null,
+        "max_stdin_bytes": null,
+        "target_total_timeout_secs": null
+      }
+    },
+    "logging": {
+      "description": "Logging settings.",
+      "$ref": "#/$defs/LoggingConfig",
+      "default": {
+        "file": null,
+        "level": "info"
+      }
+    },
+    "network": {
+      "description": "Network behavior.",
+      "$ref": "#/$defs/NetworkConfig",
+      "default": {
+        "aia": false,
+        "proxy": null,
+        "revocation": "leaf",
+        "timeout_secs": 20,
+        "use_env_proxy": false
+      }
+    },
+    "schema_version": {
+      "description": "Version of this schema.",
+      "type": "integer",
+      "format": "uint32",
+      "default": 1,
+      "minimum": 0
+    },
+    "thresholds": {
+      "description": "Expiry thresholds and failure policy.",
+      "$ref": "#/$defs/ThresholdsConfig",
+      "default": {
+        "critical_days": 7,
+        "fail_on": "error",
+        "warn_days": 30
+      }
+    },
+    "trust": {
+      "description": "Trust sources.",
+      "$ref": "#/$defs/TrustConfig",
+      "default": {
+        "ca_files": [],
+        "sources": [
+          "system"
+        ]
+      }
+    },
+    "ui": {
+      "description": "Interface settings.",
+      "$ref": "#/$defs/UiConfig",
+      "default": {
+        "clipboard": "auto",
+        "fingerprint_format": "colon",
+        "keymap": {},
+        "mouse": false,
+        "theme": "dark"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "BatchConfig": {
+      "description": "`batch` section.",
+      "type": "object",
+      "properties": {
+        "concurrency": {
+          "description": "Targets inspected at the same time.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 32,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "FailOn": {
+      "description": "The lowest severity that makes a check fail (`--fail-on`).",
+      "oneOf": [
+        {
+          "description": "Warnings and errors fail the check.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Only errors fail the check.",
+          "type": "string",
+          "const": "error"
+        }
+      ]
+    },
+    "FingerprintFormatConfig": {
+      "description": "Fingerprint display format (`ui.fingerprint_format`).",
+      "oneOf": [
+        {
+          "description": "Upper-case hex pairs separated by colons.",
+          "type": "string",
+          "const": "colon"
+        },
+        {
+          "description": "Lower-case hex without separators.",
+          "type": "string",
+          "const": "hex"
+        },
+        {
+          "description": "Standard base64.",
+          "type": "string",
+          "const": "base64"
+        }
+      ]
+    },
+    "LogLevel": {
+      "description": "Log verbosity (`logging.level`).",
+      "oneOf": [
+        {
+          "description": "Nothing is logged.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Errors only.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "Errors and warnings.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "Normal operation (the default).",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "Diagnostic detail.",
+          "type": "string",
+          "const": "debug"
+        },
+        {
+          "description": "Everything, still without secrets.",
+          "type": "string",
+          "const": "trace"
+        }
+      ]
+    },
+    "LoggingConfig": {
+      "description": "`logging` section.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Log file; without one nothing is logged.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "level": {
+          "description": "Log verbosity.",
+          "$ref": "#/$defs/LogLevel",
+          "default": "info"
+        }
+      },
+      "additionalProperties": false
+    },
+    "NetworkConfig": {
+      "description": "`network` section.",
+      "type": "object",
+      "properties": {
+        "aia": {
+          "description": "Download missing intermediates from their AIA URLs.",
+          "type": "boolean",
+          "default": false
+        },
+        "proxy": {
+          "description": "`http://host:port` CONNECT proxy.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "revocation": {
+          "description": "Revocation checking mode.",
+          "$ref": "#/$defs/RevocationMode",
+          "default": "leaf"
+        },
+        "timeout_secs": {
+          "description": "Overall time limit for one target, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 20,
+          "minimum": 0
+        },
+        "use_env_proxy": {
+          "description": "Read `HTTPS_PROXY` and `NO_PROXY` from the environment.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "RevocationMode": {
+      "description": "Revocation checking mode (`network.revocation`, `--revocation`).",
+      "oneOf": [
+        {
+          "description": "Only the leaf certificate.",
+          "type": "string",
+          "const": "leaf"
+        },
+        {
+          "description": "The leaf and every intermediate.",
+          "type": "string",
+          "const": "full"
+        },
+        {
+          "description": "No revocation request is made.",
+          "type": "string",
+          "const": "off"
+        }
+      ]
+    },
+    "Theme": {
+      "description": "Color theme (`ui.theme`).",
+      "oneOf": [
+        {
+          "description": "Light text on a dark background.",
+          "type": "string",
+          "const": "dark"
+        },
+        {
+          "description": "Dark text on a light background.",
+          "type": "string",
+          "const": "light"
+        },
+        {
+          "description": "No colors.",
+          "type": "string",
+          "const": "mono"
+        }
+      ]
+    },
+    "ThresholdsConfig": {
+      "description": "`thresholds` section; also the resolved form.",
+      "type": "object",
+      "properties": {
+        "critical_days": {
+          "description": "Report an error when a certificate expires within this many days.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 7,
+          "minimum": 0
+        },
+        "fail_on": {
+          "description": "Lowest severity that makes `check` fail.",
+          "$ref": "#/$defs/FailOn",
+          "default": "error"
+        },
+        "warn_days": {
+          "description": "Warn when a certificate expires within this many days.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "TrustConfig": {
+      "description": "`trust` section.",
+      "type": "object",
+      "properties": {
+        "ca_files": {
+          "description": "CA certificate files, in any format `inspect` reads.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sources": {
+          "description": "Trust sources, in order.",
+          "type": "array",
+          "default": [
+            "system"
+          ],
+          "items": {
+            "$ref": "#/$defs/TrustSource"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "TrustSource": {
+      "description": "Source of trusted root certificates.",
+      "oneOf": [
+        {
+          "description": "System root store provided by the OS.",
+          "type": "string",
+          "const": "system"
+        },
+        {
+          "description": "Mozilla root CA store.",
+          "type": "string",
+          "const": "mozilla"
+        },
+        {
+          "description": "Custom CA certificate files provided by the user.",
+          "type": "string",
+          "const": "custom"
+        }
+      ]
+    },
+    "UiConfig": {
+      "description": "`ui` section; also the resolved form.",
+      "type": "object",
+      "properties": {
+        "clipboard": {
+          "description": "Clipboard strategy: `auto`, `off` or an ordered list of `osc52` and\n`native`.",
+          "type": "string",
+          "default": "auto"
+        },
+        "fingerprint_format": {
+          "description": "Fingerprint display format.",
+          "$ref": "#/$defs/FingerprintFormatConfig",
+          "default": "colon"
+        },
+        "keymap": {
+          "description": "Key remapping: action name to key.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "mouse": {
+          "description": "Enable mouse support.",
+          "type": "boolean",
+          "default": false
+        },
+        "theme": {
+          "description": "Color theme.",
+          "$ref": "#/$defs/Theme",
+          "default": "dark"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
