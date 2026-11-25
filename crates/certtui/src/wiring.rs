@@ -43,6 +43,7 @@ pub fn run_process() -> std::process::ExitCode {
     let config = |flag: Option<&Path>| -> Result<Config, ConfigError> {
         FileConfigRepository::new(flag.map(Path::to_owned), EnvVars::from_process()).load()
     };
+    let process_env = EnvVars::from_process();
     let env = cli::Env {
         loader: loader.as_ref(),
         fetcher: &fetcher,
@@ -53,6 +54,7 @@ pub fn run_process() -> std::process::ExitCode {
         writer: &AtomicFileWriter,
         enricher: &enricher,
         config: &config,
+        variables: &process_env,
     };
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();

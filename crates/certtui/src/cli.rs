@@ -21,6 +21,7 @@ use certtui_app::keystore::SecretString;
 use certtui_app::ports::{
     ChainFetcher, ChainVerifier, Clock, LocalSource, SourceLoader, TrustStoreProvider,
 };
+use certtui_app::proxy::ProxySettings;
 use certtui_app::revocation::RevocationScope;
 use certtui_app::trust::{TrustAnchors, TrustSource, resolve_sources};
 use certtui_app::validate::{ValidationInputs, known_issuers, validate};
@@ -28,6 +29,8 @@ use certtui_domain::limits::Limits;
 use certtui_domain::lint::Thresholds;
 use certtui_domain::model::{FingerprintFormat, InspectionReport, LoadNote};
 use certtui_domain::target::{NetworkTarget, Target};
+use certtui_infra::env::EnvVars;
+use certtui_infra::proxy::{EnvProxy, ProxyError, parse_proxy_url};
 use certtui_tui::clipboard::ClipboardStrategy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
@@ -57,6 +60,10 @@ pub struct Cli {
     /// either, `~/.config/certtui/config.json` is read if it exists.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
+    /// Reach TLS servers, OCSP, CRL and AIA through this HTTP CONNECT proxy,
+    /// `http://host:port` (no credentials, no https or socks).
+    #[arg(long, global = true, value_name = "URL")]
+    proxy: Option<String>,
     /// Server name to send in SNI instead of the host (network targets only).
     /// An IP literal sends no SNI.
     #[arg(long, global = true, value_name = "NAME")]
@@ -393,6 +400,8 @@ pub struct Env<'a> {
     pub enricher: &'a dyn ReportEnricher,
     /// Loads the configuration file; the argument is `--config`.
     pub config: &'a dyn Fn(Option<&Path>) -> Result<Config, ConfigError>,
+    /// The environment variables the proxy settings read.
+    pub variables: &'a EnvVars,
 }
 
 /// Trust-related options shared by every command.
@@ -411,6 +420,8 @@ struct TrustOptions {
     fingerprint_format: FingerprintFormat,
     /// Interface settings, for the TUI.
     ui: UiConfig,
+    /// The proxy of `--proxy`, the config or the environment.
+    proxy: Option<ProxySettings>,
 }
 
 /// Loads the anchors of `options`, reporting warnings on `err`; a failure is
@@ -552,6 +563,12 @@ pub fn run(
         Ok(resolved) => resolved,
         Err(code) => return Ok(code),
     };
+    let proxy = match proxy_settings(&resolved, env.variables) {
+        Ok(proxy) => proxy,
+        Err(error) => return usage(err, &error.to_string()),
+    };
+    env.fetcher.use_proxy(proxy.clone());
+    env.enricher.use_proxy(proxy.clone());
     let network_options = match cli.sni.as_deref().map(parse_sni).transpose() {
         Ok(sni) => NetworkOptions {
             sni,
@@ -587,6 +604,7 @@ pub fn run(
         thresholds: resolved.thresholds,
         fingerprint_format: fingerprint_format_of(resolved.ui.fingerprint_format),
         ui: resolved.ui,
+        proxy,
     };
     match cli.command {
         Some(Command::Inspect(inspect_args)) => inspect(
@@ -706,6 +724,7 @@ fn overrides_from(cli: &Cli) -> CliOverrides {
         critical_days,
         fail_on,
         timeout_secs: cli.timeout.map(|timeout| timeout.as_secs()),
+        proxy: cli.proxy.clone(),
         aia: cli.aia.then_some(true),
         revocation: match (cli.no_revocation, cli.revocation) {
             (true, _) => Some(RevocationMode::Off),
@@ -715,6 +734,21 @@ fn overrides_from(cli: &Cli) -> CliOverrides {
         },
         fingerprint_format,
         ..CliOverrides::default()
+    }
+}
+
+/// The proxy to use: `--proxy` or `network.proxy` (for every target), else the
+/// environment when `network.use_env_proxy` allows it.
+fn proxy_settings(
+    resolved: &ResolvedConfig,
+    vars: &EnvVars,
+) -> Result<Option<ProxySettings>, ProxyError> {
+    match &resolved.proxy {
+        Some(url) => Ok(Some(ProxySettings {
+            endpoint: parse_proxy_url(url)?,
+            no_proxy: None,
+        })),
+        None => Ok(EnvProxy::from_env(vars, resolved.use_env_proxy)),
     }
 }
 
@@ -823,6 +857,7 @@ fn inspector_options(
         host_check: trust_options.host_check.clone(),
         revocation: trust_options.revocation,
         password: trust_options.password.clone(),
+        proxy: trust_options.proxy.clone(),
     }
 }
 
@@ -1387,6 +1422,7 @@ mod tests {
             writer,
             enricher,
             config: &|_| Ok(Config::default()),
+            variables: &EnvVars::default(),
         };
         let mut out = Vec::new();
         let mut err = Vec::new();

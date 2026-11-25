@@ -17,6 +17,9 @@ pub mod env;
 /// Where the configuration and the history live.
 pub mod paths;
 
+/// HTTP CONNECT proxies.
+pub mod proxy;
+
 /// Which destinations a certificate-supplied URL may reach (SSRF guard).
 pub mod destination;
 

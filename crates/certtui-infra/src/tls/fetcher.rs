@@ -8,12 +8,13 @@
 use std::error::Error as StdError;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use certtui_app::fetch::{FetchError, FetchRequest, FetchedChain, Stage};
 use certtui_app::ports::ChainFetcher;
+use certtui_app::proxy::{ProxyEndpoint, ProxySettings};
 use certtui_domain::model::{LoadNote, Timings};
 use certtui_domain::target::NetworkTarget;
 use rustls::client::Resumption;
@@ -26,6 +27,8 @@ use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_util::sync::CancellationToken;
+
+use crate::proxy::{ProxyError, connect_via_proxy};
 
 use super::capturing_verifier::{CapturedHandshake, CapturingVerifier};
 use super::client_cert_request::ClientCertRequest;
@@ -49,6 +52,8 @@ type Stream = TlsStream<LimitedStream<TcpStream>>;
 /// valid or not, and judged later. See [`CapturingVerifier`].
 pub struct RustlsChainFetcher {
     resolver: Arc<dyn Resolver>,
+    /// The proxy to tunnel through (`--proxy`), set once the command line is known.
+    proxy: Mutex<Option<ProxySettings>>,
 }
 
 impl RustlsChainFetcher {
@@ -62,7 +67,38 @@ impl RustlsChainFetcher {
     #[doc(hidden)]
     #[must_use]
     pub fn with_resolver(resolver: Arc<dyn Resolver>) -> Self {
-        Self { resolver }
+        Self {
+            resolver,
+            proxy: Mutex::new(None),
+        }
+    }
+
+    /// The proxy a connection to `host` goes through, if any.
+    fn proxy_for(&self, host: &str) -> Option<ProxyEndpoint> {
+        let guard = self.proxy.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.as_ref()?.endpoint_for(host).cloned()
+    }
+
+    /// Opens the tunnel to the target through `proxy` within `connect_timeout`.
+    async fn connect_through(
+        proxy: &ProxyEndpoint,
+        req: &FetchRequest,
+    ) -> Result<(TcpStream, SocketAddr), FetchError> {
+        let (host, port) = match req.target.connect_to {
+            Some(addr) => (addr.ip().to_string(), addr.port()),
+            None => (req.target.host.clone(), req.target.port),
+        };
+        let stream = connect_via_proxy(proxy, &host, port, req.limits.connect_timeout)
+            .await
+            .map_err(|error| match error {
+                ProxyError::Timeout => FetchError::Timeout(Stage::Connect),
+                other => FetchError::Connect(sanitize(&format!("proxy: {other}"), MAX_ERROR_TEXT)),
+            })?;
+        // Behind a proxy the peer address is the proxy's.
+        let peer = stream
+            .peer_addr()
+            .map_err(|_| FetchError::Connect("proxy: no peer address".to_owned()))?;
+        Ok((stream, peer))
     }
 
     /// Addresses to connect to and how long DNS took (`None` when skipped).
@@ -88,10 +124,16 @@ impl RustlsChainFetcher {
         started: Instant,
     ) -> Result<(FetchedChain, Option<Stream>), FetchError> {
         let limits = &req.limits;
-        let (addrs, dns) = self.addresses(req).await?;
-        let phase = Instant::now();
-        let (tcp, peer) = connect_first(&addrs, limits.connect_timeout).await?;
-        let connect = phase.elapsed();
+        let (tcp, peer, dns, connect) = if let Some(proxy) = self.proxy_for(&req.target.host) {
+            let phase = Instant::now();
+            let (tcp, peer) = Self::connect_through(&proxy, req).await?;
+            (tcp, peer, None, phase.elapsed())
+        } else {
+            let (addrs, dns) = self.addresses(req).await?;
+            let phase = Instant::now();
+            let (tcp, peer) = connect_first(&addrs, limits.connect_timeout).await?;
+            (tcp, peer, dns, phase.elapsed())
+        };
 
         let phase = Instant::now();
         let (tls, captured) = negotiate(req, tcp).await?;
@@ -122,6 +164,10 @@ impl std::fmt::Debug for RustlsChainFetcher {
 
 #[async_trait]
 impl ChainFetcher for RustlsChainFetcher {
+    fn use_proxy(&self, proxy: Option<ProxySettings>) {
+        *self.proxy.lock().unwrap_or_else(PoisonError::into_inner) = proxy;
+    }
+
     /// Fetches the chain `req.target` presents.
     ///
     /// Each phase has its own timeout and the whole call is bounded by

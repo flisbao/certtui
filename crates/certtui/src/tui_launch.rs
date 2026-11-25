@@ -6,11 +6,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use certtui_app::config::{Theme, UiConfig};
+use certtui_app::enrich::ReportEnricher as _;
 use certtui_app::enrich::RevocationOptions;
 use certtui_app::error::LoadError;
 use certtui_app::history::HistoryRepository;
 use certtui_app::keystore::SecretString;
-use certtui_app::ports::{Clock as _, LoadedCerts, LocalSource, SourceLoader};
+use certtui_app::ports::{ChainFetcher as _, Clock as _, LoadedCerts, LocalSource, SourceLoader};
+use certtui_app::proxy::ProxySettings;
 use certtui_app::trust::TrustSource;
 use certtui_domain::limits::Limits;
 use certtui_domain::lint::Thresholds;
@@ -52,6 +54,8 @@ pub struct InspectorOptions {
     pub revocation: RevocationOptions,
     /// The keystore password given on the command line, if any.
     pub password: Option<SecretString>,
+    /// The proxy of `--proxy`, the config or the environment.
+    pub proxy: Option<ProxySettings>,
 }
 
 /// What the TUI is opened with.
@@ -106,9 +110,13 @@ impl TuiLauncher for ProcessLauncher {
             stdin: request.stdin,
         });
         let limits = request.options.limits;
+        let fetcher = RustlsChainFetcher::new();
+        fetcher.use_proxy(request.options.proxy.clone());
+        let enricher = crate::system_inspector::real_enricher();
+        enricher.use_proxy(request.options.proxy.clone());
         let inspector = SystemInspector {
             loader,
-            fetcher: Arc::new(RustlsChainFetcher::new()),
+            fetcher: Arc::new(fetcher),
             verifier: Arc::new(WebpkiChainVerifier::new()),
             clock: Arc::new(SystemClock),
             trust_provider: Arc::new(move |ca_files| {
@@ -118,7 +126,7 @@ impl TuiLauncher for ProcessLauncher {
                     limits,
                 ))
             }),
-            enricher: Arc::new(crate::system_inspector::real_enricher()),
+            enricher: Arc::new(enricher),
             options: request.options,
             anchors: OnceCell::new(),
         };

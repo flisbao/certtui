@@ -34,6 +34,8 @@ pub mod ports;
 
 pub mod present;
 
+pub mod proxy;
+
 pub mod revocation;
 
 pub mod trust;

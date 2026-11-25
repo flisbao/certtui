@@ -303,3 +303,84 @@ async fn quando_flag_libera_urls_internas_deve_conectar_em_loopback_por_nome_e_p
     assert_eq!(by_ip, Ok(vec![1]));
     assert_eq!(by_name, Ok(vec![1]));
 }
+
+fn proxy_settings(
+    server: &MockServer,
+    no_proxy: Option<&str>,
+) -> certtui_app::proxy::ProxySettings {
+    let addr = *server.address();
+    certtui_app::proxy::ProxySettings {
+        endpoint: certtui_app::proxy::ProxyEndpoint {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+        },
+        no_proxy: no_proxy.map(ToOwned::to_owned),
+    }
+}
+
+#[tokio::test]
+async fn quando_ha_proxy_deve_pedir_a_url_absoluta_ao_proxy() {
+    // A plain-HTTP URL through a proxy is sent as `GET http://host/path`.
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ocsp-response"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![9, 9]))
+        .expect(1)
+        .mount(&proxy)
+        .await;
+    let fetcher = ReqwestHttpFetcher::new(3);
+    fetcher.use_proxy(Some(proxy_settings(&proxy, None)));
+
+    let got = fetcher
+        .get("http://ocsp.example.invalid/ocsp-response", LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(got, Ok(vec![9, 9]));
+    let received = proxy.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received.first().unwrap().url.host_str(),
+        Some("ocsp.example.invalid")
+    );
+}
+
+#[tokio::test]
+async fn quando_host_esta_no_no_proxy_deve_ir_direto_sem_tocar_no_proxy() {
+    let origin = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ca.der"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7]))
+        .mount(&origin)
+        .await;
+    let proxy = MockServer::start().await;
+    let fetcher = ReqwestHttpFetcher::new(3).with_internal_allowed(true);
+    fetcher.use_proxy(Some(proxy_settings(&proxy, Some("127.0.0.1"))));
+
+    let got = fetcher
+        .get(&format!("{}/ca.der", origin.uri()), LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(got, Ok(vec![7]));
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn quando_proxy_e_removido_deve_voltar_a_conexao_direta() {
+    let origin = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1]))
+        .mount(&origin)
+        .await;
+    let proxy = MockServer::start().await;
+    let fetcher = ReqwestHttpFetcher::new(3).with_internal_allowed(true);
+    fetcher.use_proxy(Some(proxy_settings(&proxy, None)));
+    fetcher.use_proxy(None);
+
+    let got = fetcher
+        .get(&format!("{}/x", origin.uri()), LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(got, Ok(vec![1]));
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 0);
+}

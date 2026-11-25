@@ -13,6 +13,7 @@ use crate::error::LoadError;
 use crate::fetch::{FetchError, FetchRequest, FetchedChain};
 use crate::http::HttpError;
 use crate::keystore::SecretString;
+use crate::proxy::ProxySettings;
 use crate::trust::{TrustAnchors, TrustError, TrustSource};
 
 /// Source of the current time.
@@ -100,6 +101,10 @@ pub trait SourceLoader: Send + Sync {
 /// Object safe: the application layer holds it as `dyn ChainFetcher`.
 #[async_trait::async_trait]
 pub trait ChainFetcher: Send + Sync {
+    /// Sets the proxy later fetches go through, or `None` for none.
+    /// Implementations that cannot use a proxy ignore it.
+    fn use_proxy(&self, _proxy: Option<ProxySettings>) {}
+
     /// Connects to `req.target` within `req.limits` and returns what the
     /// peer presented. A rejection alert following a client certificate
     /// request may return the already presented chain with a diagnostic and
@@ -160,6 +165,10 @@ pub trait ChainVerifier: Send + Sync {
 /// while the body streams in (never after buffering it whole).
 #[async_trait::async_trait]
 pub trait HttpFetcher: Send + Sync {
+    /// Sets the proxy later requests go through, or `None` for none.
+    /// Implementations that cannot use a proxy ignore it.
+    fn use_proxy(&self, _proxy: Option<ProxySettings>) {}
+
     /// Lifts (`true`) or restores (`false`) the refusal of internal
     /// destinations (loopback, link-local, cloud metadata). The default is
     /// refusal; the call is `--allow-internal-urls`. Implementations that

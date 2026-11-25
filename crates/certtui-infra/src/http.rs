@@ -8,12 +8,13 @@
 //! byte a second still ends).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use certtui_app::http::HttpError;
 use certtui_app::ports::HttpFetcher;
+use certtui_app::proxy::ProxySettings;
 use reqwest::header::{CONTENT_TYPE, LOCATION};
 use reqwest::{Method, Url};
 
@@ -25,13 +26,16 @@ const USER_AGENT: &str = concat!("certtui/", env!("CARGO_PKG_VERSION"));
 ///
 /// The HTTP client (which loads the system trust roots) is built on the first
 /// request, so a run that never reaches the network pays nothing for it.
-/// No proxy is used until the configuration milestone (M8).
+/// A proxy (`--proxy`, or the environment when the config allows it) is
+/// consulted on every request, so it can be set after the first one.
 #[derive(Debug)]
 pub struct ReqwestHttpFetcher {
     client: OnceLock<Result<reqwest::Client, HttpError>>,
     max_redirects: usize,
     /// Lifts the refusal of internal destinations (`--allow-internal-urls`).
     allow_internal: Arc<AtomicBool>,
+    /// The proxy requests go through, read by the client on each request.
+    proxy: Arc<RwLock<Option<ProxySettings>>>,
 }
 
 impl ReqwestHttpFetcher {
@@ -43,6 +47,7 @@ impl ReqwestHttpFetcher {
             client: OnceLock::new(),
             max_redirects,
             allow_internal: Arc::new(AtomicBool::new(false)),
+            proxy: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -60,12 +65,13 @@ impl ReqwestHttpFetcher {
 
     fn client(&self) -> Result<&reqwest::Client, HttpError> {
         let allow_internal = Arc::clone(&self.allow_internal);
+        let proxy = Arc::clone(&self.proxy);
         self.client
             .get_or_init(|| {
                 reqwest::Client::builder()
                     .dns_resolver(Arc::new(FilteringResolver::new(allow_internal)))
                     .redirect(reqwest::redirect::Policy::none())
-                    .no_proxy()
+                    .proxy(reqwest::Proxy::custom(move |url| proxy_for(&proxy, url)))
                     .user_agent(USER_AGENT)
                     .build()
                     .map_err(|_| HttpError::Transport("client setup failed".to_owned()))
@@ -129,8 +135,20 @@ impl ReqwestHttpFetcher {
     }
 }
 
+/// The proxy URL for a request to `url`, or `None` to go direct. Never
+/// panics: a poisoned lock or an unparsable endpoint means "direct".
+fn proxy_for(proxy: &RwLock<Option<ProxySettings>>, url: &Url) -> Option<Url> {
+    let guard = proxy.read().unwrap_or_else(PoisonError::into_inner);
+    let endpoint = guard.as_ref()?.endpoint_for(url.host_str()?)?;
+    Url::parse(&format!("http://{endpoint}")).ok()
+}
+
 #[async_trait]
 impl HttpFetcher for ReqwestHttpFetcher {
+    fn use_proxy(&self, proxy: Option<ProxySettings>) {
+        *self.proxy.write().unwrap_or_else(PoisonError::into_inner) = proxy;
+    }
+
     fn allow_internal_urls(&self, allow: bool) {
         self.allow_internal.store(allow, Ordering::Relaxed);
     }

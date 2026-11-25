@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::aia::chase_aia;
 use crate::ports::{Clock, HttpFetcher};
+use crate::proxy::ProxySettings;
 use crate::revocation::{RevocationProtocol, RevocationScope, RevocationService, check_revocation};
 
 /// What `--aia`, `--revocation` and `--no-revocation` ask for.
@@ -43,6 +44,9 @@ impl Default for RevocationOptions {
 /// Completes a gathered report before validation.
 #[async_trait::async_trait]
 pub trait ReportEnricher: Send + Sync {
+    /// Sets the proxy the OCSP, CRL and AIA downloads go through, or `None`.
+    fn use_proxy(&self, _proxy: Option<ProxySettings>) {}
+
     /// Returns `report` with the chain completed through AIA when asked and,
     /// for network targets, revocation status and staple state filled in.
     /// `anchors` are the issuers already known (they end AIA chasing).
@@ -100,6 +104,10 @@ impl NetworkEnricher {
 
 #[async_trait::async_trait]
 impl ReportEnricher for NetworkEnricher {
+    fn use_proxy(&self, proxy: Option<ProxySettings>) {
+        self.http.use_proxy(proxy);
+    }
+
     async fn enrich(
         &self,
         report: InspectionReport,
