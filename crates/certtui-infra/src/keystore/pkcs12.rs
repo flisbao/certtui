@@ -1,5 +1,9 @@
 //! PKCS#12 (`.p12`, `.pfx`): certificates out of the bags, keys dropped at once.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
+
 use certtui_app::keystore::{
     EntryKind, ExposeSecret, KeystoreContents, KeystoreEntry, KeystoreError, KeystoreReader,
     SecretString,
@@ -8,12 +12,71 @@ use certtui_domain::limits::Limits;
 use p12_keystore::Pkcs12Archive;
 use p12_keystore::error::Error as P12Error;
 
+use super::kdf_guard::KdfBudget;
+
+/// How long the library may take to open one keystore. Real files open in
+/// well under a second; this bounds what hides inside encrypted parts, which
+/// the clear-text budget cannot see.
+const DEADLINE: Duration = Duration::from_secs(10);
+
+/// Workers allowed to run at once. A worker that missed its deadline keeps
+/// burning CPU until the library returns (a thread cannot be killed), so the
+/// next attempts are refused rather than piled on top of it.
+const MAX_WORKERS: usize = 2;
+
+static WORKERS: Workers = Workers::new(MAX_WORKERS);
+
+/// How many workers run, and how many may.
+struct Workers {
+    running: AtomicUsize,
+    max: usize,
+}
+
+impl Workers {
+    const fn new(max: usize) -> Self {
+        Self {
+            running: AtomicUsize::new(0),
+            max,
+        }
+    }
+}
+
+/// A worker slot, released when the worker ends, whatever its fate.
+struct Slot(&'static Workers);
+
+impl Slot {
+    fn take(workers: &'static Workers) -> Option<Slot> {
+        workers
+            .running
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |now| {
+                (now < workers.max).then_some(now + 1)
+            })
+            .ok()
+            .map(|_| Slot(workers))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.running.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// A certificate bag, keys already gone.
+struct Bag {
+    friendly_name: Option<String>,
+    der: Vec<u8>,
+    has_key_id: bool,
+}
+
 /// `KeystoreReader` for PKCS#12, on `p12-keystore`.
 ///
 /// The library decrypts every bag it can, keys included. This adapter keeps
 /// the certificates and lets everything else go out of scope before
 /// returning, so a key is never held past this function, never stored in the
-/// result and never printed.
+/// result and never printed. The library runs in a worker thread under a
+/// clear-text budget ([`KdfBudget`]) and a deadline, so a hostile file costs
+/// the caller a bounded wait, not a hang or a gigabyte.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Pkcs12Reader;
 
@@ -24,57 +87,122 @@ impl KeystoreReader for Pkcs12Reader {
         password: Option<&SecretString>,
         limits: &Limits,
     ) -> Result<KeystoreContents, KeystoreError> {
-        if bytes.len() > limits.max_keystore_bytes {
-            return Err(KeystoreError::TooLarge {
-                limit: limits.max_keystore_bytes,
-            });
-        }
-        // Without a password the empty one is still tried: a PKCS#12 made
-        // with an empty password opens, any other asks for one.
-        let given = password.map_or("", |secret| secret.expose_secret());
-        let archive = Pkcs12Archive::from_pkcs12(bytes, given).map_err(|error| {
-            let mapped = map_error(&error, bytes);
-            if password.is_none() && mapped == KeystoreError::WrongPasswordOrCorrupt {
-                KeystoreError::PasswordRequired
+        read_with(
+            bytes,
+            password,
+            limits,
+            &KdfBudget::default(),
+            DEADLINE,
+            &WORKERS,
+        )
+    }
+}
+
+/// [`Pkcs12Reader::read_certs`] with the budget and the deadline given, so
+/// tests can make them small.
+fn read_with(
+    bytes: &[u8],
+    password: Option<&SecretString>,
+    limits: &Limits,
+    budget: &KdfBudget,
+    deadline: Duration,
+    workers: &'static Workers,
+) -> Result<KeystoreContents, KeystoreError> {
+    if bytes.len() > limits.max_keystore_bytes {
+        return Err(KeystoreError::TooLarge {
+            limit: limits.max_keystore_bytes,
+        });
+    }
+    budget.check(bytes)?;
+    let bags = open_in_worker(bytes, password, deadline, workers)?;
+    if bags.len() > limits.max_certs_per_source {
+        return Err(KeystoreError::TooManyEntries {
+            max: limits.max_certs_per_source,
+        });
+    }
+    let entries = bags
+        .into_iter()
+        .enumerate()
+        .map(|(index, bag)| KeystoreEntry {
+            alias: bag
+                .friendly_name
+                .unwrap_or_else(|| format!("cert-{}", index.saturating_add(1))),
+            der: bag.der,
+            kind: if bag.has_key_id {
+                EntryKind::CertOfKeyEntry
             } else {
-                mapped
-            }
-        })?;
-        // Keep the certificates only: the key and secret bags die here.
-        let Pkcs12Archive {
-            certs,
-            keys,
-            secrets,
-        } = archive;
-        drop(keys);
-        drop(secrets);
-        if certs.len() > limits.max_certs_per_source {
-            return Err(KeystoreError::TooManyEntries {
-                max: limits.max_certs_per_source,
-            });
-        }
-        let entries = certs
-            .into_iter()
-            .enumerate()
-            .map(|(index, bag)| KeystoreEntry {
-                alias: bag
-                    .friendly_name
-                    .unwrap_or_else(|| format!("cert-{}", index.saturating_add(1))),
-                der: bag.cert.as_der().to_vec(),
-                kind: if bag.local_key_id.is_some() {
-                    EntryKind::CertOfKeyEntry
-                } else {
-                    EntryKind::TrustedCert
-                },
-            })
-            .collect();
-        Ok(KeystoreContents {
-            entries,
-            // The library verifies the MAC only when the file has one; a file
-            // without it opens with any password and nothing vouches for it.
-            integrity_unverified: !has_mac(bytes),
-            ignored: 0,
+                EntryKind::TrustedCert
+            },
         })
+        .collect();
+    Ok(KeystoreContents {
+        entries,
+        // The library verifies the MAC only when the file has one; a file
+        // without it opens with any password and nothing vouches for it.
+        integrity_unverified: !has_mac(bytes),
+        ignored: 0,
+    })
+}
+
+/// Runs the library on its own thread and waits at most `deadline`.
+fn open_in_worker(
+    bytes: &[u8],
+    password: Option<&SecretString>,
+    deadline: Duration,
+    workers: &'static Workers,
+) -> Result<Vec<Bag>, KeystoreError> {
+    let slot = Slot::take(workers).ok_or(KeystoreError::TooExpensive)?;
+    let data = bytes.to_vec();
+    let secret = password.cloned();
+    let (tx, rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("pkcs12".to_owned())
+        .spawn(move || {
+            let _slot = slot;
+            // Without a password the empty one is still tried: a PKCS#12 made
+            // with an empty password opens, any other asks for one.
+            let given = secret.as_ref().map_or("", |s| s.expose_secret());
+            let outcome = Pkcs12Archive::from_pkcs12(&data, given)
+                .map(|archive| {
+                    // Keep the certificates only: key and secret bags die here.
+                    let Pkcs12Archive {
+                        certs,
+                        keys,
+                        secrets,
+                    } = archive;
+                    drop(keys);
+                    drop(secrets);
+                    certs
+                        .into_iter()
+                        .map(|bag| Bag {
+                            friendly_name: bag.friendly_name,
+                            der: bag.cert.as_der().to_vec(),
+                            has_key_id: bag.local_key_id.is_some(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| {
+                    let mapped = map_error(&error, &data);
+                    if secret.is_none() && mapped == KeystoreError::WrongPasswordOrCorrupt {
+                        KeystoreError::PasswordRequired
+                    } else {
+                        mapped
+                    }
+                });
+            // The receiver is gone when the deadline passed.
+            let _ = tx.send(outcome);
+        });
+    if spawned.is_err() {
+        return Err(KeystoreError::Malformed(
+            "could not start the keystore reader".to_owned(),
+        ));
+    }
+    match rx.recv_timeout(deadline) {
+        Ok(outcome) => outcome,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(KeystoreError::TooExpensive),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(KeystoreError::Malformed(
+            "the keystore reader stopped unexpectedly".to_owned(),
+        )),
     }
 }
 
@@ -172,8 +300,26 @@ mod tests {
         SecretString::from(text.to_owned())
     }
 
+    /// Plenty of workers: the tests run in parallel and the limiter is tested apart.
+    static TEST_WORKERS: Workers = Workers::new(256);
+
+    fn read_limited(
+        bytes: &[u8],
+        pw: Option<&SecretString>,
+        limits: &Limits,
+    ) -> Result<KeystoreContents, KeystoreError> {
+        read_with(
+            bytes,
+            pw,
+            limits,
+            &KdfBudget::default(),
+            DEADLINE,
+            &TEST_WORKERS,
+        )
+    }
+
     fn read(bytes: &[u8], pw: Option<&SecretString>) -> Result<KeystoreContents, KeystoreError> {
-        Pkcs12Reader.read_certs(bytes, pw, &Limits::default())
+        read_limited(bytes, pw, &Limits::default())
     }
 
     fn ders(contents: &KeystoreContents) -> Vec<&[u8]> {
@@ -194,6 +340,86 @@ mod tests {
 
         assert_eq!(ders(&got), expected());
         assert!(!got.integrity_unverified, "the MAC was verified");
+    }
+
+    #[test]
+    fn quando_scrypt_deve_recusar_sem_derivar_nada() {
+        // 190 bytes that would cost ~1 GiB of memory in the library.
+        let started = std::time::Instant::now();
+        let got = read(fixture!("kdf-scrypt.p12"), None);
+        assert_eq!(
+            got,
+            Err(KeystoreError::UnsupportedAlgorithm("scrypt".to_owned()))
+        );
+        let got = read(fixture!("kdf-scrypt.p12"), Some(&password("changeit")));
+        assert_eq!(
+            got,
+            Err(KeystoreError::UnsupportedAlgorithm("scrypt".to_owned()))
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn quando_muitas_derivacoes_caras_deve_recusar_sem_gastar_cpu() {
+        // 10 x 1 000 000 iterations, no MAC: ~5 s of CPU if obeyed.
+        let started = std::time::Instant::now();
+        let got = read(fixture!("kdf-many-pbkdf2.p12"), None);
+        assert_eq!(got, Err(KeystoreError::TooExpensive));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn quando_o_trabalho_passa_do_prazo_deve_dar_too_expensive_no_prazo() {
+        // The budget is lifted so the work really starts; the deadline stops the wait.
+        let lifted = KdfBudget {
+            max_calls: usize::MAX,
+            max_total_iterations: u64::MAX,
+        };
+        let started = std::time::Instant::now();
+
+        let got = read_with(
+            fixture!("kdf-many-pbkdf2.p12"),
+            None,
+            &Limits::default(),
+            &lifted,
+            Duration::from_millis(100),
+            &TEST_WORKERS,
+        );
+
+        assert_eq!(got, Err(KeystoreError::TooExpensive));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn quando_ha_trabalhadores_demais_deve_recusar_o_proximo() {
+        // Its own counter: the shared one is used by the tests running beside it.
+        static OWN: Workers = Workers::new(MAX_WORKERS);
+        let read_with_own = || {
+            read_with(
+                fixture!("certs-only.p12"),
+                Some(&password("changeit")),
+                &Limits::default(),
+                &KdfBudget::default(),
+                DEADLINE,
+                &OWN,
+            )
+        };
+        let held: Vec<Slot> = (0..MAX_WORKERS).filter_map(|_| Slot::take(&OWN)).collect();
+        assert_eq!(held.len(), MAX_WORKERS);
+
+        assert_eq!(read_with_own(), Err(KeystoreError::TooExpensive));
+
+        drop(held);
+        assert!(read_with_own().is_ok(), "released slots work again");
+        assert_eq!(OWN.running.load(Ordering::Acquire), 0, "no slot leaked");
     }
 
     #[test]
@@ -335,7 +561,7 @@ mod tests {
             max_keystore_bytes: 100,
             ..Limits::default()
         };
-        let got = Pkcs12Reader.read_certs(
+        let got = read_limited(
             fixture!("chain-with-key.p12"),
             Some(&password("changeit")),
             &limits,
@@ -349,7 +575,7 @@ mod tests {
             max_certs_per_source: 2,
             ..Limits::default()
         };
-        let got = Pkcs12Reader.read_certs(
+        let got = read_limited(
             fixture!("certs-only.p12"),
             Some(&password("changeit")),
             &limits,

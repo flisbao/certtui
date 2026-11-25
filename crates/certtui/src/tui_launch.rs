@@ -85,11 +85,15 @@ impl TuiLauncher for ProcessLauncher {
     }
 
     fn launch(&self, request: TuiRequest) -> anyhow::Result<()> {
+        // One loader for the targets and for `--ca-file`: a keystore used as a
+        // CA file needs the same password, and so does one the dialog opens.
+        let files: Arc<FsSourceLoader> =
+            Arc::new(FsSourceLoader::new().with_password(request.options.password.clone()));
+        let trust_loader: Arc<dyn SourceLoader> = files.clone();
         let loader: Arc<dyn SourceLoader> = Arc::new(StdinPreloaded {
-            inner: Arc::new(FsSourceLoader::new().with_password(request.options.password.clone())),
+            inner: files,
             stdin: request.stdin,
         });
-        let trust_loader: Arc<FsSourceLoader> = Arc::new(FsSourceLoader::new());
         let inspector = SystemInspector {
             loader,
             fetcher: Arc::new(RustlsChainFetcher::new()),
@@ -98,7 +102,7 @@ impl TuiLauncher for ProcessLauncher {
             trust_provider: Arc::new(move |ca_files| {
                 Box::new(NativeTrustProvider::new(
                     ca_files,
-                    trust_loader.clone(),
+                    Arc::clone(&trust_loader),
                     Limits::default(),
                 ))
             }),

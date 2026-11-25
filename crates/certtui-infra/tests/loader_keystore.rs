@@ -20,6 +20,14 @@ const FIXTURES: &str = concat!(
     "/../../tests/fixtures/keystores"
 );
 
+/// The PKCS#12 reader allows few concurrent workers (a hostile file can keep
+/// one busy), so the tests that open one take turns.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A scratch directory removed on drop (no `tempfile` crate).
 struct Scratch(PathBuf);
 
@@ -62,6 +70,7 @@ fn load(
 
 #[test]
 fn quando_arquivo_e_p12_deve_ser_detectado_por_conteudo_mesmo_com_extensao_errada() {
+    let _turn = one_at_a_time();
     let scratch = Scratch::new();
     let path = scratch.copy("chain-with-key.p12", "not-a-keystore.txt");
     let loader = FsSourceLoader::new().with_password(Some(changeit()));
@@ -117,6 +126,7 @@ fn quando_jks_sem_senha_deve_listar_certs_e_anotar_integridade_nao_verificada() 
 
 #[test]
 fn quando_p12_sem_senha_deve_pedir_senha() {
+    let _turn = one_at_a_time();
     let scratch = Scratch::new();
     let path = scratch.copy("chain-with-key.p12", "store.p12");
 
@@ -127,6 +137,7 @@ fn quando_p12_sem_senha_deve_pedir_senha() {
 
 #[test]
 fn quando_senha_errada_deve_dar_keystore_wrong_password() {
+    let _turn = one_at_a_time();
     let scratch = Scratch::new();
     let path = scratch.copy("chain-with-key.p12", "store.p12");
     let loader = FsSourceLoader::new().with_password(Some(SecretString::from("nope".to_owned())));
@@ -141,6 +152,7 @@ fn quando_senha_errada_deve_dar_keystore_wrong_password() {
 
 #[test]
 fn quando_p12_sem_mac_deve_anotar_integridade_nao_verificada() {
+    let _turn = one_at_a_time();
     let scratch = Scratch::new();
     let path = scratch.copy("no-mac.p12", "store.p12");
     let loader = FsSourceLoader::new().with_password(Some(changeit()));
@@ -152,6 +164,7 @@ fn quando_p12_sem_mac_deve_anotar_integridade_nao_verificada() {
 
 #[test]
 fn quando_set_password_muda_deve_valer_para_a_proxima_carga() {
+    let _turn = one_at_a_time();
     let scratch = Scratch::new();
     let path = scratch.copy("chain-with-key.p12", "store.p12");
     let loader = FsSourceLoader::new();
@@ -215,4 +228,40 @@ fn quando_arquivo_tem_chave_privada_em_texto_deve_continuar_ignorando_a_chave() 
 fn base64_line(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[test]
+fn quando_uma_carga_esta_em_andamento_deve_set_password_nao_esperar_por_ela() {
+    // A FIFO makes `load` block opening the file, a stand-in for a slow keystore.
+    let scratch = Scratch::new();
+    let fifo = scratch.0.join("slow.p12");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    if !made.is_ok_and(|status| status.success()) {
+        return; // no mkfifo here: nothing to simulate with
+    }
+    let loader = std::sync::Arc::new(FsSourceLoader::new());
+    let blocked = {
+        let loader = std::sync::Arc::clone(&loader);
+        let fifo = fifo.clone();
+        std::thread::spawn(move || load(&loader, &fifo))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(200)); // let it block in open()
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    {
+        let loader = std::sync::Arc::clone(&loader);
+        std::thread::spawn(move || {
+            loader.set_password(Some(changeit()));
+            let _ = done_tx.send(());
+        });
+    }
+    let waited = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+
+    // Unblock the first load whatever happened, so the test never hangs.
+    drop(fs::OpenOptions::new().write(true).open(&fifo));
+    let _ = blocked.join();
+    assert!(
+        waited.is_ok(),
+        "set_password waited for the load in progress"
+    );
 }

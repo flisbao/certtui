@@ -5,6 +5,7 @@
 //! returns, and the JKS reader skips key entries without reading them.
 
 mod jks;
+mod kdf_guard;
 mod pkcs12;
 
 pub use jks::JksReader;

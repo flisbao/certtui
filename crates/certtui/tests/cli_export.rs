@@ -376,3 +376,22 @@ fn quando_export_de_keystore_sem_senha_deve_sair_3() {
     assert_eq!(out.status.code(), Some(3));
     assert_eq!(dir.names(), Vec::<String>::new());
 }
+
+#[test]
+fn quando_der_com_chain_e_alvo_exige_senha_deve_sair_2_antes_de_carregar_o_alvo() {
+    // The usage error comes first: not exit 3 ("requires a password").
+    let dir = Scratch::new("derchain-first");
+    let out_path = dir.path("x.der");
+    let out = run(&[
+        "export",
+        &format!("{KEYSTORES}/chain-with-key.p12"),
+        "--format",
+        "der",
+        "--chain",
+        "--out",
+        path_str(&out_path),
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("DER cannot hold a certificate chain"));
+    assert_eq!(dir.names(), Vec::<String>::new());
+}

@@ -148,7 +148,7 @@ fn render_chain(
             format!(
                 "    {}",
                 fit(
-                    &labels::origin_text(&record.origin),
+                    &labels::single_line(&labels::origin_text(&record.origin)),
                     width.saturating_sub(4)
                 )
             ),
@@ -394,5 +394,29 @@ mod fingerprint_tests {
         update(&mut state, key('x'));
         update(&mut state, key('x'));
         insta::assert_snapshot!(text(&render(&state, 80, 24)));
+    }
+
+    #[test]
+    fn quando_alias_do_keystore_tem_bidi_e_controle_deve_nao_chegar_ao_terminal() {
+        let mut record = crate::test_fixtures::fixture_record("rsa2048-leaf", 0);
+        record.origin = certtui_domain::model::CertOrigin::Keystore {
+            path: "store.jks".into(),
+            alias: "\u{202e}\u{2066}\u{7}\u{1b}ok".to_owned(),
+        };
+        let screen = text(&render(
+            &inspect_state(crate::test_fixtures::report_of(vec![record])),
+            200,
+            24,
+        ));
+        for forbidden in ['\u{202e}', '\u{2066}', '\u{7}', '\u{1b}'] {
+            assert!(
+                !screen.contains(forbidden),
+                "{forbidden:?} reached the screen"
+            );
+        }
+        assert!(
+            screen.contains("alias"),
+            "the alias line is on screen:\n{screen}"
+        );
     }
 }

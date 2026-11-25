@@ -391,3 +391,65 @@ fn quando_cert_e_texto_com_chave_privada_deve_continuar_ignorando_a_chave() {
     );
     assert!(!stdout(&out).contains("PRIVATE KEY"));
 }
+
+#[test]
+fn quando_ca_file_e_keystore_deve_usar_a_senha_dada_na_linha_de_comando() {
+    // The password given for the targets also opens a keystore used as `--ca-file`.
+    let out = certtui()
+        .args([
+            "inspect",
+            &format!("{FIXTURES}/rsa2048-leaf.pem"),
+            "--text",
+            "--ca-only",
+            "--ca-file",
+            &keystore("certs-only.p12"),
+            "--password-env",
+            "PW",
+        ])
+        .env("PW", "changeit")
+        .output()
+        .unwrap();
+    let err = stderr(&out);
+    assert!(!err.contains("requires a password"), "{err}");
+    assert_ne!(out.status.code(), Some(2), "{err}");
+}
+
+#[test]
+fn quando_ca_file_e_jks_sem_senha_deve_avisar_que_a_integridade_nao_foi_verificada() {
+    let out = certtui()
+        .args([
+            "inspect",
+            &format!("{FIXTURES}/rsa2048-leaf.pem"),
+            "--text",
+            "--ca-only",
+            "--ca-file",
+            &keystore("trusted-certs.jks"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        stderr(&out).contains("without verifying its integrity"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn quando_p12_hostil_deve_sair_3_rapido_e_sem_memoria() {
+    for (file, word) in [
+        ("kdf-scrypt.p12", "scrypt"),
+        ("kdf-many-pbkdf2.p12", "too much work"),
+    ] {
+        let started = std::time::Instant::now();
+        let out = certtui()
+            .args(["inspect", &keystore(file), "--text"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{file}: {}", stderr(&out));
+        assert!(stderr(&out).contains(word), "{file}: {}", stderr(&out));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{file}"
+        );
+    }
+}

@@ -76,4 +76,71 @@ head -c 120 trusted-certs.jks >truncated.jks
 cp trusted-certs.jks bad-count.jks
 printf '\xff\xff\xff\xff' | dd of=bad-count.jks bs=1 seek=8 conv=notrunc 2>/dev/null
 
-ls -1
+
+
+# --- PKCS#12 hostis: custo de derivação de chave (só para os testes de limite) ------
+# Nenhum contém chave nem certificado útil. `kdf-scrypt.p12` (190 bytes, escrito à mão em
+# DER) pede scrypt N=2^20, r=8: ~1 GiB de memória se algum leitor o obedecesse.
+# `kdf-many-pbkdf2.p12` é um .p12 real do OpenSSL (AES-256, PBKDF2, 1 000 000 de iterações,
+# senha vazia) com o EncryptedData repetido 10 vezes e SEM MAC (sem MAC nada barra a
+# derivação): ~5 s de CPU num leitor sem teto.
+openssl pkcs12 -export -nokeys -in "$TMP/all.pem" -iter 1000000 -passout "pass:" -out "$TMP/kdf-one.p12"
+KDF_ONE="$TMP/kdf-one.p12" python3 - <<'PY'
+import os
+
+def enc(tag, body):
+    n = len(body)
+    if n < 128:
+        length = bytes([n])
+    else:
+        raw = n.to_bytes((n.bit_length() + 7) // 8, "big")
+        length = bytes([0x80 | len(raw)]) + raw
+    return bytes([tag]) + length + body
+
+def header(data, at):
+    tag, first = data[at], data[at + 1]
+    at += 2
+    if first & 0x80:
+        count = first & 0x7F
+        first = int.from_bytes(data[at:at + count], "big")
+        at += count
+    return tag, first, at
+
+def integer(value):
+    return enc(0x02, value.to_bytes((value.bit_length() + 8) // 8, "big"))
+
+DATA = bytes.fromhex("06092a864886f70d010701")
+
+# --- scrypt, à mão ---
+def oid(h):
+    return bytes.fromhex(h)
+
+scrypt_oid = oid("06092b06010401da47040b")
+aes256 = oid("060960864801650304012a")
+scrypt_params = enc(0x30, scrypt_oid + enc(0x30, enc(0x04, b"S" * 16) + integer(1 << 20) + integer(8) + integer(1)))
+pbes2 = enc(0x30, oid("06092a864886f70d01050d") + enc(0x30, scrypt_params + enc(0x30, aes256 + enc(0x04, b"\x00" * 16))))
+eci = enc(0x30, DATA + pbes2 + enc(0x80, b"\x11" * 32))
+safe = enc(0x30, oid("06092a864886f70d010706") + enc(0xA0, enc(0x30, integer(0) + eci)))
+auth = enc(0x30, safe)
+outer = enc(0x30, DATA + enc(0xA0, enc(0x04, auth)))
+open("kdf-scrypt.p12", "wb").write(enc(0x30, bytes.fromhex("020103") + outer))
+
+# --- PBKDF2 real, repetido ---
+data = open(os.environ["KDF_ONE"], "rb").read()
+_, _, at = header(data, 0)                 # PFX
+_, size, nxt = header(data, at)            # version
+at = nxt + size
+_, _, at = header(data, at)                # authSafe ContentInfo
+_, size, nxt = header(data, at)            # OID data
+at = nxt + size
+_, _, at = header(data, at)                # [0]
+_, size, at = header(data, at)             # OCTET STRING
+authsafe = data[at:at + size]
+_, size, at = header(authsafe, 0)          # AuthenticatedSafe SEQUENCE
+safes = authsafe[at:at + size]
+tag, size, at = header(safes, 0)           # first ContentInfo (the encrypted certs)
+first = safes[: at + size]
+many = enc(0x30, first * 10)
+outer = enc(0x30, DATA + enc(0xA0, enc(0x04, many)))
+open("kdf-many-pbkdf2.p12", "wb").write(enc(0x30, bytes.fromhex("020103") + outer))
+PY

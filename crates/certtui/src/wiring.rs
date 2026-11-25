@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use certtui_app::ports::TrustStoreProvider;
+use certtui_app::ports::{SourceLoader, TrustStoreProvider};
 use certtui_domain::limits::Limits;
 use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
@@ -21,21 +21,24 @@ use crate::tui_launch::ProcessLauncher;
 
 /// Runs the CLI against the real process environment.
 pub fn run_process() -> std::process::ExitCode {
-    let loader = FsSourceLoader::new();
+    // One loader for the targets and for `--ca-file`: a keystore used as a CA
+    // file needs the same password the command line gave.
+    let loader = Arc::new(FsSourceLoader::new());
+    let trust_loader: Arc<dyn SourceLoader> = loader.clone();
     // Cheap to build: the async runtime only starts for network targets.
     let fetcher = RustlsChainFetcher::new();
     let verifier = WebpkiChainVerifier::new();
     let clock = SystemClock;
     let enricher = real_enricher();
-    let trust_provider = |ca_files: Vec<PathBuf>| -> Box<dyn TrustStoreProvider> {
+    let trust_provider = move |ca_files: Vec<PathBuf>| -> Box<dyn TrustStoreProvider> {
         Box::new(NativeTrustProvider::new(
             ca_files,
-            Arc::new(FsSourceLoader::new()),
+            Arc::clone(&trust_loader),
             Limits::default(),
         ))
     };
     let env = cli::Env {
-        loader: &loader,
+        loader: loader.as_ref(),
         fetcher: &fetcher,
         verifier: &verifier,
         clock: &clock,

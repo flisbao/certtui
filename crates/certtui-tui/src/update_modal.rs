@@ -77,6 +77,7 @@ pub fn open_export(state: &mut AppState) {
         report,
         format: ExportFormat::Pem,
         selection: ExportSelection::Index(inspect.selected_cert),
+        index: inspect.selected_cert,
         path: format!("{DEFAULT_NAME}.{}", extension(ExportFormat::Pem)),
         error: None,
     }));
@@ -123,6 +124,10 @@ pub fn on_export_failed(state: &mut AppState, failure: ExportFailure) {
                 report: request.report,
                 format: request.format,
                 selection: request.selection,
+                index: state
+                    .inspect
+                    .as_ref()
+                    .map_or(0, |inspect| inspect.selected_cert),
                 path: request.path.to_string_lossy().into_owned(),
                 error: Some(labels::single_line(&message)),
             }));
@@ -242,7 +247,7 @@ fn export_key(state: &mut AppState, mut dialog: ExportModal, key: KeyEvent) -> V
 /// Switches between "this certificate" and "the whole chain".
 fn toggle_selection(dialog: &ExportModal) -> ExportSelection {
     match dialog.selection {
-        ExportSelection::Chain => ExportSelection::Index(0),
+        ExportSelection::Chain => ExportSelection::Index(dialog.index),
         ExportSelection::Index(_) => ExportSelection::Chain,
     }
 }
@@ -612,6 +617,28 @@ mod tests {
         let commands = update(&mut state, press(KeyCode::Enter));
         assert!(
             matches!(commands.as_slice(), [Command::Export(r)] if r.overwrite == Overwrite::Allow)
+        );
+    }
+
+    #[test]
+    fn quando_alterna_para_a_cadeia_e_volta_deve_voltar_ao_certificado_selecionado() {
+        let mut state = ready();
+        state.inspect.as_mut().unwrap().selected_cert = 2;
+        update(&mut state, press(KeyCode::Char('e')));
+
+        update(&mut state, press(KeyCode::Down));
+        assert_eq!(export_modal(&state).selection, ExportSelection::Chain);
+        update(&mut state, press(KeyCode::Down));
+        assert_eq!(export_modal(&state).selection, ExportSelection::Index(2));
+
+        let commands = update(&mut state, press(KeyCode::Enter));
+        let [Command::Export(request)] = commands.as_slice() else {
+            panic!("expected one export, got {commands:?}");
+        };
+        assert_eq!(
+            request.selection,
+            ExportSelection::Index(2),
+            "not certificate #0"
         );
     }
 

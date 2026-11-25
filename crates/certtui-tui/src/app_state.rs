@@ -102,6 +102,9 @@ pub struct ExportModal {
     pub format: ExportFormat,
     /// Which certificates.
     pub selection: ExportSelection,
+    /// The certificate that was selected when the dialog opened: where
+    /// "this certificate" goes back to after looking at the whole chain.
+    pub index: usize,
     /// File name being typed.
     pub path: String,
     /// Why the last attempt failed.

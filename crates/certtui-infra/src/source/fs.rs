@@ -69,8 +69,14 @@ impl SourceLoader for FsSourceLoader {
     }
 
     fn load(&self, src: &LocalSource, limits: &Limits) -> Result<LoadedCerts, LoadError> {
-        let guard = self.password.lock().unwrap_or_else(PoisonError::into_inner);
-        let keystores = Keystores::Open(guard.as_ref());
+        // Copy the password out and let the lock go: opening a keystore can
+        // take seconds, and nobody else may wait on this mutex meanwhile.
+        let password = self
+            .password
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let keystores = Keystores::Open(password.as_ref());
         match src {
             LocalSource::File(path) => {
                 let file = File::open(path).map_err(|error| LoadError::Io(error.to_string()))?;

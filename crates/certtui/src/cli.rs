@@ -9,7 +9,7 @@ use certtui_app::check::FailOn;
 use certtui_app::enrich::{ReportEnricher, RevocationOptions};
 use certtui_app::error::{InspectError, LoadError};
 use certtui_app::export::{
-    ExportFormat, ExportSelection, FileWriter, Overwrite, WriteError, render_export,
+    ExportError, ExportFormat, ExportSelection, FileWriter, Overwrite, WriteError, render_export,
 };
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
@@ -749,6 +749,11 @@ fn export(
     } else {
         ExportSelection::Index(args.index.unwrap_or(0))
     };
+    // A request that cannot work is refused before touching the target: no
+    // network round trip, no password prompt for a file that would not be written.
+    if format == ExportFormat::Der && selection == ExportSelection::Chain {
+        return usage(err, &ExportError::DerCannotRepresentChain.to_string());
+    }
     let report = match gather(network_options, env, target, err)? {
         Ok(report) => report,
         Err(code) => return Ok(code),

@@ -81,6 +81,10 @@ pub enum KeystoreError {
     /// The structure is invalid.
     #[error("malformed keystore: {0}")]
     Malformed(String),
+    /// Opening it would take more key-derivation work than allowed: a hostile
+    /// or unusual file (huge iteration counts, many encrypted parts, scrypt).
+    #[error("keystore needs too much work to open: its key derivation exceeds the limits")]
+    TooExpensive,
     /// The keystore is larger than the byte limit.
     #[error("keystore is larger than the limit of {limit} bytes")]
     TooLarge {
@@ -162,6 +166,14 @@ mod tests {
         assert_eq!(
             KeystoreError::UnsupportedAlgorithm("RC2-40".to_owned()).to_string(),
             "unsupported keystore algorithm: RC2-40"
+        );
+    }
+
+    #[test]
+    fn quando_keystore_e_caro_demais_deve_dizer_que_excede_os_limites() {
+        assert_eq!(
+            KeystoreError::TooExpensive.to_string(),
+            "keystore needs too much work to open: its key derivation exceeds the limits"
         );
     }
 

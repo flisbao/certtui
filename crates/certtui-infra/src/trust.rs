@@ -146,6 +146,16 @@ impl NativeTrustProvider {
                     sanitize_display(&path.display().to_string())
                 ));
             }
+            if loaded
+                .notes
+                .contains(&LoadNote::KeystoreIntegrityUnverified)
+            {
+                out.warnings.push(format!(
+                    "custom CA file {}: the keystore was read without verifying its integrity; \
+                     its certificates are trusted as given",
+                    sanitize_display(&path.display().to_string())
+                ));
+            }
             if skipped > 0 {
                 out.warnings.push(format!(
                     "custom CA file {}: {skipped} unusable certificate(s) skipped",
@@ -267,6 +277,49 @@ mod tests {
             .push(DnType::CommonName, "CertTui Test Root");
         let key = KeyPair::generate().expect("key");
         params.self_signed(&key).expect("cert").pem()
+    }
+
+    #[test]
+    fn quando_ca_file_e_keystore_sem_integridade_deve_avisar() {
+        use certtui_app::ports::{LoadedCerts, RawCert};
+        use certtui_app::testing::FakeSourceLoader;
+        use certtui_domain::model::CertOrigin;
+
+        let mut params = CertificateParams::new(Vec::new()).expect("params");
+        params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Truststore Root");
+        let key = KeyPair::generate().expect("key");
+        let der = params.self_signed(&key).expect("cert").der().to_vec();
+        let loaded = LoadedCerts {
+            certs: vec![RawCert {
+                der,
+                origin: CertOrigin::Keystore {
+                    path: PathBuf::from("trust.jks"),
+                    alias: "root".to_owned(),
+                },
+            }],
+            notes: vec![LoadNote::KeystoreIntegrityUnverified],
+        };
+        let provider = NativeTrustProvider::with_system_loader(
+            vec![PathBuf::from("trust.jks")],
+            Arc::new(FakeSourceLoader(Ok(loaded))),
+            Limits::default(),
+            no_system,
+        );
+
+        let anchors = provider.anchors(&[TrustSource::Custom]).unwrap();
+
+        assert_eq!(anchors.entries.len(), 1, "the anchor is still used");
+        assert!(
+            anchors
+                .warnings
+                .iter()
+                .any(|w| w.contains("without verifying its integrity")),
+            "{:?}",
+            anchors.warnings
+        );
     }
 
     #[test]
