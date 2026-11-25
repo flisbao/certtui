@@ -5,15 +5,16 @@
 //! are dropped as soon as they have been summarized, so memory grows with
 //! the number of rows and not with the size of the chains.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Mutex, PoisonError};
+use std::task::Poll;
 
 use certtui_domain::batch_row::BatchRow;
 use certtui_domain::limits::Limits;
 use certtui_domain::model::InspectionReport;
 use certtui_domain::target::NetworkTarget;
-use tokio::sync::{Semaphore, mpsc};
-use tokio::task::JoinSet;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::ports::Clock;
@@ -57,17 +58,25 @@ pub enum BatchEvent {
 }
 
 /// Runs a list of targets with bounded concurrency.
-pub struct BatchRunner {
-    inspector: Arc<dyn TargetInspector>,
-    clock: Arc<dyn Clock>,
-    limits: Limits,
+///
+/// It borrows its collaborators and starts no task of its own: the workers
+/// are futures polled together inside the future of [`BatchRunner::run`], so
+/// the ports need not be `'static`.
+pub struct BatchRunner<'a> {
+    inspector: &'a dyn TargetInspector,
+    clock: &'a dyn Clock,
+    limits: &'a Limits,
 }
 
-impl BatchRunner {
+impl<'a> BatchRunner<'a> {
     /// A runner over `inspector`; `limits.target_total_timeout` bounds each
     /// target.
     #[must_use]
-    pub fn new(inspector: Arc<dyn TargetInspector>, clock: Arc<dyn Clock>, limits: Limits) -> Self {
+    pub fn new(
+        inspector: &'a dyn TargetInspector,
+        clock: &'a dyn Clock,
+        limits: &'a Limits,
+    ) -> Self {
         Self {
             inspector,
             clock,
@@ -81,9 +90,9 @@ impl BatchRunner {
     /// Each target gets `limits.target_total_timeout`; a target that fails or
     /// times out becomes a [`RowStatus::Failed`](certtui_domain::batch_row::RowStatus)
     /// row and the others go on. `tx` is bounded and awaited, so a slow
-    /// consumer slows the jobs down instead of growing a queue. Cancelling
-    /// `cancel` (or dropping the receiver) stops new jobs, cuts the running
-    /// ones and ends with [`BatchEvent::Finished`].
+    /// consumer slows the workers down instead of growing a queue. Cancelling
+    /// `cancel` (or dropping the receiver) stops new targets, cuts the ones
+    /// in flight and ends with [`BatchEvent::Finished`].
     pub async fn run(
         &self,
         targets: Vec<NetworkTarget>,
@@ -92,12 +101,20 @@ impl BatchRunner {
         cancel: CancellationToken,
     ) {
         let total = targets.len();
-        let concurrency = concurrency.clamp(1, Limits::HARD_CAPS.batch_concurrency);
+        let workers = concurrency
+            .clamp(1, Limits::HARD_CAPS.batch_concurrency)
+            .min(total.max(1));
         let token = cancel.child_token();
-        let (row_tx, row_rx) = mpsc::channel(concurrency);
-        let dispatch = self.dispatch(targets, concurrency, row_tx, &token);
-        let collect = forward(row_rx, &tx, total, &token);
-        tokio::join!(dispatch, collect);
+        let queue = Mutex::new(targets.into_iter().enumerate());
+        let (row_tx, row_rx) = mpsc::channel(workers);
+        let jobs: Vec<Pin<Box<dyn Future<Output = ()> + Send + '_>>> = (0..workers)
+            .map(|_| {
+                let worker = self.worker(&queue, row_tx.clone(), &token);
+                Box::pin(worker) as Pin<Box<dyn Future<Output = ()> + Send + '_>>
+            })
+            .collect();
+        drop(row_tx);
+        tokio::join!(join_all(jobs), forward(row_rx, &tx, total, &token));
         let _ = tx
             .send(BatchEvent::Finished {
                 cancelled: cancel.is_cancelled(),
@@ -105,64 +122,45 @@ impl BatchRunner {
             .await;
     }
 
-    /// Starts one task per target, never more than `concurrency` alive, and
-    /// waits for all of them.
-    async fn dispatch(
+    /// Takes targets from `queue` until it is empty or the batch is
+    /// cancelled.
+    async fn worker(
         &self,
-        targets: Vec<NetworkTarget>,
-        concurrency: usize,
+        queue: &Mutex<std::iter::Enumerate<std::vec::IntoIter<NetworkTarget>>>,
         row_tx: mpsc::Sender<(usize, BatchRow)>,
         token: &CancellationToken,
     ) {
-        let permits = Arc::new(Semaphore::new(concurrency));
-        let mut jobs = JoinSet::new();
-        for (index, target) in targets.into_iter().enumerate() {
-            let permit = tokio::select! {
-                biased;
-                () = token.cancelled() => break,
-                permit = Arc::clone(&permits).acquire_owned() => match permit {
-                    Ok(permit) => permit,
-                    Err(_) => break,
-                },
+        loop {
+            if token.is_cancelled() {
+                return;
+            }
+            let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
+            let Some((index, target)) = next else {
+                return;
             };
-            let job = Job {
-                inspector: Arc::clone(&self.inspector),
-                clock: Arc::clone(&self.clock),
-                timeout: self.limits.target_total_timeout,
-                token: token.clone(),
+            let Some(row) = self.inspect_one(&target, token).await else {
+                return;
             };
-            let row_tx = row_tx.clone();
-            jobs.spawn(async move {
-                let _permit = permit;
-                if let Some(row) = job.run(&target).await {
-                    let _ = row_tx.send((index, row)).await;
-                }
-            });
+            if row_tx.send((index, row)).await.is_err() {
+                return;
+            }
         }
-        drop(row_tx);
-        while jobs.join_next().await.is_some() {}
     }
-}
 
-/// What one task needs to inspect one target.
-struct Job {
-    inspector: Arc<dyn TargetInspector>,
-    clock: Arc<dyn Clock>,
-    timeout: Duration,
-    token: CancellationToken,
-}
-
-impl Job {
     /// The row of `target`, or `None` when the batch was cancelled first.
     /// The report is dropped before this returns.
-    async fn run(&self, target: &NetworkTarget) -> Option<BatchRow> {
+    async fn inspect_one(
+        &self,
+        target: &NetworkTarget,
+        token: &CancellationToken,
+    ) -> Option<BatchRow> {
         let label = target_label(target);
         let outcome = tokio::select! {
             biased;
-            () = self.token.cancelled() => return None,
+            () = token.cancelled() => return None,
             outcome = tokio::time::timeout(
-                self.timeout,
-                self.inspector.inspect(target, self.token.clone()),
+                self.limits.target_total_timeout,
+                self.inspector.inspect(target, token.clone()),
             ) => outcome,
         };
         Some(match outcome {
@@ -173,9 +171,23 @@ impl Job {
     }
 }
 
-/// Passes rows from the jobs to the consumer, counting progress. When the
+/// Polls every future until all are done. It needs no executor of its own,
+/// unlike `tokio::spawn`, so the futures may borrow.
+async fn join_all(mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send + '_>>>) {
+    std::future::poll_fn(|cx| {
+        futures.retain_mut(|future| future.as_mut().poll(cx).is_pending());
+        if futures.is_empty() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+/// Passes rows from the workers to the consumer, counting progress. When the
 /// consumer is gone it cancels the batch and stops reading, which makes the
-/// jobs' own sends fail.
+/// workers' own sends fail.
 async fn forward(
     mut rows: mpsc::Receiver<(usize, BatchRow)>,
     tx: &mpsc::Sender<BatchEvent>,
@@ -254,12 +266,12 @@ mod tests {
     }
 
     impl FakeInspector {
-        fn new(work: Duration) -> Arc<Self> {
-            Arc::new(Self {
+        fn new(work: Duration) -> Self {
+            Self {
                 work,
                 current: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
-            })
+            }
         }
     }
 
@@ -291,13 +303,30 @@ mod tests {
         }
     }
 
-    fn runner(inspector: Arc<FakeInspector>) -> BatchRunner {
-        let now = Timestamp::from_unix(1_800_000_000).unwrap();
-        BatchRunner::new(inspector, Arc::new(FixedClock(now)), Limits::default())
+    /// The collaborators a runner borrows.
+    struct Rig {
+        fake: FakeInspector,
+        clock: FixedClock,
+        limits: Limits,
+    }
+
+    impl Rig {
+        fn new(work: Duration) -> Self {
+            let now = Timestamp::from_unix(1_800_000_000).unwrap();
+            Self {
+                fake: FakeInspector::new(work),
+                clock: FixedClock(now),
+                limits: Limits::default(),
+            }
+        }
+
+        fn runner(&self) -> BatchRunner<'_> {
+            BatchRunner::new(&self.fake, &self.clock, &self.limits)
+        }
     }
 
     async fn run_collect(
-        runner: &BatchRunner,
+        runner: &BatchRunner<'_>,
         targets: Vec<NetworkTarget>,
         concurrency: usize,
         capacity: usize,
@@ -329,7 +358,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_batch_roda_deve_emitir_uma_row_por_alvo_e_finished() {
-        let runner = runner(FakeInspector::new(Duration::from_millis(5)));
+        let rig = Rig::new(Duration::from_millis(5));
+        let runner = rig.runner();
         let events = run_collect(&runner, targets(7), 3, 256).await;
         let rows = rows(&events);
         assert_eq!(
@@ -357,8 +387,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_concorrencia_e_4_deve_nunca_ter_mais_de_4_jobs_simultaneos() {
-        let fake = FakeInspector::new(Duration::from_millis(10));
-        let runner = runner(Arc::clone(&fake));
+        let rig = Rig::new(Duration::from_millis(10));
+        let fake = &rig.fake;
+        let runner = rig.runner();
         let events = run_collect(&runner, targets(20), 4, 256).await;
         assert_eq!(rows(&events).len(), 20);
         assert_eq!(fake.peak.load(Ordering::SeqCst), 4);
@@ -366,8 +397,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_concorrencia_e_zero_deve_rodar_um_por_vez() {
-        let fake = FakeInspector::new(Duration::from_millis(10));
-        let runner = runner(Arc::clone(&fake));
+        let rig = Rig::new(Duration::from_millis(10));
+        let fake = &rig.fake;
+        let runner = rig.runner();
         let events = run_collect(&runner, targets(3), 0, 256).await;
         assert_eq!(rows(&events).len(), 3);
         assert_eq!(fake.peak.load(Ordering::SeqCst), 1);
@@ -375,7 +407,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_alvo_falha_deve_virar_row_failed_e_seguir() {
-        let runner = runner(FakeInspector::new(Duration::from_millis(1)));
+        let rig = Rig::new(Duration::from_millis(1));
+        let runner = rig.runner();
         let list = vec![target("a.test"), target("fail.test"), target("b.test")];
         let rows = rows(&run_collect(&runner, list, 2, 256).await);
         assert_eq!(rows.len(), 3);
@@ -387,7 +420,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_alvo_pendura_deve_falhar_em_target_total_timeout_sem_travar_os_outros() {
-        let runner = runner(FakeInspector::new(Duration::from_millis(1)));
+        let rig = Rig::new(Duration::from_millis(1));
+        let runner = rig.runner();
         let mut list = vec![target("hang.test")];
         list.extend((0..5).map(|i| target(&format!("ok{i}.test"))));
         let (tx, mut rx) = mpsc::channel(256);
@@ -425,8 +459,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_cancelado_deve_emitir_finished_cancelled_e_liberar_permissoes() {
-        let fake = FakeInspector::new(Duration::from_secs(1));
-        let runner = runner(Arc::clone(&fake));
+        let rig = Rig::new(Duration::from_secs(1));
+        let fake = &rig.fake;
+        let runner = rig.runner();
         let cancel = CancellationToken::new();
         let (tx, mut rx) = mpsc::channel(256);
         let trigger = cancel.clone();
@@ -455,7 +490,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_canal_esta_cheio_deve_aplicar_backpressure_sem_perder_rows() {
-        let runner = runner(FakeInspector::new(Duration::from_millis(1)));
+        let rig = Rig::new(Duration::from_millis(1));
+        let runner = rig.runner();
         let (tx, mut rx) = mpsc::channel(1);
         let run = runner.run(targets(30), 8, tx, CancellationToken::new());
         let slow_consumer = async {
@@ -476,7 +512,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_consumidor_some_deve_parar_sem_travar() {
-        let runner = runner(FakeInspector::new(Duration::from_millis(1)));
+        let rig = Rig::new(Duration::from_millis(1));
+        let runner = rig.runner();
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         runner
@@ -486,7 +523,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn quando_lista_vazia_deve_emitir_so_finished() {
-        let runner = runner(FakeInspector::new(Duration::from_millis(1)));
+        let rig = Rig::new(Duration::from_millis(1));
+        let runner = rig.runner();
         let events = run_collect(&runner, Vec::new(), 4, 8).await;
         assert_eq!(events, vec![BatchEvent::Finished { cancelled: false }]);
     }

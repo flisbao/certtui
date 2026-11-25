@@ -27,6 +27,19 @@ pub enum RowStatus {
     Failed,
 }
 
+impl RowStatus {
+    /// The lowercase name used in JSON and CSV.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RowStatus::Ok => "ok",
+            RowStatus::Warning => "warning",
+            RowStatus::Error => "error",
+            RowStatus::Failed => "failed",
+        }
+    }
+}
+
 /// One line of a batch result.
 ///
 /// Strings that come from a certificate or from the network are sanitized
@@ -292,6 +305,20 @@ mod tests {
         assert!(RowStatus::Ok < RowStatus::Warning);
         assert!(RowStatus::Warning < RowStatus::Error);
         assert!(RowStatus::Error < RowStatus::Failed);
+    }
+
+    #[test]
+    fn status_deve_ter_nome_minusculo_estavel() {
+        let names: Vec<&str> = [
+            RowStatus::Ok,
+            RowStatus::Warning,
+            RowStatus::Error,
+            RowStatus::Failed,
+        ]
+        .iter()
+        .map(|status| status.as_str())
+        .collect();
+        assert_eq!(names, ["ok", "warning", "error", "failed"]);
     }
 
     #[test]

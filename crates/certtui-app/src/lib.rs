@@ -4,6 +4,8 @@ pub mod aia;
 
 pub mod batch;
 
+pub mod batch_format;
+
 mod cancel;
 
 pub mod check;
