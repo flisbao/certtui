@@ -96,10 +96,13 @@ jobs:
         run: |
           set -euo pipefail
           # Policy: native-clipboard (arboard) is OFF on the musl targets.
-          if strings "dist/certtui-${{ matrix.target }}/certtui" | grep -qi arboard; then
-            echo "arboard found in a musl binary: native-clipboard must be off" >&2
+          # `grep -c` (not `-q`) reads all of its input: under pipefail, `grep -q`
+          # exits early, `strings` dies of SIGPIPE and the check would pass.
+          hits="$(strings "dist/certtui-${{ matrix.target }}/certtui" | grep -ci arboard || true)"
+          if [ "$hits" -gt 0 ]; then
+            echo "arboard found in a musl binary (${hits} strings): native-clipboard must be off" >&2
             exit 1
           fi
           out="$(ldd "dist/certtui-${{ matrix.target }}/certtui" 2>&1 || true)"
           echo "$out"
-          echo "$out" | grep -Eq 'not a dynamic executable|statically linked'
+          grep -Eq 'not a dynamic executable|statically linked' <<<"$out"
