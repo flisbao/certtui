@@ -6,13 +6,18 @@ use certtui_domain::model::RevocationStatus;
 use certtui_domain::time::Timestamp;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::extensions::ParsedExtension;
-use x509_parser::extensions::X509Extension;
+use x509_parser::extensions::{
+    DistributionPointName, GeneralName, IssuingDistributionPoint, X509Extension,
+};
 use x509_parser::revocation_list::CertificateRevocationList;
 
-use super::{CLOCK_SKEW_SECS, parse_cert};
+use super::{CLOCK_SKEW_SECS, canonical_integer, ensure_issued_by, parse_cert};
 
 /// `deltaCRLIndicator`.
 const OID_DELTA_CRL_INDICATOR: &str = "2.5.29.27";
+
+/// `issuingDistributionPoint`.
+const OID_ISSUING_DISTRIBUTION_POINT: &str = "2.5.29.28";
 
 /// Critical CRL extensions this module understands: `cRLNumber`,
 /// `issuerAltName`, `issuingDistributionPoint`, `authorityKeyIdentifier`,
@@ -33,11 +38,6 @@ fn unknown(why: &str) -> RevocationStatus {
     RevocationStatus::Unknown {
         why: why.to_owned(),
     }
-}
-
-fn trim_leading_zeros(bytes: &[u8]) -> &[u8] {
-    let first = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
-    bytes.get(first..).unwrap_or_default()
 }
 
 /// RFC 5280 `CRLReason` names (same spelling as the OCSP path).
@@ -76,6 +76,73 @@ fn is_ca(cert: &X509Certificate<'_>) -> bool {
         .is_some_and(|bc| bc.value.ca)
 }
 
+/// Whether `idp` names a distribution point the certificate does not list in
+/// its own `cRLDistributionPoints` (RFC 5280 6.3.3 (b)(2)).
+fn dp_mismatch(idp: &IssuingDistributionPoint<'_>, cert: &X509Certificate<'_>) -> bool {
+    let Some(DistributionPointName::FullName(wanted)) = &idp.distribution_point else {
+        return false;
+    };
+    let uris = |names: &[GeneralName<'_>]| -> Vec<String> {
+        names
+            .iter()
+            .filter_map(|n| match n {
+                GeneralName::URI(uri) => Some((*uri).to_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    let wanted = uris(wanted);
+    let listed = cert
+        .extensions()
+        .iter()
+        .find_map(|ext| match ext.parsed_extension() {
+            ParsedExtension::CRLDistributionPoints(points) => Some(points),
+            _ => None,
+        });
+    let Some(listed) = listed else { return true };
+    !listed
+        .points
+        .iter()
+        .any(|point| match &point.distribution_point {
+            Some(DistributionPointName::FullName(names)) => {
+                uris(names).iter().any(|uri| wanted.contains(uri))
+            }
+            _ => false,
+        })
+}
+
+/// Why `idp` makes the CRL unusable for `cert`, if it does.
+fn idp_excludes(
+    idp: &IssuingDistributionPoint<'_>,
+    cert: &X509Certificate<'_>,
+) -> Option<&'static str> {
+    if idp.indirect_crl {
+        return Some("unsupported crl scope: indirect crl");
+    }
+    if idp.only_contains_attribute_certs {
+        return Some("unsupported crl scope: attribute certificates only");
+    }
+    if idp.only_some_reasons.is_some() {
+        return Some("unsupported crl scope: covers only some revocation reasons");
+    }
+    if idp.only_contains_ca_certs && !is_ca(cert) {
+        return Some("unsupported crl scope: covers only CA certificates");
+    }
+    if idp.only_contains_user_certs && is_ca(cert) {
+        return Some("unsupported crl scope: covers only end-entity certificates");
+    }
+    if matches!(
+        idp.distribution_point,
+        Some(DistributionPointName::NameRelativeToCRLIssuer(_))
+    ) {
+        return Some("unsupported crl scope: relative distribution point name");
+    }
+    if dp_mismatch(idp, cert) {
+        return Some("unsupported crl scope: distribution point does not match the certificate");
+    }
+    None
+}
+
 /// Why this CRL cannot answer for `cert`, when it cannot (RFC 5280 5.2.5).
 fn unsupported_scope(
     extensions: &[X509Extension<'_>],
@@ -94,23 +161,14 @@ fn unsupported_scope(
         return Some("unsupported crl scope: unknown critical extension");
     }
     for ext in extensions {
-        let ParsedExtension::IssuingDistributionPoint(idp) = ext.parsed_extension() else {
+        if ext.oid.to_id_string() != OID_ISSUING_DISTRIBUTION_POINT {
             continue;
+        }
+        let ParsedExtension::IssuingDistributionPoint(idp) = ext.parsed_extension() else {
+            return Some("unsupported crl scope: unreadable issuingDistributionPoint");
         };
-        if idp.indirect_crl {
-            return Some("unsupported crl scope: indirect crl");
-        }
-        if idp.only_contains_attribute_certs {
-            return Some("unsupported crl scope: attribute certificates only");
-        }
-        if idp.only_some_reasons.is_some() {
-            return Some("unsupported crl scope: covers only some revocation reasons");
-        }
-        if idp.only_contains_ca_certs && !is_ca(cert) {
-            return Some("unsupported crl scope: covers only CA certificates");
-        }
-        if idp.only_contains_user_certs && is_ca(cert) {
-            return Some("unsupported crl scope: covers only end-entity certificates");
+        if let Some(why) = idp_excludes(idp, cert) {
+            return Some(why);
         }
     }
     None
@@ -127,6 +185,17 @@ pub(super) fn evaluate(
     }
     let cert = parse_cert(cert_der)?;
     let issuer = parse_cert(issuer_der)?;
+    ensure_issued_by(&cert, &issuer)?;
+    if issuer
+        .key_usage()
+        .ok()
+        .flatten()
+        .is_some_and(|ku| !ku.value.crl_sign())
+    {
+        return Ok(unknown(
+            "issuer is not allowed to sign CRLs (keyUsage lacks cRLSign)",
+        ));
+    }
     let (_, crl) =
         x509_parser::parse_x509_crl(crl_der).map_err(|_| malformed("CRL does not parse"))?;
     crl.verify_signature(issuer.public_key())
@@ -141,10 +210,10 @@ pub(super) fn evaluate(
     if let Some(why) = unsupported_scope(crl.extensions(), &cert) {
         return Ok(unknown(why));
     }
-    let serial = trim_leading_zeros(cert.raw_serial());
+    let serial = canonical_integer(cert.raw_serial());
     let listed = crl
         .iter_revoked_certificates()
-        .find(|entry| trim_leading_zeros(entry.raw_serial()) == serial);
+        .find(|entry| canonical_integer(entry.raw_serial()) == serial);
     Ok(match listed {
         None => RevocationStatus::Good,
         Some(entry) => RevocationStatus::Revoked {
@@ -246,6 +315,57 @@ mod tests {
     }
 
     #[test]
+    fn quando_idp_tem_distribution_point_igual_ao_do_cert_deve_valer() {
+        let got = eval(fixture!("crl-idp-matching-dp.der"), REVOKED);
+        assert!(
+            matches!(got, Ok(RevocationStatus::Revoked { .. })),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn quando_idp_tem_distribution_point_diferente_do_cert_deve_dar_unknown_scope() {
+        // The CRL does not list the serial, but it is another partition: never `Good`.
+        let got = eval(fixture!("crl-idp-other-dp.der"), REVOKED);
+        assert_unknown_with(&got, "distribution point does not match");
+    }
+
+    #[test]
+    fn quando_idp_nao_pode_ser_lido_deve_dar_unknown_e_nao_ignorar() {
+        let got = eval(fixture!("crl-idp-garbage.der"), REVOKED);
+        assert_unknown_with(&got, "unreadable issuingDistributionPoint");
+    }
+
+    #[test]
+    fn quando_emissor_nao_tem_crl_sign_deve_dar_unknown_com_motivo() {
+        let got = evaluate(
+            fixture!("crl-no-crlsign.der"),
+            fixture!("leaf-no-crlsign.der"),
+            fixture!("ca-no-crlsign.der"),
+            now(),
+        );
+        assert_unknown_with(&got, "cRLSign");
+    }
+
+    #[test]
+    fn quando_cert_nao_foi_emitido_pelo_emissor_deve_dar_issuer_mismatch() {
+        let got = evaluate(
+            fixture!("crl-with-revoked.der"),
+            fixture!("leaf-forged.der"),
+            CA,
+            now(),
+        );
+        assert_eq!(got, Err(RevocationError::IssuerMismatch));
+        let got = evaluate(
+            fixture!("crl-with-revoked.der"),
+            REVOKED,
+            fixture!("ca-no-crlsign.der"),
+            now(),
+        );
+        assert_eq!(got, Err(RevocationError::IssuerMismatch));
+    }
+
+    #[test]
     fn quando_crl_vencida_deve_dar_stale() {
         let got = eval(fixture!("crl-stale.der"), REVOKED);
         assert_eq!(got, Err(RevocationError::Stale));
@@ -277,13 +397,5 @@ mod tests {
                 "{junk:?} -> {got:?}"
             );
         }
-    }
-
-    #[test]
-    fn quando_emissor_nao_assinou_a_crl_deve_dar_bad_signature() {
-        // Asking with the delegated responder as "issuer": it did not sign this CRL.
-        let responder = fixture!("responder.der");
-        let got = evaluate(fixture!("crl-with-revoked.der"), REVOKED, responder, now());
-        assert_eq!(got, Err(RevocationError::BadSignature));
     }
 }

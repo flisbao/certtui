@@ -234,7 +234,21 @@ def main():
         "ocsp-unauthorized.der": bytes([0x30, 0x03, 0x0A, 0x01, 0x06]),
     }
 
+    # CA cujo keyUsage não tem cRLSign, com uma folha e uma CRL assinadas por ela.
+    ca2_key = new_key()
+    ca2 = build_cert(
+        "CertTui CA Sem cRLSign", ca2_key, None, None, 2, ca=True,
+        extra=[(x509.KeyUsage(False, False, False, False, False, True, False, False, False), True)],
+    )
+    leaf_nocrl = build_cert("nocrlsign.example.test", new_key(), ca2, ca2_key, 0x3001, extra=leaf_extras("nocrlsign.example.test"))
+    write_cert("ca-no-crlsign", ca2)
+    write_cert("leaf-no-crlsign", leaf_nocrl)
+    # Folha que diz ter sido emitida pela CA (mesmo issuer name) mas foi assinada por outra chave.
+    forged = build_cert("forged.example.test", new_key(), ca, new_key(), SERIAL_REVOKED, extra=leaf_extras("forged.example.test"))
+    write_cert("leaf-forged", forged)
+
     kc = x509.ReasonFlags.key_compromise
+    crl_dp = lambda url: x509.IssuingDistributionPoint([x509.UniformResourceIdentifier(url)], None, False, False, None, False, False)
     crl_revoked = build_crl(ca, ca_key, THIS_UPDATE, NEXT_UPDATE, [(SERIAL_REVOKED, REVOKED_AT, kc)])
     ser = lambda c: c.public_bytes(serialization.Encoding.DER)
     files |= {
@@ -244,6 +258,12 @@ def main():
         "crl-bad-signature.der": flip_last_byte(ser(crl_revoked)),
         "crl-stale.der": ser(build_crl(ca, ca_key, OLD_THIS, OLD_NEXT, [(SERIAL_REVOKED, REVOKED_AT, kc)])),
         "crl-delta.der": ser(build_crl(ca, ca_key, THIS_UPDATE, NEXT_UPDATE, [(SERIAL_REVOKED, REVOKED_AT, kc)], extra=[(x509.DeltaCRLIndicator(6), True)])),
+        # IDP crítica cujo valor não é um IssuingDistributionPoint legível (assinada normalmente).
+        "crl-idp-garbage.der": ser(build_crl(ca, ca_key, THIS_UPDATE, NEXT_UPDATE, [(SERIAL_ABSENT, REVOKED_AT, kc)], extra=[(x509.UnrecognizedExtension(x509.ObjectIdentifier("2.5.29.28"), b"\x04\x01\x00"), True)])),
+        "crl-no-crlsign.der": ser(build_crl(ca2, ca2_key, THIS_UPDATE, NEXT_UPDATE, [])),
+        # IssuingDistributionPoint com distributionPoint igual / diferente do CRL DP das folhas.
+        "crl-idp-matching-dp.der": ser(build_crl(ca, ca_key, THIS_UPDATE, NEXT_UPDATE, [(SERIAL_REVOKED, REVOKED_AT, kc)], extra=[(crl_dp("http://crl.example.test/ca.crl"), True)])),
+        "crl-idp-other-dp.der": ser(build_crl(ca, ca_key, THIS_UPDATE, NEXT_UPDATE, [(SERIAL_ABSENT, REVOKED_AT, kc)], extra=[(crl_dp("http://crl.example.test/other.crl"), True)])),
         # IssuingDistributionPoint: só certs de CA; não cobre as folhas.
         "crl-idp-ca-only.der": ser(build_crl(ca, ca_key, THIS_UPDATE, NEXT_UPDATE, [(SERIAL_REVOKED, REVOKED_AT, kc)], extra=[(x509.IssuingDistributionPoint(None, None, False, True, None, False, False), True)])),
     }

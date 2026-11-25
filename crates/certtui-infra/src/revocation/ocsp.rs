@@ -17,7 +17,7 @@ use x509_parser::prelude::FromDer;
 use x509_parser::time::ASN1Time;
 use x509_parser::x509::{AlgorithmIdentifier, SubjectPublicKeyInfo};
 
-use super::{CLOCK_SKEW_SECS, parse_cert};
+use super::{CLOCK_SKEW_SECS, canonical_integer, ensure_issued_by, parse_cert};
 
 /// A response without `nextUpdate` cannot say how long it stays valid; accept
 /// it only when it is this fresh (7 days), in seconds.
@@ -54,8 +54,8 @@ fn malformed(what: &str) -> RevocationError {
     RevocationError::Malformed(what.to_owned())
 }
 
-/// Strips leading zero bytes so serials compare equal across encodings.
-fn trim_leading_zeros(bytes: &[u8]) -> &[u8] {
+/// Big-endian bytes of a length, without leading zeros (DER long form).
+fn significant_be_bytes(bytes: &[u8]) -> &[u8] {
     let first = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
     bytes.get(first..).unwrap_or_default()
 }
@@ -72,7 +72,7 @@ impl<'a> CertIdInput<'a> {
         Self {
             issuer_name_raw: issuer.subject().as_raw(),
             issuer_key_bits: &issuer.public_key().subject_public_key.data,
-            serial: trim_leading_zeros(cert.raw_serial()),
+            serial: canonical_integer(cert.raw_serial()),
         }
     }
 
@@ -82,7 +82,7 @@ impl<'a> CertIdInput<'a> {
         };
         id.issuer_name_hash.as_bytes() == alg.hash(self.issuer_name_raw)
             && id.issuer_key_hash.as_bytes() == alg.hash(self.issuer_key_bits)
-            && trim_leading_zeros(id.serial_number.as_bytes()) == self.serial
+            && canonical_integer(id.serial_number.as_bytes()) == self.serial
     }
 }
 
@@ -93,7 +93,7 @@ fn der_length(len: usize) -> Vec<u8> {
         return vec![u8::try_from(len).unwrap_or(0)];
     }
     let bytes = len.to_be_bytes();
-    let significant = trim_leading_zeros(&bytes);
+    let significant = significant_be_bytes(&bytes);
     let mut out = vec![0x80 | u8::try_from(significant.len()).unwrap_or(0)];
     out.extend_from_slice(significant);
     out
@@ -106,12 +106,12 @@ fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Canonical positive INTEGER body for a serial given without leading zeros.
+/// INTEGER body for a serial already in minimal two's-complement form.
 fn integer_body(serial: &[u8]) -> Vec<u8> {
-    match serial.first() {
-        None => vec![0],
-        Some(first) if first & 0x80 != 0 => [&[0_u8][..], serial].concat(),
-        Some(_) => serial.to_vec(),
+    if serial.is_empty() {
+        vec![0]
+    } else {
+        serial.to_vec()
     }
 }
 
@@ -134,6 +134,7 @@ pub(super) fn build_request(
 ) -> Result<OcspRequest, RevocationError> {
     let cert = parse_cert(cert_der)?;
     let issuer = parse_cert(issuer_der)?;
+    ensure_issued_by(&cert, &issuer)?;
     let input = CertIdInput::new(&cert, &issuer);
     let name_hash = HashAlg::Sha1.hash(input.issuer_name_raw);
     let key_hash = HashAlg::Sha1.hash(input.issuer_key_bits);
@@ -310,6 +311,7 @@ pub(super) fn evaluate(
 ) -> Result<RevocationStatus, RevocationError> {
     let cert = parse_cert(cert_der)?;
     let issuer = parse_cert(issuer_der)?;
+    ensure_issued_by(&cert, &issuer)?;
     let parsed =
         OcspResponse::from_der(response).map_err(|_| malformed("OCSP response does not parse"))?;
     check_status(parsed.response_status)?;
@@ -458,6 +460,28 @@ mod tests {
                 "{junk:?} -> {got:?}"
             );
         }
+    }
+
+    #[test]
+    fn quando_cert_nao_foi_emitido_pelo_emissor_dado_deve_dar_issuer_mismatch() {
+        let stranger = fixture!("responder.der");
+        let got = evaluate(fixture!("ocsp-good.der"), GOOD, stranger, now());
+        assert_eq!(got, Err(RevocationError::IssuerMismatch));
+        assert_eq!(
+            build_request(GOOD, stranger).map(|_| ()),
+            Err(RevocationError::IssuerMismatch)
+        );
+    }
+
+    #[test]
+    fn quando_cert_forjado_tem_o_nome_do_emissor_mas_outra_assinatura_deve_dar_issuer_mismatch() {
+        let got = evaluate(
+            fixture!("ocsp-good.der"),
+            fixture!("leaf-forged.der"),
+            CA,
+            now(),
+        );
+        assert_eq!(got, Err(RevocationError::IssuerMismatch));
     }
 
     #[test]

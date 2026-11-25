@@ -43,6 +43,9 @@ SHA-1, como manda o RFC 6960 (só identificação).
 | `leaf-unknown` | serial `0x1003`, mesmas extensões |
 | `responder` | responder delegado, assinado pela CA, EKU `OCSPSigning` |
 | `responder-noeku` | responder delegado, assinado pela CA, **sem** EKU |
+| `ca-no-crlsign` | segunda CA (serial 2) cujo `keyUsage` tem só `keyCertSign` (sem `cRLSign`) |
+| `leaf-no-crlsign` | folha `0x3001` emitida por `ca-no-crlsign`, com os mesmos CRL DP/AIA |
+| `leaf-forged` | serial `0x1002`, **issuer name = o da `ca`**, mas assinada por outra chave (não foi emitida pela `ca`) |
 
 Cada um existe em `.pem` e `.der`.
 
@@ -72,6 +75,10 @@ Cada um existe em `.pem` e `.der`.
 | `crl-stale` | `nextUpdate` 2026-10-08 | `Stale` |
 | `crl-delta` | extensão crítica `deltaCRLIndicator` | `Unknown` (escopo) |
 | `crl-idp-ca-only` | `IssuingDistributionPoint` crítica `onlyContainsCACerts` | `Unknown` (escopo) |
+| `crl-idp-matching-dp` | IDP crítica com `distributionPoint` = `http://crl.example.test/ca.crl` (o CRL DP das folhas); lista `0x1002` | `leaf-revoked`: `Revoked` |
+| `crl-idp-other-dp` | IDP crítica com `distributionPoint` = `.../other.crl`; **não** lista `0x1002` | `leaf-revoked`: `Unknown` (partição de outra CRL; nunca `Good`) |
+| `crl-idp-garbage` | IDP crítica cujo valor não é um `IssuingDistributionPoint` legível (assinada normalmente) | `Unknown` (nunca ignorada) |
+| `crl-no-crlsign` | CRL vazia assinada por `ca-no-crlsign` | `Unknown` ("issuer lacks cRLSign") |
 
 ## Conferência independente com `openssl` (3.5)
 
@@ -95,4 +102,4 @@ openssl crl -inform DER -in crl-no-next-update.der -noout -text | grep "Next Upd
 openssl crl -inform DER -in crl-delta.der -noout -text | grep Delta                # Delta CRL Indicator: critical
 ```
 
-Todas estas saídas foram conferidas ao gerar os fixtures.
+Todas estas saídas foram conferidas ao gerar os fixtures (OpenSSL 3.5.5). Para as CRLs novas: `openssl crl -inform DER -in crl-idp-matching-dp.der -noout -text | grep -A2 "Issuing Dist"` mostra `URI:http://crl.example.test/ca.crl`, e `crl-no-crlsign.der` verifica com `-CAfile ca-no-crlsign.pem` (a assinatura vale; o que falta é `cRLSign`).

@@ -60,6 +60,9 @@ pub enum RevocationError {
     /// The data is larger than the allowed size.
     #[error("data is too large")]
     TooLarge,
+    /// The certificate was not issued by the issuer it was paired with.
+    #[error("certificate was not issued by the given issuer")]
+    IssuerMismatch,
 }
 
 /// Builds OCSP requests and judges OCSP responses and CRLs.
