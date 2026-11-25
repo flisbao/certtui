@@ -37,6 +37,9 @@ use crate::runtime;
 use crate::target_parse::{local_source, parse_target};
 use crate::tui_launch::{InspectorOptions, TuiLauncher, TuiRequest};
 
+mod batch;
+pub use batch::BatchArgs;
+
 /// Inspect and analyze X.509 certificates.
 #[derive(Debug, Parser)]
 #[command(name = "certtui", version, about)]
@@ -124,6 +127,8 @@ pub enum Command {
     Inspect(InspectArgs),
     /// Validate the certificates of one or more targets and report findings.
     Check(CheckArgs),
+    /// Inspect a list of TLS servers and report one row per target.
+    Batch(BatchArgs),
     /// Write the certificates of a target to a file as PEM, DER or JSON.
     Export(ExportArgs),
     /// `certtui <TARGET>`: open the interactive UI on a file, a directory, `-`
@@ -565,6 +570,9 @@ pub fn run(
         Some(Command::Check(check_args)) => {
             check(&check_args, &network_options, &trust_options, env, out, err)
         }
+        Some(Command::Batch(batch_args)) => {
+            batch::run(&batch_args, &network_options, &trust_options, env, out, err)
+        }
         Some(Command::Export(export_args)) => {
             export(&export_args, &network_options, &trust_options, env, err)
         }
@@ -592,6 +600,7 @@ fn reads_stdin_target(command: Option<&Command>) -> bool {
         Some(Command::Inspect(args)) => args.target == "-",
         Some(Command::Check(args)) => args.targets.iter().any(|target| target == "-"),
         Some(Command::Export(args)) => args.target == "-",
+        Some(Command::Batch(args)) => args.file == "-",
         Some(Command::External(words)) => words.iter().any(|word| word == "-"),
         None => false,
     }

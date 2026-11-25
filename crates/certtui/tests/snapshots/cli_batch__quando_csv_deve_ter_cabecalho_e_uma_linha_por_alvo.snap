@@ -1,0 +1,8 @@
+---
+source: crates/certtui/tests/cli_batch.rs
+expression: text
+---
+target,status,days,cn,issuer,errors,warnings,infos,failure
+localhost,warning,N,certtui test leaf,certtui test intermediate,0,1,2,
+localhost,error,N,certtui test leaf,certtui test intermediate,2,1,2,
+localhost,failed,,,,0,0,0,<reason>

@@ -1,6 +1,7 @@
 //! Pure renderers of an [`InspectionReport`]: they only write to a
 //! `&mut dyn Write` handed in by the caller.
 
+pub mod batch;
 pub mod check;
 pub mod field;
 
