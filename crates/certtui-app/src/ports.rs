@@ -169,6 +169,10 @@ pub trait HttpFetcher: Send + Sync {
     /// Implementations that cannot use a proxy ignore it.
     fn use_proxy(&self, _proxy: Option<ProxySettings>) {}
 
+    /// Sets the limits later requests run under (only the redirect cap is
+    /// the fetcher's own; sizes and timeouts come with each call).
+    fn use_limits(&self, _limits: &Limits) {}
+
     /// Lifts (`true`) or restores (`false`) the refusal of internal
     /// destinations (loopback, link-local, cloud metadata). The default is
     /// refusal; the call is `--allow-internal-urls`. Implementations that

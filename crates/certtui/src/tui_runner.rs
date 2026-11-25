@@ -12,6 +12,7 @@ use anyhow::Context as _;
 use certtui_app::export::FileWriter;
 use certtui_app::history::{HistoryNote, HistoryRepository};
 use certtui_domain::limits::Limits;
+use certtui_domain::model::FingerprintFormat;
 use certtui_domain::target::{NetworkTarget, Target};
 use certtui_tui::app_state::{BatchLoader, TargetParser};
 use certtui_tui::clipboard::{ClipboardStrategy, EnvView, FallbackSink, build_sinks};
@@ -48,6 +49,8 @@ pub struct TuiOptions {
     pub batch_concurrency: Option<usize>,
     /// Colors; `NO_COLOR` is applied by the caller.
     pub theme: ThemeKind,
+    /// How fingerprints are shown at first (`ui.fingerprint_format`).
+    pub fingerprint_format: FingerprintFormat,
     /// Which clipboard methods to use.
     pub clipboard: ClipboardStrategy,
     /// Limits of this run (clipboard size and timeout).
@@ -93,14 +96,8 @@ pub fn run(
         let terminal = Terminal::new(backend).context("starting the terminal")?;
         let (columns, rows) = crossterm::terminal::size().context("reading the terminal size")?;
         let mut state = AppState::new(Instant::now());
-        state.theme = options.theme;
+        configure_state(&mut state, &options);
         state.size = (columns, rows);
-        state.target_parser = options.target_parser;
-        state.batch_loader = options.batch_loader;
-        state.max_clipboard_bytes = options.limits.max_clipboard_bytes;
-        state.history_max_entries = options.limits.history_entries;
-        state.keymap = options.keymap;
-        state.wall_clock = options.wall_clock;
         if let Some(repository) = &options.history {
             load_history(&mut state, repository.as_ref());
         }
@@ -111,9 +108,10 @@ pub fn run(
             options.limits.clipboard_timeout,
             writer,
         );
-        if let Some(concurrency) = options.batch_concurrency {
-            executor = executor.with_batch_concurrency(concurrency);
-        }
+        executor = executor.with_batch_concurrency(batch_concurrency(
+            options.batch_concurrency,
+            &options.limits,
+        ));
         if let Some(repository) = options.history {
             executor = executor.with_history(repository);
         }
@@ -140,6 +138,24 @@ pub fn run(
         };
         event_loop.run(&mut state).await
     })?
+}
+
+/// How the options shape a fresh state: theme, keys, limits, fingerprints.
+fn configure_state(state: &mut AppState, options: &TuiOptions) {
+    state.theme = options.theme;
+    state.fingerprint_format = options.fingerprint_format;
+    state.target_parser = options.target_parser;
+    state.batch_loader = options.batch_loader;
+    state.max_clipboard_bytes = options.limits.max_clipboard_bytes;
+    state.history_max_entries = options.limits.history_entries;
+    state.keymap = options.keymap.clone();
+    state.wall_clock = options.wall_clock;
+}
+
+/// Targets a batch inspects at once: `--concurrency`, else the limit of the
+/// configuration (`batch.concurrency`, `limits.batch_concurrency`).
+fn batch_concurrency(requested: Option<usize>, limits: &Limits) -> usize {
+    requested.unwrap_or(limits.batch_concurrency)
 }
 
 /// Fills the Home lists from the saved history. A history that cannot be read
@@ -317,6 +333,49 @@ mod tests {
             _history: &certtui_app::history::History,
         ) -> Result<(), certtui_app::history::HistoryError> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn quando_batch_sem_flag_deve_usar_a_concorrencia_da_config() {
+        let limits = Limits {
+            batch_concurrency: 8,
+            ..Limits::default()
+        };
+        assert_eq!(batch_concurrency(None, &limits), 8);
+        assert_eq!(batch_concurrency(Some(4), &limits), 4);
+    }
+
+    #[test]
+    fn quando_opcoes_da_tui_deve_aplicar_formato_de_fingerprint_e_limites_ao_estado() {
+        let mut options = test_options();
+        options.fingerprint_format = FingerprintFormat::Base64;
+        options.limits = Limits {
+            max_clipboard_bytes: 1234,
+            history_entries: 7,
+            ..Limits::default()
+        };
+        let mut state = AppState::new(Instant::now());
+        configure_state(&mut state, &options);
+        assert_eq!(state.fingerprint_format, FingerprintFormat::Base64);
+        assert_eq!(state.max_clipboard_bytes, 1234);
+        assert_eq!(state.history_max_entries, 7);
+    }
+
+    fn test_options() -> TuiOptions {
+        TuiOptions {
+            initial: None,
+            initial_batch: None,
+            batch_concurrency: None,
+            theme: ThemeKind::Dark,
+            fingerprint_format: FingerprintFormat::default(),
+            clipboard: ClipboardStrategy::Off,
+            limits: Limits::default(),
+            target_parser: certtui_tui::update_home::default_target_parser,
+            batch_loader: certtui_tui::update_home::default_batch_loader,
+            keymap: certtui_tui::Keymap::new(),
+            history: None,
+            wall_clock: || certtui_domain::time::Timestamp::from_unix_saturating(0),
         }
     }
 

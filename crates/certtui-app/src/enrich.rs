@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::aia::chase_aia;
 use crate::ports::{Clock, HttpFetcher};
+use std::sync::{PoisonError, RwLock};
+
 use crate::proxy::ProxySettings;
 use crate::revocation::{RevocationProtocol, RevocationScope, RevocationService, check_revocation};
 
@@ -46,6 +48,10 @@ impl Default for RevocationOptions {
 pub trait ReportEnricher: Send + Sync {
     /// Sets the proxy the OCSP, CRL and AIA downloads go through, or `None`.
     fn use_proxy(&self, _proxy: Option<ProxySettings>) {}
+
+    /// Sets the limits later downloads and revocation checks run under (the
+    /// configuration's `limits`). The default keeps the ones it was built with.
+    fn use_limits(&self, _limits: Limits) {}
 
     /// Returns `report` with the chain completed through AIA when asked and,
     /// for network targets, revocation status and staple state filled in.
@@ -80,8 +86,11 @@ impl ReportEnricher for NoEnricher {
 /// The real enricher: HTTP for AIA, the revocation service for the rest.
 pub struct NetworkEnricher {
     http: Arc<dyn HttpFetcher>,
-    service: RevocationService,
-    limits: Limits,
+    protocol: Arc<dyn RevocationProtocol>,
+    clock: Arc<dyn Clock>,
+    /// The limits and the revocation service built with them; replaced when
+    /// the configuration changes the limits.
+    state: RwLock<(Limits, Arc<RevocationService>)>,
 }
 
 impl NetworkEnricher {
@@ -93,12 +102,24 @@ impl NetworkEnricher {
         clock: Arc<dyn Clock>,
         limits: Limits,
     ) -> Self {
-        let service = RevocationService::new(Arc::clone(&http), protocol, clock, limits);
+        let service = RevocationService::new(
+            Arc::clone(&http),
+            Arc::clone(&protocol),
+            Arc::clone(&clock),
+            limits,
+        );
         Self {
             http,
-            service,
-            limits,
+            protocol,
+            clock,
+            state: RwLock::new((limits, Arc::new(service))),
         }
+    }
+
+    /// The limits in force and the service built with them.
+    fn current(&self) -> (Limits, Arc<RevocationService>) {
+        let guard = self.state.read().unwrap_or_else(PoisonError::into_inner);
+        (guard.0, Arc::clone(&guard.1))
     }
 }
 
@@ -106,6 +127,17 @@ impl NetworkEnricher {
 impl ReportEnricher for NetworkEnricher {
     fn use_proxy(&self, proxy: Option<ProxySettings>) {
         self.http.use_proxy(proxy);
+    }
+
+    fn use_limits(&self, limits: Limits) {
+        self.http.use_limits(&limits);
+        let service = RevocationService::new(
+            Arc::clone(&self.http),
+            Arc::clone(&self.protocol),
+            Arc::clone(&self.clock),
+            limits,
+        );
+        *self.state.write().unwrap_or_else(PoisonError::into_inner) = (limits, Arc::new(service));
     }
 
     async fn enrich(
@@ -116,13 +148,14 @@ impl ReportEnricher for NetworkEnricher {
         cancel: CancellationToken,
     ) -> InspectionReport {
         let mut report = report;
+        let (limits, service) = self.current();
         self.http.allow_internal_urls(options.allow_internal_urls);
         if options.aia {
             let (chain, _urls) = chase_aia(
                 self.http.as_ref(),
                 report.chain.clone(),
                 anchors,
-                &self.limits,
+                &limits,
                 cancel.clone(),
             )
             .await;
@@ -132,7 +165,7 @@ impl ReportEnricher for NetworkEnricher {
             matches!(report.target, Target::Network(_)) && options.scope != RevocationScope::Off;
         if checks_revocation {
             let outcome = check_revocation(
-                &self.service,
+                &service,
                 &report.chain,
                 report.ocsp_staple.as_deref(),
                 options.scope,
@@ -261,6 +294,32 @@ mod tests {
             }]
         );
         assert_eq!(got.staple, StapleState::Missing);
+    }
+
+    #[tokio::test]
+    async fn quando_use_limits_deve_aplicar_o_teto_de_bytes_do_ocsp() {
+        let http = Arc::new(FakeHttpFetcher::new().on("POST", OCSP_URL, Ok(b"r".to_vec())));
+        let e = enricher(&http);
+        e.use_limits(Limits {
+            max_ocsp_response_bytes: 777,
+            ..Limits::default()
+        });
+        let input = report(&[fixture!("leaf-good.der"), fixture!("ca.der")], true, None);
+
+        e.enrich(
+            input,
+            &[],
+            options(RevocationScope::Leaf, false),
+            CancellationToken::new(),
+        )
+        .await;
+
+        let post = http
+            .calls()
+            .into_iter()
+            .find(|call| call.method == "POST")
+            .unwrap();
+        assert_eq!(post.max_bytes, 777);
     }
 
     #[tokio::test]

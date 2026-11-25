@@ -703,6 +703,7 @@ fn start_services(
     };
     env.fetcher.use_proxy(proxy.clone());
     env.enricher.use_proxy(proxy.clone());
+    env.enricher.use_limits(resolved.limits);
     Ok(Ok((guard, proxy)))
 }
 
@@ -933,6 +934,7 @@ fn inspector_options(
         revocation: trust_options.revocation,
         password: trust_options.password.clone(),
         proxy: trust_options.proxy.clone(),
+        fingerprint_format: trust_options.fingerprint_format,
     }
 }
 
@@ -1522,12 +1524,17 @@ mod tests {
     /// revocation outcome, like the real enricher would for a network target.
     struct FakeEnricher {
         calls: Mutex<Vec<RevocationOptions>>,
+        limits_seen: Mutex<Vec<Limits>>,
         revocation: Vec<CertRevocation>,
         staple: StapleState,
     }
 
     #[async_trait::async_trait]
     impl ReportEnricher for FakeEnricher {
+        fn use_limits(&self, limits: Limits) {
+            self.limits_seen.lock().unwrap().push(limits);
+        }
+
         async fn enrich(
             &self,
             mut report: InspectionReport,
@@ -1547,6 +1554,7 @@ mod tests {
     fn enricher(revocation: Vec<CertRevocation>, staple: StapleState) -> FakeEnricher {
         FakeEnricher {
             calls: Mutex::new(Vec::new()),
+            limits_seen: Mutex::new(Vec::new()),
             revocation,
             staple,
         }
@@ -1589,6 +1597,20 @@ mod tests {
             *fake.calls.lock().unwrap(),
             vec![RevocationOptions::default()]
         );
+    }
+
+    #[test]
+    fn quando_run_comeca_deve_entregar_os_limites_resolvidos_ao_enricher() {
+        let fake = enricher(Vec::new(), StapleState::Missing);
+        let got = run_enriched(
+            &fake,
+            &["--timeout", "7", "inspect", "example.test", "--json"],
+        );
+        assert_eq!(got.code, ExitCode::Ok, "{}", got.err);
+        let seen = fake.limits_seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].target_total_timeout, Duration::from_secs(7));
+        assert_eq!(seen[0].max_crl_bytes, Limits::default().max_crl_bytes);
     }
 
     #[test]

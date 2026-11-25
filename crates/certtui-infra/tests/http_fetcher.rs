@@ -459,3 +459,24 @@ async fn quando_proxy_e_nome_nao_resolve_aqui_deve_deixar_o_proxy_resolver() {
 
     assert_eq!(got, Ok(vec![1]));
 }
+
+#[tokio::test]
+async fn quando_use_limits_zera_redirects_deve_recusar_o_primeiro_redirect() {
+    let origin = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/a"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/b"))
+        .mount(&origin)
+        .await;
+    let fetcher = fetcher();
+    fetcher.use_limits(&certtui_domain::limits::Limits {
+        max_http_redirects: 0,
+        ..certtui_domain::limits::Limits::default()
+    });
+
+    let got = fetcher
+        .get(&format!("{}/a", origin.uri()), LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(got, Err(HttpError::TooManyRedirects));
+}

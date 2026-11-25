@@ -8,7 +8,7 @@
 //! byte a second still ends).
 
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use certtui_app::http::HttpError;
 use certtui_app::ports::HttpFetcher;
 use certtui_app::proxy::ProxySettings;
+use certtui_domain::limits::Limits;
 use reqwest::header::{CONTENT_TYPE, LOCATION};
 use reqwest::{Method, Url};
 
@@ -32,7 +33,7 @@ const USER_AGENT: &str = concat!("certtui/", env!("CARGO_PKG_VERSION"));
 #[derive(Debug)]
 pub struct ReqwestHttpFetcher {
     client: OnceLock<Result<reqwest::Client, HttpError>>,
-    max_redirects: usize,
+    max_redirects: AtomicUsize,
     /// Lifts the refusal of internal destinations (`--allow-internal-urls`).
     allow_internal: Arc<AtomicBool>,
     /// The proxy requests go through, read by the client on each request.
@@ -46,7 +47,7 @@ impl ReqwestHttpFetcher {
     pub fn new(max_redirects: usize) -> Self {
         Self {
             client: OnceLock::new(),
-            max_redirects,
+            max_redirects: AtomicUsize::new(max_redirects),
             allow_internal: Arc::new(AtomicBool::new(false)),
             proxy: Arc::new(RwLock::new(None)),
         }
@@ -162,7 +163,7 @@ impl ReqwestHttpFetcher {
                 }
                 return read_capped(response, max_bytes).await;
             }
-            if redirects >= self.max_redirects {
+            if redirects >= self.max_redirects.load(Ordering::Relaxed) {
                 return Err(HttpError::TooManyRedirects);
             }
             redirects += 1;
@@ -190,6 +191,11 @@ fn proxy_for(proxy: &RwLock<Option<ProxySettings>>, url: &Url) -> Option<Url> {
 
 #[async_trait]
 impl HttpFetcher for ReqwestHttpFetcher {
+    fn use_limits(&self, limits: &Limits) {
+        self.max_redirects
+            .store(limits.max_http_redirects, Ordering::Relaxed);
+    }
+
     fn use_proxy(&self, proxy: Option<ProxySettings>) {
         *self.proxy.write().unwrap_or_else(PoisonError::into_inner) = proxy;
     }

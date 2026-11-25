@@ -16,6 +16,7 @@ use certtui_app::proxy::ProxySettings;
 use certtui_app::trust::TrustSource;
 use certtui_domain::limits::Limits;
 use certtui_domain::lint::Thresholds;
+use certtui_domain::model::FingerprintFormat;
 use certtui_domain::target::{NetworkTarget, Target};
 use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
@@ -56,6 +57,9 @@ pub struct InspectorOptions {
     pub password: Option<SecretString>,
     /// The proxy of `--proxy`, the config or the environment.
     pub proxy: Option<ProxySettings>,
+    /// How fingerprints are shown at first: `--fingerprint-format` does not
+    /// exist for the TUI, so this is `ui.fingerprint_format`.
+    pub fingerprint_format: FingerprintFormat,
 }
 
 /// What the TUI is opened with.
@@ -110,10 +114,12 @@ impl TuiLauncher for ProcessLauncher {
             stdin: request.stdin,
         });
         let limits = request.options.limits;
+        let fingerprint_format = request.options.fingerprint_format;
         let fetcher = RustlsChainFetcher::new();
         fetcher.use_proxy(request.options.proxy.clone());
         let enricher = crate::system_inspector::real_enricher();
         enricher.use_proxy(request.options.proxy.clone());
+        enricher.use_limits(limits);
         let inspector = SystemInspector {
             loader,
             fetcher: Arc::new(fetcher),
@@ -145,6 +151,7 @@ impl TuiLauncher for ProcessLauncher {
                 initial: request.target,
                 initial_batch: request.batch,
                 batch_concurrency: request.batch_concurrency,
+                fingerprint_format,
                 theme: if no_color {
                     ThemeKind::Mono
                 } else {
