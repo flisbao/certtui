@@ -59,3 +59,17 @@ path = "fuzz_targets/parse_target.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_pkcs12"
+path = "fuzz_targets/parse_pkcs12.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_jks"
+path = "fuzz_targets/parse_jks.rs"
+test = false
+doc = false
+bench = false
