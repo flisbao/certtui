@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use certtui_app::ports::TrustStoreProvider;
 use certtui_domain::limits::Limits;
+use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
 use certtui_infra::clock::SystemClock;
 use certtui_infra::source::FsSourceLoader;
@@ -40,6 +41,7 @@ pub fn run_process() -> std::process::ExitCode {
         clock: &clock,
         trust_provider: &trust_provider,
         tui: &ProcessLauncher,
+        writer: &AtomicFileWriter,
         enricher: &enricher,
     };
     let mut out = io::stdout().lock();

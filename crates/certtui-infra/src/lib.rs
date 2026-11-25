@@ -1,5 +1,8 @@
 //! Infrastructure layer: adapters implementing the application ports.
 
+/// Atomic file writes for exports.
+pub mod atomic_write;
+
 pub mod clock;
 
 /// Which destinations a certificate-supplied URL may reach (SSRF guard).

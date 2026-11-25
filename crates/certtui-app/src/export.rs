@@ -46,6 +46,50 @@ pub enum ExportError {
     DerCannotRepresentChain,
 }
 
+/// What to do when the destination already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overwrite {
+    /// Refuse: the destination is left untouched (`--force` absent).
+    Refuse,
+    /// Replace it atomically (`--force`, or the TUI's confirmation).
+    Allow,
+}
+
+/// Why writing an export file failed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WriteError {
+    /// The destination exists and overwriting was not allowed (a symbolic
+    /// link counts as existing, whatever it points at).
+    #[error("the destination already exists")]
+    AlreadyExists,
+    /// The destination is a directory.
+    #[error("the destination is a directory")]
+    IsDirectory,
+    /// The directory that should hold the file does not exist.
+    #[error("the destination directory does not exist")]
+    ParentMissing,
+    /// Any other I/O failure, described without the data written.
+    #[error("{0}")]
+    Io(String),
+}
+
+/// Writes an export file. The real adapter is atomic; the contract is that a
+/// failure leaves the destination as it was.
+pub trait FileWriter: Send + Sync {
+    /// Writes `bytes` to `path`, honoring `overwrite`.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteError`] when the file cannot be written; the destination is
+    /// never left half written.
+    fn write(
+        &self,
+        path: &std::path::Path,
+        bytes: &[u8],
+        overwrite: Overwrite,
+    ) -> Result<(), WriteError>;
+}
+
 /// The bytes of `format` for `sel`.
 ///
 /// # Errors
