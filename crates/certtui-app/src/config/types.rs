@@ -176,7 +176,8 @@ impl Default for ThresholdsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct NetworkConfig {
-    /// Overall time limit for one target, in seconds.
+    /// Overall time limit for one target, in seconds (at least 1).
+    #[schemars(range(min = 1))]
     pub timeout_secs: u64,
     /// `http://host:port` CONNECT proxy.
     pub proxy: Option<String>,
@@ -187,6 +188,10 @@ pub struct NetworkConfig {
     /// Revocation checking mode.
     pub revocation: RevocationMode,
 }
+
+/// The limit overrides where `0` is meaningful (no redirects, no recursion);
+/// every other one must be at least 1. The JSON Schema says the same.
+pub const ZERO_ALLOWED_LIMITS: [&str; 2] = ["max_http_redirects", "max_dir_depth"];
 
 /// Default of `network.timeout_secs`, equal to the default
 /// [`Limits::target_total_timeout`].
@@ -208,7 +213,8 @@ impl Default for NetworkConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct BatchConfig {
-    /// Targets inspected at the same time.
+    /// Targets inspected at the same time (at least 1).
+    #[schemars(range(min = 1))]
     pub concurrency: u64,
 }
 
@@ -281,9 +287,10 @@ fn limits_schema(_: &mut SchemaGenerator) -> Schema {
     let properties: serde_json::Map<String, Value> = names
         .into_iter()
         .map(|name| {
+            let minimum = u8::from(!ZERO_ALLOWED_LIMITS.contains(&name.as_str()));
             (
                 name,
-                serde_json::json!({ "type": ["integer", "null"], "minimum": 0 }),
+                serde_json::json!({ "type": ["integer", "null"], "minimum": minimum }),
             )
         })
         .collect();
@@ -351,6 +358,8 @@ pub struct CliOverrides {
     pub timeout_secs: Option<u64>,
     /// `--proxy`.
     pub proxy: Option<String>,
+    /// `--no-proxy`: no proxy at all, whatever the config or the environment say.
+    pub no_proxy: bool,
     /// `--aia`.
     pub aia: Option<bool>,
     /// `--revocation` / `--no-revocation`.
@@ -432,6 +441,19 @@ impl Config {
     pub fn resolve(self, flags: &CliOverrides) -> Result<ResolvedConfig, ConfigError> {
         self.check_version()?;
         validate_clipboard(&self.ui.clipboard)?;
+        // Checked here, not left to the limit they feed, so the error names
+        // the field the user wrote.
+        for (field, value) in [
+            ("network.timeout_secs", self.network.timeout_secs),
+            ("batch.concurrency", self.batch.concurrency),
+        ] {
+            if value == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: field.to_owned(),
+                    message: "must be at least 1".to_owned(),
+                });
+            }
+        }
 
         let mut overrides = self.limits.clone();
         overrides.target_total_timeout_secs = flags
@@ -477,8 +499,12 @@ impl Config {
             },
             limits,
             limit_warnings,
-            proxy: flags.proxy.clone().or(self.network.proxy),
-            use_env_proxy: self.network.use_env_proxy,
+            proxy: if flags.no_proxy {
+                None
+            } else {
+                flags.proxy.clone().or(self.network.proxy)
+            },
+            use_env_proxy: self.network.use_env_proxy && !flags.no_proxy,
             aia: flags.aia.unwrap_or(self.network.aia),
             revocation: flags.revocation.unwrap_or(self.network.revocation),
             ui,
@@ -500,7 +526,6 @@ fn validate_clipboard(value: &str) -> Result<(), ConfigError> {
     }
     let mut seen: Vec<&str> = Vec::new();
     for part in value.split(',') {
-        let part = part.trim();
         if part != "osc52" && part != "native" {
             return Err(invalid(
                 "expected `auto`, `off` or a list of `osc52` and `native`",

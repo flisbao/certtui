@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use certtui_domain::limits::Limits;
+use certtui_domain::limits::{Limits, LimitsOverrides};
 
 use super::*;
 use crate::check::FailOn;
@@ -316,4 +316,74 @@ fn quando_erro_de_config_e_exibido_deve_conter_campo_e_linha() {
     let text = error.to_string();
     assert!(text.contains("ui.colour"), "{text}");
     assert!(text.contains("line 2"), "{text}");
+}
+
+#[test]
+fn quando_clipboard_tem_espaco_na_lista_deve_dar_invalid_value() {
+    // The TUI parses the exact spelling, so the config must agree.
+    let config = parse_ok(r#"{"ui":{"clipboard":"osc52, native"}}"#);
+    let error = config.resolve(&CliOverrides::default()).unwrap_err();
+    match error {
+        ConfigError::InvalidValue { field, .. } => assert_eq!(field, "ui.clipboard"),
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn quando_timeout_ou_concorrencia_sao_zero_deve_citar_o_campo_que_o_usuario_escreveu() {
+    for (json, field) in [
+        (r#"{"network":{"timeout_secs":0}}"#, "network.timeout_secs"),
+        (r#"{"batch":{"concurrency":0}}"#, "batch.concurrency"),
+    ] {
+        let error = parse_ok(json)
+            .resolve(&CliOverrides::default())
+            .unwrap_err();
+        match error {
+            ConfigError::InvalidValue { field: got, .. } => assert_eq!(got, field, "{json}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn quando_limite_e_zero_deve_aceitar_so_onde_o_zero_tem_sentido() {
+    let names: Vec<String> = serde_json::to_value(LimitsOverrides::default())
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(names.len(), 27);
+    for name in names {
+        let config = parse_ok(&format!(r#"{{"limits":{{"{name}":0}}}}"#));
+        let accepted = config.resolve(&CliOverrides::default()).is_ok();
+        assert_eq!(
+            accepted,
+            ZERO_ALLOWED_LIMITS.contains(&name.as_str()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn quando_no_proxy_na_linha_de_comando_deve_ignorar_proxy_da_config_e_do_ambiente() {
+    let config = parse_ok(r#"{"network":{"proxy":"http://p:3128","use_env_proxy":true}}"#);
+    let flags = CliOverrides {
+        no_proxy: true,
+        ..CliOverrides::default()
+    };
+    let r = resolve(config, &flags);
+    assert_eq!(r.proxy, None);
+    assert!(!r.use_env_proxy);
+}
+
+#[test]
+fn quando_no_aia_na_linha_de_comando_deve_vencer_a_config() {
+    let config = parse_ok(r#"{"network":{"aia":true}}"#);
+    let flags = CliOverrides {
+        aia: Some(false),
+        ..CliOverrides::default()
+    };
+    assert!(!resolve(config, &flags).aia);
 }

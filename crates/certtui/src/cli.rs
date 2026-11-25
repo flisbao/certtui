@@ -67,8 +67,11 @@ pub struct Cli {
     log_file: Option<PathBuf>,
     /// Reach TLS servers, OCSP, CRL and AIA through this HTTP CONNECT proxy,
     /// `http://host:port` (no credentials, no https or socks).
-    #[arg(long, global = true, value_name = "URL")]
+    #[arg(long, global = true, value_name = "URL", conflicts_with = "no_proxy")]
     proxy: Option<String>,
+    /// Connect directly: ignore the proxy of the config and of the environment.
+    #[arg(long, global = true)]
+    no_proxy: bool,
     /// Server name to send in SNI instead of the host (network targets only).
     /// An IP literal sends no SNI.
     #[arg(long, global = true, value_name = "NAME")]
@@ -99,8 +102,11 @@ pub struct Cli {
     host_check: Option<String>,
     /// Download missing intermediate certificates from their AIA URLs (off by
     /// default; marked `AIA_FETCHED` in the report).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "no_aia")]
     aia: bool,
+    /// Do not download missing intermediates, even if the config turns it on.
+    #[arg(long, global = true)]
+    no_aia: bool,
     /// Which certificates are checked for revocation on network targets: the
     /// `leaf` (the default) or the `leaf` and every intermediate (`full`).
     #[arg(
@@ -399,7 +405,7 @@ pub struct Env<'a> {
     /// Source of "now".
     pub clock: &'a dyn Clock,
     /// Builds the trust store provider for the `--ca-file` paths of a run.
-    pub trust_provider: &'a dyn Fn(Vec<PathBuf>) -> Box<dyn TrustStoreProvider>,
+    pub trust_provider: &'a dyn Fn(Vec<PathBuf>, Limits) -> Box<dyn TrustStoreProvider>,
     /// Opens the interactive UI.
     pub tui: &'a dyn TuiLauncher,
     /// Writes export files.
@@ -432,6 +438,8 @@ struct TrustOptions {
     ui: UiConfig,
     /// The proxy of `--proxy`, the config or the environment.
     proxy: Option<ProxySettings>,
+    /// The limits of the run, for the trust store (`max_ca_file_certs`, ...).
+    limits: Limits,
 }
 
 /// Loads the anchors of `options`, reporting warnings on `err`; a failure is
@@ -441,7 +449,7 @@ fn load_anchors(
     env: &Env<'_>,
     err: &mut dyn Write,
 ) -> anyhow::Result<Result<TrustAnchors, ExitCode>> {
-    let provider = (env.trust_provider)(options.ca_files.clone());
+    let provider = (env.trust_provider)(options.ca_files.clone(), options.limits);
     match provider.anchors(&options.sources) {
         Ok(anchors) => {
             for warning in &anchors.warnings {
@@ -613,6 +621,7 @@ pub fn run(
         fingerprint_format: fingerprint_format_of(resolved.ui.fingerprint_format),
         ui: resolved.ui,
         proxy,
+        limits: resolved.limits,
     };
     match cli.command {
         Some(Command::Inspect(inspect_args)) => inspect(
@@ -800,8 +809,13 @@ fn overrides_from(cli: &Cli) -> CliOverrides {
         fail_on,
         timeout_secs: cli.timeout.map(|timeout| timeout.as_secs()),
         proxy: cli.proxy.clone(),
+        no_proxy: cli.no_proxy,
         log_file: cli.log_file.clone(),
-        aia: cli.aia.then_some(true),
+        aia: match (cli.aia, cli.no_aia) {
+            (true, _) => Some(true),
+            (false, true) => Some(false),
+            (false, false) => None,
+        },
         revocation: match (cli.no_revocation, cli.revocation) {
             (true, _) => Some(RevocationMode::Off),
             (false, Some(RevocationArg::Full)) => Some(RevocationMode::Full),
@@ -1476,7 +1490,8 @@ mod tests {
             hostname_ok: None,
         });
         let clock = FixedClock(Timestamp::from_unix(1_769_904_000).unwrap());
-        let provider = |_files: Vec<PathBuf>| -> Box<dyn TrustStoreProvider> {
+        let provider = |_files: Vec<PathBuf>, limits: Limits| -> Box<dyn TrustStoreProvider> {
+            PROVIDER_LIMITS.lock().unwrap().push(limits);
             // One anchor, so the "no trust anchors loaded" warning stays out
             // of the stderr these tests compare.
             Box::new(FakeTrustProvider(Ok(TrustAnchors {
@@ -1519,6 +1534,27 @@ mod tests {
             out: String::from_utf8(out).unwrap(),
             err: String::from_utf8(err).unwrap(),
         }
+    }
+
+    /// Limits every trust provider of the tests was built with.
+    static PROVIDER_LIMITS: Mutex<Vec<Limits>> = Mutex::new(Vec::new());
+
+    #[test]
+    fn quando_run_comeca_deve_construir_o_trust_provider_com_os_limites_resolvidos() {
+        let fake = enricher(Vec::new(), StapleState::Missing);
+        let got = run_enriched(
+            &fake,
+            &["--timeout", "13", "inspect", "example.test", "--json"],
+        );
+        assert_eq!(got.code, ExitCode::Ok, "{}", got.err);
+        assert!(
+            PROVIDER_LIMITS
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|limits| limits.target_total_timeout == Duration::from_secs(13)),
+            "no trust provider saw the resolved limits"
+        );
     }
 
     /// Records the options of every enrichment and fills in a canned
@@ -1612,6 +1648,20 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].target_total_timeout, Duration::from_secs(7));
         assert_eq!(seen[0].max_crl_bytes, Limits::default().max_crl_bytes);
+    }
+
+    #[test]
+    fn quando_no_aia_e_no_proxy_deve_virar_override_explicito() {
+        let overrides = |args: &[&str]| {
+            let cli = Cli::try_parse_from(std::iter::once("certtui").chain(args.iter().copied()))
+                .unwrap();
+            overrides_from(&cli)
+        };
+        assert_eq!(overrides(&["--no-aia", "inspect", "x"]).aia, Some(false));
+        assert_eq!(overrides(&["--aia", "inspect", "x"]).aia, Some(true));
+        assert_eq!(overrides(&["inspect", "x"]).aia, None);
+        assert!(overrides(&["--no-proxy", "inspect", "x"]).no_proxy);
+        assert!(!overrides(&["inspect", "x"]).no_proxy);
     }
 
     #[test]

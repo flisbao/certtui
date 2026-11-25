@@ -124,3 +124,22 @@ fn quando_schema_descreve_limits_deve_listar_todos_os_campos_da_secao_9() {
     }
     assert_eq!(fields.len(), 27);
 }
+
+#[test]
+fn quando_schema_descreve_zero_deve_recusar_onde_o_runtime_recusa() {
+    let schema = generated_value();
+    let limits = resolve(&schema, &schema["properties"]["limits"]);
+    for (name, field) in limits["properties"].as_object().unwrap() {
+        let minimum = field["minimum"].as_u64().unwrap();
+        let zero_ok = certtui_app::config::ZERO_ALLOWED_LIMITS.contains(&name.as_str());
+        assert_eq!(minimum, u64::from(!zero_ok), "{name}");
+    }
+    for (section, field) in [("network", "timeout_secs"), ("batch", "concurrency")] {
+        let section_schema = resolve(&schema, &schema["properties"][section]);
+        assert_eq!(
+            section_schema["properties"][field]["minimum"].as_u64(),
+            Some(1),
+            "{section}.{field}"
+        );
+    }
+}

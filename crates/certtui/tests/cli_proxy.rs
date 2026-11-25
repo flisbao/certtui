@@ -285,3 +285,32 @@ fn quando_https_proxy_do_ambiente_e_invalido_sem_use_env_proxy_deve_ser_ignorado
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
+
+#[test]
+fn quando_no_proxy_deve_ignorar_proxy_da_config_e_do_ambiente() {
+    let fixture = Fixture::start(ProxyBehavior::Ok);
+    // The config names a proxy that is not there; the environment names the
+    // fake one. `--no-proxy` must send the connection straight to the server.
+    let config =
+        fixture.config(r#"{"network":{"proxy":"http://127.0.0.1:1","use_env_proxy":true}}"#);
+    let out = fixture.inspect(
+        &["--config", &config, "--no-proxy"],
+        &[("HTTPS_PROXY", fixture.proxy_url())],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(fixture.proxy.connections(), 0);
+}
+
+#[test]
+fn quando_proxy_e_no_proxy_juntos_deve_sair_2() {
+    let fixture = Fixture::start(ProxyBehavior::Ok);
+    let out = fixture.inspect(&["--proxy", &fixture.proxy_url(), "--no-proxy"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn quando_aia_e_no_aia_juntos_deve_sair_2() {
+    let fixture = Fixture::start(ProxyBehavior::Ok);
+    let out = fixture.inspect(&["--aia", "--no-aia"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}

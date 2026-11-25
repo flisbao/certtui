@@ -34,13 +34,14 @@ pub fn run_process() -> std::process::ExitCode {
     let verifier = WebpkiChainVerifier::new();
     let clock = SystemClock;
     let enricher = real_enricher();
-    let trust_provider = move |ca_files: Vec<PathBuf>| -> Box<dyn TrustStoreProvider> {
-        Box::new(NativeTrustProvider::new(
-            ca_files,
-            Arc::clone(&trust_loader),
-            Limits::default(),
-        ))
-    };
+    let trust_provider =
+        move |ca_files: Vec<PathBuf>, limits: Limits| -> Box<dyn TrustStoreProvider> {
+            Box::new(NativeTrustProvider::new(
+                ca_files,
+                Arc::clone(&trust_loader),
+                limits,
+            ))
+        };
     let config = |flag: Option<&Path>| -> Result<Config, ConfigError> {
         FileConfigRepository::new(flag.map(Path::to_owned), EnvVars::from_process()).load()
     };

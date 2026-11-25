@@ -20,112 +20,112 @@
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "channel_capacity": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "clipboard_timeout_secs": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "connect_timeout_secs": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "dns_timeout_secs": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "handshake_timeout_secs": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "history_entries": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "http_timeout_secs": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_aia_cert_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_batch_targets": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_ca_file_certs": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_cert_der_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_certs_per_source": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_chain_len": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_clipboard_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_crl_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_dir_depth": {
           "type": [
@@ -139,14 +139,14 @@
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_handshake_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_http_redirects": {
           "type": [
@@ -160,49 +160,49 @@
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_keystore_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_ocsp_response_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_revocation_cache_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_scan_diagnostics": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "max_stdin_bytes": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         },
         "target_total_timeout_secs": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false,
@@ -300,11 +300,11 @@
       "type": "object",
       "properties": {
         "concurrency": {
-          "description": "Targets inspected at the same time.",
+          "description": "Targets inspected at the same time (at least 1).",
           "type": "integer",
           "format": "uint64",
           "default": 32,
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false
@@ -422,11 +422,11 @@
           "default": "leaf"
         },
         "timeout_secs": {
-          "description": "Overall time limit for one target, in seconds.",
+          "description": "Overall time limit for one target, in seconds (at least 1).",
           "type": "integer",
           "format": "uint64",
           "default": 20,
-          "minimum": 0
+          "minimum": 1
         },
         "use_env_proxy": {
           "description": "Read `HTTPS_PROXY` and `NO_PROXY` from the environment.",

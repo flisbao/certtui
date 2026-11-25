@@ -8,7 +8,7 @@
 //! byte a second still ends).
 
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -34,6 +34,8 @@ const USER_AGENT: &str = concat!("certtui/", env!("CARGO_PKG_VERSION"));
 pub struct ReqwestHttpFetcher {
     client: OnceLock<Result<reqwest::Client, HttpError>>,
     max_redirects: AtomicUsize,
+    /// Longest the local check of a proxied name waits for DNS, in ms.
+    dns_timeout_ms: AtomicU64,
     /// Lifts the refusal of internal destinations (`--allow-internal-urls`).
     allow_internal: Arc<AtomicBool>,
     /// The proxy requests go through, read by the client on each request.
@@ -48,6 +50,7 @@ impl ReqwestHttpFetcher {
         Self {
             client: OnceLock::new(),
             max_redirects: AtomicUsize::new(max_redirects),
+            dns_timeout_ms: AtomicU64::new(millis(Limits::default().dns_timeout)),
             allow_internal: Arc::new(AtomicBool::new(false)),
             proxy: Arc::new(RwLock::new(None)),
         }
@@ -118,10 +121,14 @@ impl ReqwestHttpFetcher {
             return Ok(());
         }
         let port = url.port_or_known_default().unwrap_or(80);
-        let blocked = match tokio::net::lookup_host((host, port)).await {
-            Ok(mut found) => found.any(|addr| is_blocked(addr.ip())),
-            Err(_) => false,
-        };
+        let dns_timeout = Duration::from_millis(self.dns_timeout_ms.load(Ordering::Relaxed));
+        // A lookup that fails or hangs is left to the proxy; a hanging one
+        // costs one `dns_timeout`, not the whole request budget.
+        let blocked =
+            match tokio::time::timeout(dns_timeout, tokio::net::lookup_host((host, port))).await {
+                Ok(Ok(mut found)) => found.any(|addr| is_blocked(addr.ip())),
+                Ok(Err(_)) | Err(_) => false,
+            };
         if blocked {
             Err(HttpError::DisallowedDestination)
         } else {
@@ -185,6 +192,11 @@ impl ReqwestHttpFetcher {
     }
 }
 
+/// `duration` in whole milliseconds, saturating.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// The proxy URL for a request to `url`, or `None` to go direct. Never
 /// panics: a poisoned lock or an unparsable endpoint means "direct".
 fn proxy_for(proxy: &RwLock<Option<ProxySettings>>, url: &Url) -> Option<Url> {
@@ -198,6 +210,8 @@ impl HttpFetcher for ReqwestHttpFetcher {
     fn use_limits(&self, limits: &Limits) {
         self.max_redirects
             .store(limits.max_http_redirects, Ordering::Relaxed);
+        self.dns_timeout_ms
+            .store(millis(limits.dns_timeout), Ordering::Relaxed);
     }
 
     fn use_proxy(&self, proxy: Option<ProxySettings>) {
