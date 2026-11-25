@@ -75,6 +75,11 @@ cargo build --locked --release --workspace
 if [ -x scripts/rss_check.sh ]; then
     scripts/rss_check.sh
 fi
+if [ -x scripts/rss_batch_check.sh ]; then
+    scripts/rss_batch_check.sh
+fi
+# Peak resident set of 10 000 batch rows (the RSS of the batch screen).
+cargo test --locked --release -p certtui-tui --test batch_heap
 # Skips itself when `script` (util-linux) is not installed.
 if [ -x scripts/idle_cpu_check.sh ]; then
     scripts/idle_cpu_check.sh
