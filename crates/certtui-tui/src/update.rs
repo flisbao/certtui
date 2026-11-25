@@ -126,7 +126,10 @@ pub(crate) fn request_copy(state: &mut AppState, payload: CopyPayload) -> Vec<Co
     if payload.text.len() > state.max_clipboard_bytes {
         let kib = payload.text.len().div_ceil(1024);
         let toast = Toast::new(
-            format!("too large to copy ({kib} KiB); press e to export"),
+            format!(
+                "too large to copy ({kib} KiB); press {} to export",
+                state.keymap.label(Action::Export)
+            ),
             ToastKind::Error,
             state.now,
         );
@@ -241,6 +244,30 @@ mod tests {
             Msg::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         );
         assert!(s.should_quit);
+    }
+
+    #[test]
+    fn quando_export_foi_remapeado_o_aviso_de_texto_grande_deve_citar_a_tecla_nova() {
+        let mut s = state();
+        s.max_clipboard_bytes = 4;
+        s.keymap = Keymap::from_overrides(&std::collections::BTreeMap::from([(
+            "export".to_owned(),
+            "ctrl+e".to_owned(),
+        )]))
+        .unwrap();
+        request_copy(
+            &mut s,
+            crate::copy::CopyPayload {
+                label: "x".to_owned(),
+                text: "too long for four bytes".to_owned(),
+            },
+        );
+        let toast = s.toast.unwrap();
+        assert!(
+            toast.text.contains("press Ctrl-E to export"),
+            "{}",
+            toast.text
+        );
     }
 
     #[test]

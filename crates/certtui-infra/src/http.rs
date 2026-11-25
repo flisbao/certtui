@@ -124,12 +124,12 @@ impl ReqwestHttpFetcher {
         let dns_timeout = Duration::from_millis(self.dns_timeout_ms.load(Ordering::Relaxed));
         // A lookup that fails or hangs is left to the proxy; a hanging one
         // costs one `dns_timeout`, not the whole request budget.
-        let blocked =
-            match tokio::time::timeout(dns_timeout, tokio::net::lookup_host((host, port))).await {
-                Ok(Ok(mut found)) => found.any(|addr| is_blocked(addr.ip())),
-                Ok(Err(_)) | Err(_) => false,
-            };
-        if blocked {
+        let lookup = async {
+            tokio::net::lookup_host((host, port))
+                .await
+                .map(|found| found.map(|addr| addr.ip()).collect::<Vec<_>>())
+        };
+        if any_blocked(lookup, dns_timeout).await {
             Err(HttpError::DisallowedDestination)
         } else {
             Ok(())
@@ -189,6 +189,19 @@ impl ReqwestHttpFetcher {
                 payload = None;
             }
         }
+    }
+}
+
+/// Whether the lookup answers within `timeout` with at least one address the
+/// policy refuses. A lookup that fails or runs out of time counts as "no":
+/// the name is then left to the proxy.
+async fn any_blocked(
+    lookup: impl std::future::Future<Output = std::io::Result<Vec<IpAddr>>>,
+    timeout: Duration,
+) -> bool {
+    match tokio::time::timeout(timeout, lookup).await {
+        Ok(Ok(addresses)) => addresses.into_iter().any(is_blocked),
+        Ok(Err(_)) | Err(_) => false,
     }
 }
 
@@ -361,6 +374,25 @@ fn map_reqwest_error(err: &reqwest::Error) -> HttpError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn quando_lookup_trava_deve_estourar_o_timeout_e_deixar_o_proxy_resolver() {
+        let started = std::time::Instant::now();
+        let blocked = any_blocked(std::future::pending(), Duration::from_millis(30)).await;
+        assert!(!blocked);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn quando_lookup_responde_deve_bloquear_so_se_algum_endereco_for_vedado() {
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        let timeout = Duration::from_secs(1);
+        assert!(any_blocked(async { Ok(vec![public, loopback]) }, timeout).await);
+        assert!(!any_blocked(async { Ok(vec![public]) }, timeout).await);
+        let failed = async { Err(std::io::Error::other("no such host")) };
+        assert!(!any_blocked(failed, timeout).await);
+    }
+
     use super::*;
 
     fn url(raw: &str) -> Url {

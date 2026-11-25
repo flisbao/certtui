@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::keymap::Keymap;
+use crate::keymap::{Action, Keymap};
 use crate::theme::Theme;
 
 /// Tallest the dialog gets, borders included.
@@ -29,6 +29,10 @@ pub fn help_lines(keymap: &Keymap) -> Vec<String> {
     lines.push(format!("  {:<KEYS_WIDTH$}quit", "Ctrl-C"));
     lines.push(String::new());
     lines.push("Clipboard".to_owned());
+    let export_line = format!(
+        "Nothing over 256 KiB is copied; press {} to export instead.",
+        keymap.label(Action::Export)
+    );
     for line in [
         "Copy keys try OSC 52 (the terminal sets its clipboard) and the system",
         "clipboard. Over SSH, OSC 52 goes first.",
@@ -37,7 +41,7 @@ pub fn help_lines(keymap: &Keymap) -> Vec<String> {
         "tmux: add `set -g set-clipboard on` to ~/.tmux.conf.",
         "X11/Wayland: this program serves the clipboard; the text is lost when it",
         "exits unless a clipboard manager keeps it.",
-        "Nothing over 256 KiB is copied; press e to export instead.",
+        export_line.as_str(),
     ] {
         lines.push(format!("  {line}"));
     }

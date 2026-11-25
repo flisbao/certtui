@@ -46,29 +46,125 @@ fn quando_tipos_mudam_sem_atualizar_o_schema_deve_falhar() {
     );
 }
 
+/// Whether `value` satisfies `schema`: the subset of JSON Schema the
+/// generated schema uses (`$ref`, `type`, `const`, `oneOf`, `properties`,
+/// `additionalProperties`, `items`, `minimum`).
+fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let name = reference.rsplit('/').next().unwrap();
+        return accepts(root, &root["$defs"][name], value);
+    }
+    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
+        return options.iter().filter(|o| accepts(root, o, value)).count() == 1;
+    }
+    if let Some(expected) = schema.get("const") {
+        return expected == value;
+    }
+    if let Some(types) = schema.get("type") {
+        let names: Vec<&str> = match types {
+            Value::String(one) => vec![one.as_str()],
+            Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let matches_type = |name: &str| match name {
+            "string" => value.is_string(),
+            "integer" => value.is_u64() || value.is_i64(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            _ => false,
+        };
+        if !names.iter().any(|name| matches_type(name)) {
+            return false;
+        }
+    }
+    if let (Some(minimum), Some(number)) = (
+        schema.get("minimum").and_then(Value::as_i64),
+        value.as_i64(),
+    ) && number < minimum
+    {
+        return false;
+    }
+    if let Some(object) = value.as_object() {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        for (key, child) in object {
+            match properties.and_then(|p| p.get(key)) {
+                Some(child_schema) => {
+                    if !accepts(root, child_schema, child) {
+                        return false;
+                    }
+                }
+                None => match schema.get("additionalProperties") {
+                    Some(Value::Bool(false)) => return false,
+                    Some(extra @ Value::Object(_)) if !accepts(root, extra, child) => {
+                        return false;
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+    if let (Some(items), Some(array)) = (schema.get("items"), value.as_array()) {
+        return array.iter().all(|item| accepts(root, items, item));
+    }
+    true
+}
+
 #[test]
 fn quando_config_default_serializada_deve_validar_contra_o_schema() {
     let schema = generated_value();
     let config = serde_json::to_value(Config::default()).unwrap();
-    let properties = schema["properties"].as_object().unwrap();
-    let mut top_level: Vec<&String> = config.as_object().unwrap().keys().collect();
-    let mut declared: Vec<&String> = properties.keys().collect();
-    top_level.sort();
-    declared.sort();
-    assert_eq!(top_level, declared);
-    // Every section of the default config has the keys the schema declares.
-    for (section, value) in config.as_object().unwrap() {
-        let Some(fields) = value.as_object() else {
-            continue;
-        };
-        let section_schema = resolve(&schema, &properties[section]);
-        let declared = section_schema["properties"].as_object().unwrap();
-        for key in fields.keys() {
-            assert!(
-                declared.contains_key(key),
-                "{section}.{key} missing from the schema"
-            );
-        }
+    assert!(accepts(&schema, &schema, &config), "{config}");
+    // The validator is not vacuous: it refuses what the schema forbids.
+    for bad in [
+        r#"{"colour": 1}"#,
+        r#"{"ui": {"theme": "neon"}}"#,
+        r#"{"network": {"timeout_secs": "20"}}"#,
+        r#"{"network": {"timeout_secs": 0}}"#,
+        r#"{"limits": {"max_chain_len": 0}}"#,
+        r#"{"limits": {"nope": 1}}"#,
+        r#"{"trust": {"sources": ["floppy"]}}"#,
+    ] {
+        let value: Value = serde_json::from_str(bad).unwrap();
+        assert!(!accepts(&schema, &schema, &value), "{bad}");
+    }
+}
+
+#[test]
+fn quando_schema_e_runtime_julgam_a_mesma_config_devem_concordar() {
+    let schema = generated_value();
+    let cases = [
+        "{}",
+        r#"{"thresholds":{"warn_days":10,"critical_days":3,"fail_on":"warning"}}"#,
+        r#"{"network":{"timeout_secs":30,"proxy":"http://p:3128","use_env_proxy":true,"aia":true,"revocation":"full"}}"#,
+        r#"{"trust":{"sources":["system","mozilla"],"ca_files":["/etc/ca.pem"]}}"#,
+        r#"{"batch":{"concurrency":8}}"#,
+        r#"{"limits":{"max_chain_len":12,"max_http_redirects":0}}"#,
+        r#"{"ui":{"theme":"mono","mouse":true,"fingerprint_format":"base64","keymap":{"quit":"z"}}}"#,
+        r#"{"logging":{"file":"/tmp/x.log","level":"debug"}}"#,
+        r#"{"ui":{"theme":"neon"}}"#,
+        r#"{"thresholds":{"fail_on":"info"}}"#,
+        r#"{"network":{"timeout_secs":0}}"#,
+        r#"{"batch":{"concurrency":0}}"#,
+        r#"{"limits":{"max_chain_len":0}}"#,
+        r#"{"limits":{"max_dir_depth":0}}"#,
+        r#"{"limits":{"unknown":1}}"#,
+        r#"{"extra":1}"#,
+        r#"{"trust":{"sources":["floppy"]}}"#,
+        r#"{"logging":{"level":"loud"}}"#,
+        r#"{"network":{"revocation":"sometimes"}}"#,
+    ];
+    for json in cases {
+        let value: Value = serde_json::from_str(json).unwrap();
+        let by_schema = accepts(&schema, &schema, &value);
+        let by_runtime = Config::from_json(json)
+            .and_then(|config| config.resolve(&certtui_app::config::CliOverrides::default()))
+            .is_ok();
+        assert_eq!(
+            by_schema, by_runtime,
+            "schema and runtime disagree on {json}"
+        );
     }
 }
 

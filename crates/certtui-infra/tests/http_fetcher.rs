@@ -507,26 +507,3 @@ async fn quando_proxy_e_dado_por_nome_de_loopback_deve_poder_ser_alcancado() {
 
     assert_eq!(got, Ok(vec![4, 2]));
 }
-
-#[tokio::test]
-async fn quando_lookup_local_estoura_o_dns_timeout_deve_deixar_o_proxy_resolver() {
-    // A local DNS that hangs must cost one `dns_timeout`, not the whole
-    // request budget; the name is then left to the proxy (best effort).
-    let proxy = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/x"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![3]))
-        .mount(&proxy)
-        .await;
-    let fetcher = ReqwestHttpFetcher::new(3);
-    fetcher.use_limits(&certtui_domain::limits::Limits {
-        dns_timeout: Duration::ZERO,
-        ..certtui_domain::limits::Limits::default()
-    });
-    fetcher.use_proxy(Some(proxy_settings(&proxy, None)));
-
-    // `localhost` would be refused if the lookup completed.
-    let got = fetcher.get("http://localhost:9/x", LIMIT, TIMEOUT).await;
-
-    assert_eq!(got, Ok(vec![3]));
-}

@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use crate::app_state::{AppState, BatchPhase, BatchState};
+use crate::keymap::Action;
 use crate::text::display;
 use crate::theme::Theme;
 use crate::view::batch_viewport_rows;
@@ -37,12 +38,30 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
 
     render_table(state, batch, frame, table_area, theme);
     render_progress(batch, frame, progress_area, theme);
+    let keys = &state.keymap;
+    let label = |action| keys.label(action);
     let hint = if batch.filter_editing {
-        "Enter keep filter \u{b7} Esc clear filter"
+        "Enter keep filter \u{b7} Esc clear filter".to_owned()
     } else if batch.is_running() {
-        "Esc cancel \u{b7} Enter inspect \u{b7} s sort \u{b7} / filter \u{b7} y row \u{b7} Y table \u{b7} ? help"
+        format!(
+            "Esc cancel \u{b7} {} inspect \u{b7} {} sort \u{b7} {} filter \u{b7} {} row \u{b7} {} table \u{b7} {} help",
+            label(Action::Enter),
+            label(Action::Sort),
+            label(Action::Filter),
+            label(Action::CopyFocused),
+            label(Action::CopyView),
+            label(Action::Help),
+        )
     } else {
-        "Enter inspect \u{b7} s sort \u{b7} S reverse \u{b7} / filter \u{b7} y row \u{b7} Y table \u{b7} Esc back"
+        format!(
+            "{} inspect \u{b7} {} sort \u{b7} {} reverse \u{b7} {} filter \u{b7} {} row \u{b7} {} table \u{b7} Esc back",
+            label(Action::Enter),
+            label(Action::Sort),
+            label(Action::ReverseSort),
+            label(Action::Filter),
+            label(Action::CopyFocused),
+            label(Action::CopyView),
+        )
     };
     frame.render_widget(Paragraph::new(hint).style(theme.dim), hint_area);
 }

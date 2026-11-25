@@ -1,0 +1,1 @@
+{"schema_version":1,"network":{"timeout_secs":20,"proxy":null},"limits":{"max_chain_len":10},"ui":{"keymap":{"quit":"z"}}}

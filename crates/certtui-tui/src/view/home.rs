@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app_state::{AppState, HomeMode};
+use crate::keymap::Action;
 use crate::theme::Theme;
 
 const PLACEHOLDER: &str = "host[:port], https://host, a file or directory, or - for stdin";
@@ -31,9 +32,20 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     render_input(state, frame, input_area, theme);
     render_lists(state, frame, lists_area, theme);
     let hint = match (state.home.editing, state.home.mode) {
-        (true, HomeMode::BatchFile) => "Enter open the list · Esc stop typing",
-        (true, HomeMode::Target) => "Enter inspect · Esc stop typing",
-        (false, _) => "o new target · b batch list · Enter inspect · ? help · q quit",
+        (true, HomeMode::BatchFile) => "Enter open the list · Esc stop typing".to_owned(),
+        (true, HomeMode::Target) => "Enter inspect · Esc stop typing".to_owned(),
+        (false, _) => {
+            let keys = &state.keymap;
+            let label = |action| keys.label(action);
+            format!(
+                "{} new target · {} batch list · {} inspect · {} help · {} quit",
+                label(Action::NewTarget),
+                label(Action::OpenBatch),
+                label(Action::Enter),
+                label(Action::Help),
+                label(Action::Quit),
+            )
+        }
     };
     frame.render_widget(Paragraph::new(hint).style(theme.dim), hint_area);
 }

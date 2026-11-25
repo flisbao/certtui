@@ -276,8 +276,8 @@ impl Keymap {
 
     /// The default keys with `overrides` applied: action name (`quit`,
     /// `copy_focused`, ...) to key (`q`, `ctrl+y`, `F5`, `shift+tab`). An
-    /// overridden action loses all its default keys, except `Esc`, which
-    /// always goes back.
+    /// overridden action loses its default keys, except the pinned ones (`Esc`,
+    /// the arrows, `Enter`, `Tab`, `Shift-Tab`).
     ///
     /// # Errors
     ///
@@ -291,8 +291,11 @@ impl Keymap {
             let key = parse_key(key_text)?;
             keymap
                 .bindings
-                .retain(|(bound, existing)| *existing != action || *bound == PINNED_ESC);
-            keymap.bindings.push((key, action));
+                .retain(|(bound, existing)| *existing != action || is_pinned(*bound, *existing));
+            // Asking for a key the action already has (a pinned one) is a no-op.
+            if !keymap.bindings.contains(&(key, action)) {
+                keymap.bindings.push((key, action));
+            }
         }
         keymap.check_conflicts()?;
         Ok(keymap)
@@ -353,6 +356,15 @@ impl Keymap {
             .map(|(_, action)| *action)
     }
 
+    /// The key to show for `action` in hints: its first key, as in the help.
+    #[must_use]
+    pub fn label(&self, action: Action) -> String {
+        self.bindings
+            .iter()
+            .find(|(_, bound)| *bound == action)
+            .map_or_else(|| "(unbound)".to_owned(), |(key, _)| key_label(*key))
+    }
+
     /// What the help dialog lists: every action with its keys.
     #[must_use]
     pub fn help_entries(&self) -> Vec<HelpEntry> {
@@ -374,8 +386,21 @@ impl Keymap {
     }
 }
 
-/// The binding that no override can take away.
-const PINNED_ESC: Key = Key::plain(KeyCode::Esc);
+/// The bindings no override can take away: leaving, moving, confirming and
+/// changing pane keep their keys, so a remap can never strand the user on a
+/// screen. Remapping an action only adds a key for it.
+const PINNED: [(Key, Action); 6] = [
+    (Key::plain(KeyCode::Esc), Action::Back),
+    (Key::plain(KeyCode::Up), Action::Up),
+    (Key::plain(KeyCode::Down), Action::Down),
+    (Key::plain(KeyCode::Enter), Action::Enter),
+    (Key::plain(KeyCode::Tab), Action::NextPane),
+    (Key::plain(KeyCode::BackTab), Action::PrevPane),
+];
+
+fn is_pinned(key: Key, action: Action) -> bool {
+    PINNED.contains(&(key, action))
+}
 
 /// Reads a key from its `ui.keymap` spelling.
 fn parse_key(text: &str) -> Result<Key, KeymapError> {
@@ -500,7 +525,45 @@ mod tests {
         let keymap = Keymap::from_overrides(&overrides(&[("down", "n")])).unwrap();
         assert_eq!(press(&keymap, KeyCode::Char('n')), Some(Action::Down));
         assert_eq!(press(&keymap, KeyCode::Char('j')), None);
-        assert_eq!(press(&keymap, KeyCode::Down), None);
+        // The arrow is pinned like Esc: moving the letters never strands it.
+        assert_eq!(press(&keymap, KeyCode::Down), Some(Action::Down));
+    }
+
+    #[test]
+    fn quando_remapeia_qualquer_acao_as_teclas_de_navegacao_devem_continuar_fixas() {
+        let keymap = Keymap::from_overrides(&overrides(&[
+            ("up", "w"),
+            ("down", "n"),
+            ("enter", "ctrl+o"),
+            ("next_pane", "F2"),
+            ("prev_pane", "F3"),
+        ]))
+        .unwrap();
+        assert_eq!(press(&keymap, KeyCode::Up), Some(Action::Up));
+        assert_eq!(press(&keymap, KeyCode::Down), Some(Action::Down));
+        assert_eq!(press(&keymap, KeyCode::Enter), Some(Action::Enter));
+        assert_eq!(press(&keymap, KeyCode::Tab), Some(Action::NextPane));
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(keymap.resolve(back_tab), Some(Action::PrevPane));
+        assert_eq!(press(&keymap, KeyCode::Char('w')), Some(Action::Up));
+        assert_eq!(press(&keymap, KeyCode::F(2)), Some(Action::NextPane));
+    }
+
+    #[test]
+    fn quando_outra_acao_pede_uma_tecla_fixa_deve_dar_conflict() {
+        // The arrow stays with Down, so Quit cannot take it.
+        let error = Keymap::from_overrides(&overrides(&[("quit", "down")])).unwrap_err();
+        assert!(matches!(error, KeymapError::Conflict { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn quando_label_deve_dar_a_primeira_tecla_e_refletir_o_remap() {
+        let keymap = Keymap::new();
+        assert_eq!(keymap.label(Action::Quit), "q");
+        assert_eq!(keymap.label(Action::Help), "?");
+        assert_eq!(keymap.label(Action::Back), "Esc");
+        let keymap = Keymap::from_overrides(&overrides(&[("quit", "ctrl+z")])).unwrap();
+        assert_eq!(keymap.label(Action::Quit), "Ctrl-Z");
     }
 
     #[test]

@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use super::tabs::{RowsView, fit, render_rows, render_tab_bar};
 use crate::app_state::{AppState, InspectState, Pane, Phase, Tab};
 use crate::detail_rows::{CertStatus, cert_status, cert_title, rows_for_tab};
+use crate::keymap::{Action, Keymap};
 use crate::theme::Theme;
 
 /// Draws the Inspect screen.
@@ -31,7 +32,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
         }
         Phase::Ready(report) => render_ready(state, inspect, report, frame, main, theme),
     }
-    render_footer(inspect, frame, footer, theme);
+    render_footer(inspect, &state.keymap, frame, footer, theme);
 }
 
 fn render_message(
@@ -162,10 +163,16 @@ fn render_chain(
 }
 
 /// `TLSv1.3 · cipher · IP · handshake 42ms`, or the target when there is no session.
-fn render_footer(inspect: &InspectState, frame: &mut Frame, area: Rect, theme: &Theme) {
+fn render_footer(
+    inspect: &InspectState,
+    keymap: &Keymap,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+) {
     let text = match inspect.report() {
         Some(report) => footer_text(report),
-        None => String::from("Esc back \u{b7} ? help"),
+        None => format!("Esc back \u{b7} {} help", keymap.label(Action::Help)),
     };
     let text = fit(&text, usize::from(area.width));
     frame.render_widget(Paragraph::new(text).style(theme.dim), area);

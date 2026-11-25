@@ -387,3 +387,18 @@ fn quando_no_aia_na_linha_de_comando_deve_vencer_a_config() {
     };
     assert!(!resolve(config, &flags).aia);
 }
+
+#[test]
+fn quando_campo_ou_valor_sao_enormes_o_erro_deve_continuar_curto() {
+    let huge = "x".repeat(100_000);
+    for json in [
+        format!(r#"{{"ui":{{"{huge}":1}}}}"#),
+        format!(r#"{{"{huge}":1}}"#),
+        format!(r#"{{"thresholds":{{"fail_on":"{huge}"}}}}"#),
+        format!(r#"{{"ui":{{"theme":"{huge}"}}}}"#),
+    ] {
+        let error = Config::from_json(&json).unwrap_err();
+        let text = error.to_string();
+        assert!(text.len() < 600, "{} bytes: {}", text.len(), &text[..80]);
+    }
+}

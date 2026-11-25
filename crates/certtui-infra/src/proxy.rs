@@ -147,7 +147,7 @@ async fn read_head(stream: &mut TcpStream) -> Result<Vec<u8>, ProxyError> {
         }
         match stream.read(&mut byte).await {
             Ok(0) | Err(_) => return Err(ProxyError::Closed),
-            Ok(_) => head.push(byte[0]),
+            Ok(_) => head.extend_from_slice(&byte),
         }
         if head.ends_with(b"\r\n\r\n") {
             return Ok(head);

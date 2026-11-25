@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+certtui-app = { path = "../crates/certtui-app" }
 certtui-domain = { path = "../crates/certtui-domain" }
 certtui-infra = { path = "../crates/certtui-infra", features = ["fuzzing"] }
 
@@ -31,6 +32,13 @@ todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
 print_stdout = "deny"
+
+[[bin]]
+name = "parse_config_json"
+path = "fuzz_targets/parse_config_json.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "parse_der_cert"

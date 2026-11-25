@@ -138,6 +138,20 @@ mod tests {
     }
 
     #[test]
+    fn quando_keymap_remapeado_o_rodape_da_home_deve_mostrar_a_tecla_nova() {
+        let mut s = state();
+        s.keymap = crate::keymap::Keymap::from_overrides(&std::collections::BTreeMap::from([
+            ("quit".to_owned(), "z".to_owned()),
+            ("help".to_owned(), "F1".to_owned()),
+        ]))
+        .unwrap();
+        let screen = text(&render(&s, 80, 24));
+        assert!(screen.contains("F1 help"), "{screen}");
+        assert!(screen.contains("z quit"), "{screen}");
+        assert!(!screen.contains("q quit"), "{screen}");
+    }
+
+    #[test]
     fn quando_digita_prefixo_deve_mostrar_sugestoes_no_snapshot() {
         let mut s = state_with_history();
         s.home.editing = true;

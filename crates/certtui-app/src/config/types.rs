@@ -544,9 +544,13 @@ fn classify(text: &str, error: &serde_json::Error) -> ConfigError {
     use serde_json::error::Category;
 
     let (message, _) = split_position(&error.to_string());
+    let message = clip(&message, MAX_MESSAGE_CHARS);
     match error.classify() {
         Category::Data => {
-            let field = locate_field(text).unwrap_or_else(|| "<root>".to_owned());
+            let field = clip(
+                &locate_field(text).unwrap_or_else(|| "<root>".to_owned()),
+                MAX_FIELD_CHARS,
+            );
             if message.starts_with("unknown field") {
                 ConfigError::UnknownField {
                     field,
@@ -562,6 +566,23 @@ fn classify(text: &str, error: &serde_json::Error) -> ConfigError {
             message,
         },
     }
+}
+
+/// Longest field path quoted in an error: the file is the user's, but a name
+/// of a million characters must not be echoed to the terminal.
+const MAX_FIELD_CHARS: usize = 80;
+
+/// Longest parser message quoted in an error.
+const MAX_MESSAGE_CHARS: usize = 200;
+
+/// `text` cut to `max` characters, with `...` when something was dropped.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(max).collect();
+    cut.push_str("...");
+    cut
 }
 
 /// Splits `message at line L column C` into the message and the suffix.
