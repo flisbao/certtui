@@ -47,6 +47,8 @@ p12() { # saída, opções do openssl...
 p12 chain-with-key.p12 -inkey "$TMP/leaf.key" -in "$TMP/leaf.pem" -certfile "$TMP/rest.pem" \
   -name server -passout "pass:$PASS"
 p12 certs-only.p12 -nokeys -in "$TMP/all.pem" -passout "pass:$PASS"
+# Sem MAC: nada autentica o conteúdo (`-nomac`).
+p12 no-mac.p12 -nomac -nokeys -in "$TMP/all.pem" -passout "pass:$PASS"
 p12 empty-password.p12 -nokeys -in "$TMP/all.pem" -passout "pass:"
 # Cifra legada (RC2-40 + 3DES, MAC SHA-1): exige o provider `legacy` do OpenSSL 3.
 p12 legacy-rc2.p12 -legacy -nokeys -in "$TMP/all.pem" -passout "pass:$PASS" \

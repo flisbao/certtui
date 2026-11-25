@@ -70,10 +70,31 @@ impl KeystoreReader for Pkcs12Reader {
             .collect();
         Ok(KeystoreContents {
             entries,
-            integrity_unverified: false,
+            // The library verifies the MAC only when the file has one; a file
+            // without it opens with any password and nothing vouches for it.
+            integrity_unverified: !has_mac(bytes),
             ignored: 0,
         })
     }
+}
+
+/// Whether the PFX carries a `MacData`: `PFX ::= SEQUENCE { version, authSafe,
+/// macData OPTIONAL }`, so three elements. Anything unreadable counts as no MAC.
+fn has_mac(bytes: &[u8]) -> bool {
+    use der::asn1::AnyRef;
+    use der::{Decode, Reader, SliceReader};
+
+    let count = || -> Option<usize> {
+        let outer = AnyRef::decode(&mut SliceReader::new(bytes).ok()?).ok()?;
+        let mut inner = SliceReader::new(outer.value()).ok()?;
+        let mut count = 0_usize;
+        while !inner.is_finished() && count < 4 {
+            AnyRef::decode(&mut inner).ok()?;
+            count += 1;
+        }
+        Some(count)
+    };
+    count().is_some_and(|elements| elements >= 3)
 }
 
 /// OID bodies (after the `06 <len>` header) of the PKCS#12 and PKCS#5
@@ -172,7 +193,27 @@ mod tests {
         let got = read(fixture!("chain-with-key.p12"), Some(&password("changeit"))).unwrap();
 
         assert_eq!(ders(&got), expected());
-        assert!(!got.integrity_unverified);
+        assert!(!got.integrity_unverified, "the MAC was verified");
+    }
+
+    #[test]
+    fn quando_p12_nao_tem_mac_deve_marcar_integrity_unverified() {
+        let got = read(fixture!("no-mac.p12"), Some(&password("changeit"))).unwrap();
+
+        assert_eq!(ders(&got), expected());
+        assert!(
+            got.integrity_unverified,
+            "nothing authenticates a file without a MAC"
+        );
+    }
+
+    #[test]
+    fn quando_p12_tem_mac_deve_ser_reconhecido_e_lixo_nao() {
+        assert!(has_mac(fixture!("certs-only.p12")));
+        assert!(has_mac(fixture!("chain-with-key.p12")));
+        assert!(!has_mac(fixture!("no-mac.p12")));
+        assert!(!has_mac(b""));
+        assert!(!has_mac(b"garbage"));
     }
 
     #[test]

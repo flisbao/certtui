@@ -32,6 +32,7 @@ chaves e certificados (portanto os `.der`); só faça isso de propósito.
 |---|---|---|
 | `chain-with-key.p12` | chave da folha + cadeia de 3 (alias `server`); AES-256 / PBKDF2 / HMAC-SHA256 | 3 certificados, nenhum byte da chave |
 | `certs-only.p12` | os mesmos 3 certificados, sem chave | 3 certificados |
+| `no-mac.p12` | os 3 certificados, **sem MAC** (`-nomac`) | 3 certificados e `integrity_unverified = true` |
 | `empty-password.p12` | os 3 certificados, senha **vazia** | abre sem senha e com `""` |
 | `legacy-rc2.p12` | os 3 certificados, `pbeWithSHA1And40BitRC2-CBC` + MAC SHA-1 (`openssl -legacy`) | `UnsupportedAlgorithm("pbeWithSHA1And40BitRC2-CBC")` |
 | `truncated.p12` | os primeiros 100 bytes de `chain-with-key.p12` | `Malformed` |
