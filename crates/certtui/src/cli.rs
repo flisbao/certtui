@@ -30,7 +30,7 @@ use certtui_domain::lint::Thresholds;
 use certtui_domain::model::{FingerprintFormat, InspectionReport, LoadNote};
 use certtui_domain::target::{NetworkTarget, Target};
 use certtui_infra::env::EnvVars;
-use certtui_infra::proxy::{EnvProxy, ProxyError, parse_proxy_url};
+use certtui_infra::proxy::{EnvProxy, parse_proxy_url};
 use certtui_tui::Keymap;
 use certtui_tui::clipboard::ClipboardStrategy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -699,7 +699,7 @@ fn start_services(
     log_start(cli, resolved);
     let proxy = match proxy_settings(resolved, env.variables) {
         Ok(proxy) => proxy,
-        Err(error) => return usage(err, &error.to_string()).map(Err),
+        Err(message) => return usage(err, &message).map(Err),
     };
     env.fetcher.use_proxy(proxy.clone());
     env.enricher.use_proxy(proxy.clone());
@@ -818,13 +818,14 @@ fn overrides_from(cli: &Cli) -> CliOverrides {
 fn proxy_settings(
     resolved: &ResolvedConfig,
     vars: &EnvVars,
-) -> Result<Option<ProxySettings>, ProxyError> {
+) -> Result<Option<ProxySettings>, String> {
     match &resolved.proxy {
         Some(url) => Ok(Some(ProxySettings {
-            endpoint: parse_proxy_url(url)?,
+            endpoint: parse_proxy_url(url).map_err(|error| error.to_string())?,
             no_proxy: None,
         })),
-        None => Ok(EnvProxy::from_env(vars, resolved.use_env_proxy)),
+        None => EnvProxy::from_env(vars, resolved.use_env_proxy)
+            .map_err(|error| format!("HTTPS_PROXY: {error}")),
     }
 }
 

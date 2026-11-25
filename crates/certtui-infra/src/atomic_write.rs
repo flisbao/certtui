@@ -49,6 +49,29 @@ pub fn write_with(
     overwrite: Overwrite,
     produce: impl FnOnce(&mut dyn Write) -> io::Result<()>,
 ) -> Result<(), WriteError> {
+    write_with_mode(path, overwrite, None, produce)
+}
+
+/// [`write_atomic`] for files only their owner should read (mode 0600 on
+/// Unix; elsewhere the platform default).
+///
+/// # Errors
+///
+/// As [`write_atomic`].
+pub fn write_atomic_private(
+    path: &Path,
+    bytes: &[u8],
+    overwrite: Overwrite,
+) -> Result<(), WriteError> {
+    write_with_mode(path, overwrite, Some(0o600), |file| file.write_all(bytes))
+}
+
+fn write_with_mode(
+    path: &Path,
+    overwrite: Overwrite,
+    mode: Option<u32>,
+    produce: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> Result<(), WriteError> {
     check_destination(path, overwrite)?;
     let parent = parent_of(path);
     if !parent.is_dir() {
@@ -56,7 +79,7 @@ pub fn write_with(
     }
     let temp = Temp::new(path, &parent)?;
     {
-        let mut file = temp.open()?;
+        let mut file = temp.open(mode)?;
         produce(&mut file).map_err(|error| io_error(&error))?;
         file.flush().map_err(|error| io_error(&error))?;
         file.sync_all().map_err(|error| io_error(&error))?;
@@ -126,12 +149,18 @@ impl Temp {
         Ok(Self { path })
     }
 
-    fn open(&self) -> Result<File, WriteError> {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&self.path)
-            .map_err(|error| io_error(&error))
+    fn open(&self, mode: Option<u32>) -> Result<File, WriteError> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(mode);
+        }
+        // Without Unix modes the platform default applies.
+        #[cfg(not(unix))]
+        let _ = mode;
+        options.open(&self.path).map_err(|error| io_error(&error))
     }
 }
 

@@ -12,7 +12,7 @@ use certtui_domain::limits::Limits;
 use certtui_domain::time::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::atomic_write::write_atomic;
+use crate::atomic_write::write_atomic_private;
 
 /// The only `schema_version` of the file this build reads and writes.
 const SCHEMA_VERSION: u32 = 1;
@@ -120,6 +120,19 @@ fn history_of(file: HistoryFile) -> Option<History> {
     })
 }
 
+/// Creates `dir` and its missing parents; on Unix the new ones are 0700, since
+/// the history inside names the hosts and files the user looked at.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
 fn read_capped(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     let file = File::open(path)?;
     let mut bytes = Vec::new();
@@ -161,12 +174,12 @@ impl HistoryRepository for FileHistoryRepository {
             HistoryError::Io(format!("{}: {error}", self.path.display()))
         };
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent).map_err(|error| io(&error.kind()))?;
+            create_private_dir(parent).map_err(|error| io(&error.kind()))?;
         }
         let mut json =
             serde_json::to_vec_pretty(&HistoryFile::from(history)).map_err(|error| io(&error))?;
         json.push(b'\n');
-        write_atomic(&self.path, &json, Overwrite::Allow).map_err(|error| io(&error))
+        write_atomic_private(&self.path, &json, Overwrite::Allow).map_err(|error| io(&error))
     }
 }
 
@@ -349,6 +362,26 @@ mod tests {
         let loaded = FileHistoryRepository::new(dir.history()).load().unwrap();
         assert_eq!(loaded.history.recents.len(), 1_000);
         assert_eq!(loaded.note, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quando_salva_deve_criar_arquivo_0600_e_diretorios_novos_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = Scratch::new();
+        let path = dir.0.join("data/certtui/history.json");
+        FileHistoryRepository::new(path.clone())
+            .save(&sample())
+            .unwrap();
+        let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        // Saving again replaces the file and keeps the mode.
+        FileHistoryRepository::new(path.clone())
+            .save(&sample())
+            .unwrap();
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[cfg(unix)]

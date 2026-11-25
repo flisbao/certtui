@@ -15,9 +15,10 @@
 use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
+use certtui_app::proxy::ProxySettings;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// Alibaba Cloud's metadata address, inside the shared (CGNAT) range.
@@ -72,19 +73,45 @@ impl Error for Blocked {}
 /// is left the connection fails with [`Blocked`].
 pub struct FilteringResolver {
     allow_internal: Arc<AtomicBool>,
+    /// The proxy, whose own address is the user's choice, not a
+    /// certificate's: it is never filtered.
+    proxy: Arc<RwLock<Option<ProxySettings>>>,
 }
 
 impl FilteringResolver {
     /// A resolver that reads `allow_internal` on every lookup.
     #[must_use]
     pub fn new(allow_internal: Arc<AtomicBool>) -> Self {
-        Self { allow_internal }
+        Self::with_proxy(allow_internal, Arc::new(RwLock::new(None)))
+    }
+
+    /// Like [`new`](Self::new), but the host of the configured proxy is
+    /// resolved without filtering.
+    #[must_use]
+    pub fn with_proxy(
+        allow_internal: Arc<AtomicBool>,
+        proxy: Arc<RwLock<Option<ProxySettings>>>,
+    ) -> Self {
+        Self {
+            allow_internal,
+            proxy,
+        }
+    }
+
+    /// Whether `name` is the host of the configured proxy.
+    fn is_proxy_host(&self, name: &str) -> bool {
+        self.proxy
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|settings| settings.endpoint.host.eq_ignore_ascii_case(name))
     }
 }
 
 impl Resolve for FilteringResolver {
     fn resolve(&self, name: Name) -> Resolving {
-        let allow = self.allow_internal.load(Ordering::Relaxed);
+        let allow =
+            self.allow_internal.load(Ordering::Relaxed) || self.is_proxy_host(name.as_str());
         Box::pin(async move {
             let found = tokio::net::lookup_host((name.as_str(), 0)).await?;
             let kept: Vec<SocketAddr> = found

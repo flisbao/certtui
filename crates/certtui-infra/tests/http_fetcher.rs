@@ -480,3 +480,30 @@ async fn quando_use_limits_zera_redirects_deve_recusar_o_primeiro_redirect() {
 
     assert_eq!(got, Err(HttpError::TooManyRedirects));
 }
+
+#[tokio::test]
+async fn quando_proxy_e_dado_por_nome_de_loopback_deve_poder_ser_alcancado() {
+    // A proxy named `localhost` (a local squid, an SSH tunnel) is the user's
+    // own choice, not a certificate's: the destination policy must not refuse
+    // to connect to it.
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ocsp-response"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![4, 2]))
+        .mount(&proxy)
+        .await;
+    let fetcher = ReqwestHttpFetcher::new(3);
+    fetcher.use_proxy(Some(certtui_app::proxy::ProxySettings {
+        endpoint: certtui_app::proxy::ProxyEndpoint {
+            host: "localhost".to_owned(),
+            port: proxy.address().port(),
+        },
+        no_proxy: None,
+    }));
+
+    let got = fetcher
+        .get("http://ocsp.example.invalid/ocsp-response", LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(got, Ok(vec![4, 2]));
+}

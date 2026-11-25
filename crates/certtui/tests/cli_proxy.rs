@@ -256,3 +256,32 @@ fn quando_proxy_da_config_e_invalido_deve_sair_2() {
     let out = fixture.inspect(&["--config", &config], &[]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
+
+#[test]
+fn quando_https_proxy_do_ambiente_e_invalido_com_use_env_proxy_deve_sair_2_sem_ecoar() {
+    let fixture = Fixture::start(ProxyBehavior::Ok);
+    let config = fixture.config(r#"{"network":{"use_env_proxy":true}}"#);
+    for value in [
+        "http://user:s3cret@127.0.0.1:3128",
+        "https://127.0.0.1:3128",
+        "socks5://p:1",
+    ] {
+        let out = fixture.inspect(&["--config", &config], &[("HTTPS_PROXY", value.to_owned())]);
+        assert_eq!(out.status.code(), Some(2), "{value}: {}", stderr(&out));
+        let text = stderr(&out);
+        assert!(text.contains("HTTPS_PROXY"), "{text}");
+        assert!(!text.contains("s3cret"), "{text}");
+    }
+    // Direct connections must not have happened behind the user's back.
+    assert_eq!(fixture.proxy.connections(), 0);
+}
+
+#[test]
+fn quando_https_proxy_do_ambiente_e_invalido_sem_use_env_proxy_deve_ser_ignorado() {
+    let fixture = Fixture::start(ProxyBehavior::Ok);
+    let out = fixture.inspect(
+        &[],
+        &[("HTTPS_PROXY", "http://u:pw@127.0.0.1:3128".to_owned())],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}

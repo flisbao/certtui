@@ -68,10 +68,14 @@ impl ReqwestHttpFetcher {
     fn client(&self) -> Result<&reqwest::Client, HttpError> {
         let allow_internal = Arc::clone(&self.allow_internal);
         let proxy = Arc::clone(&self.proxy);
+        let resolver_proxy = Arc::clone(&self.proxy);
         self.client
             .get_or_init(|| {
                 reqwest::Client::builder()
-                    .dns_resolver(Arc::new(FilteringResolver::new(allow_internal)))
+                    .dns_resolver(Arc::new(FilteringResolver::with_proxy(
+                        allow_internal,
+                        Arc::clone(&resolver_proxy),
+                    )))
                     .redirect(reqwest::redirect::Policy::none())
                     .proxy(reqwest::Proxy::custom(move |url| proxy_for(&proxy, url)))
                     .user_agent(USER_AGENT)

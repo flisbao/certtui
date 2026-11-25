@@ -98,9 +98,10 @@ pub fn run(
         let mut state = AppState::new(Instant::now());
         configure_state(&mut state, &options);
         state.size = (columns, rows);
-        if let Some(repository) = &options.history {
-            load_history(&mut state, repository.as_ref());
-        }
+        let history = options
+            .history
+            .clone()
+            .filter(|repository| load_history(&mut state, repository.as_ref()));
         let (msg_tx, msgs) = mpsc::channel(CHANNEL_CAPACITY);
         let mut executor = CommandExecutor::new(
             inspector,
@@ -112,7 +113,7 @@ pub fn run(
             options.batch_concurrency,
             &options.limits,
         ));
-        if let Some(repository) = options.history {
+        if let Some(repository) = history {
             executor = executor.with_history(repository);
         }
         if let Some(targets) = options.initial_batch {
@@ -158,23 +159,34 @@ fn batch_concurrency(requested: Option<usize>, limits: &Limits) -> usize {
     requested.unwrap_or(limits.batch_concurrency)
 }
 
-/// Fills the Home lists from the saved history. A history that cannot be read
-/// starts empty; the user is told, and the app keeps working.
-fn load_history(state: &mut AppState, repository: &dyn HistoryRepository) {
-    let message = match repository.load() {
+/// Fills the Home lists from the saved history and tells whether saving it
+/// later is safe.
+///
+/// A file that was unreadable is moved aside, so a fresh history may replace
+/// it. A history that could not be *read* at all (permissions, I/O error) may
+/// still be fine on disk: saving over it would destroy it, so this returns
+/// `false` and the session keeps no repository.
+fn load_history(state: &mut AppState, repository: &dyn HistoryRepository) -> bool {
+    let (message, safe_to_save) = match repository.load() {
         Ok(loaded) => {
             state.history = loaded.history;
             state.sync_history_lists();
-            loaded.note.map(
+            let message = loaded.note.map(
                 |HistoryNote::Recovered| "history file was unreadable; kept as history.json.bak",
-            )
+            );
+            (message, true)
         }
-        Err(_) => Some("could not read the history; starting empty"),
+        Err(_) => (
+            Some("could not read the history; it will not be saved this session"),
+            false,
+        ),
     };
     if let Some(message) = message {
+        tracing::warn!("{message}");
         let toast = Toast::new(message, ToastKind::Error, state.now);
         state.set_toast(toast);
     }
+    safe_to_save
 }
 
 /// What the loop did, for the tests.
@@ -379,6 +391,61 @@ mod tests {
         }
     }
 
+    /// A `tracing` writer that keeps what is written, for the log tests.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn quando_historico_foi_recuperado_ou_nao_le_deve_avisar_no_log() {
+        for (repo, needle) in [
+            (
+                StubHistory(Ok(certtui_app::history::LoadedHistory {
+                    history: certtui_app::history::History::default(),
+                    note: Some(HistoryNote::Recovered),
+                })),
+                "history.json.bak",
+            ),
+            (
+                StubHistory(Err(certtui_app::history::HistoryError::Io(
+                    "denied".to_owned(),
+                ))),
+                "could not read",
+            ),
+        ] {
+            let captured = Captured::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let mut state = AppState::new(Instant::now());
+                load_history(&mut state, &repo);
+            });
+            let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert!(text.contains("WARN"), "{text}");
+            assert!(text.contains(needle), "{text}");
+        }
+    }
+
     #[test]
     fn quando_historico_carrega_deve_preencher_a_home_sem_toast() {
         let mut history = certtui_app::history::History::default();
@@ -388,7 +455,7 @@ mod tests {
             note: None,
         }));
         let mut state = AppState::new(Instant::now());
-        load_history(&mut state, &repo);
+        assert!(load_history(&mut state, &repo));
         assert_eq!(state.home.favorites, ["a.example"]);
         assert!(state.toast.is_none());
     }
@@ -400,7 +467,8 @@ mod tests {
             note: Some(HistoryNote::Recovered),
         }));
         let mut state = AppState::new(Instant::now());
-        load_history(&mut state, &repo);
+        // The bad file was moved aside, so saving a fresh history is safe.
+        assert!(load_history(&mut state, &repo));
         let toast = state.toast.unwrap();
         assert!(toast.text.contains("history.json.bak"), "{}", toast.text);
     }
@@ -411,7 +479,9 @@ mod tests {
             "denied".to_owned(),
         )));
         let mut state = AppState::new(Instant::now());
-        load_history(&mut state, &repo);
+        // Unreadable is not "empty": saving now would overwrite a history
+        // that may be fine, so the session must not save.
+        assert!(!load_history(&mut state, &repo));
         assert_eq!(state.home.recents, Vec::<String>::new());
         assert!(state.toast.unwrap().text.contains("could not read"));
     }

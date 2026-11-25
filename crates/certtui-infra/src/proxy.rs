@@ -177,30 +177,36 @@ pub struct EnvProxy;
 
 impl EnvProxy {
     /// The proxy of `HTTPS_PROXY` (or `https_proxy`) with the `NO_PROXY` list,
-    /// only when `enabled` (`network.use_env_proxy`). A value that is not a
-    /// usable `http://` proxy is ignored; `host:port` without a scheme is
-    /// taken as `http://host:port`.
-    #[must_use]
-    pub fn from_env(env: &EnvVars, enabled: bool) -> Option<ProxySettings> {
+    /// only when `enabled` (`network.use_env_proxy`). `host:port` without a
+    /// scheme is taken as `http://host:port`.
+    ///
+    /// # Errors
+    ///
+    /// [`ProxyError::Invalid`] when the variable is set but is not a usable
+    /// `http://` proxy. Falling back to a direct connection would send the
+    /// traffic around a proxy the user asked for.
+    pub fn from_env(env: &EnvVars, enabled: bool) -> Result<Option<ProxySettings>, ProxyError> {
         if !enabled {
-            return None;
+            return Ok(None);
         }
-        let value = env.get("HTTPS_PROXY").or_else(|| env.get("https_proxy"))?;
+        let Some(value) = env.get("HTTPS_PROXY").or_else(|| env.get("https_proxy")) else {
+            return Ok(None);
+        };
         let url = if value.contains("://") {
             value.to_owned()
         } else {
             format!("http://{value}")
         };
-        let endpoint = parse_proxy_url(&url).ok()?;
+        let endpoint = parse_proxy_url(&url)?;
         let no_proxy = env
             .get("NO_PROXY")
             .or_else(|| env.get("no_proxy"))
             .map(ToOwned::to_owned);
-        Some(ProxySettings {
+        Ok(Some(ProxySettings {
             endpoint,
             // Always `Some`: a proxy from the environment honors `NO_PROXY`.
             no_proxy: Some(no_proxy.unwrap_or_default()),
-        })
+        }))
     }
 }
 
@@ -271,14 +277,18 @@ mod tests {
             ("HTTPS_PROXY", "http://p:3128"),
             ("https_proxy", "http://q:1"),
         ]);
-        assert_eq!(EnvProxy::from_env(&vars, false), None);
+        assert_eq!(EnvProxy::from_env(&vars, false), Ok(None));
     }
 
     #[test]
     fn quando_use_env_proxy_true_deve_ler_https_proxy_em_maiusculas_ou_minusculas() {
-        let upper = EnvProxy::from_env(&env(&[("HTTPS_PROXY", "http://p:3128")]), true).unwrap();
+        let upper = EnvProxy::from_env(&env(&[("HTTPS_PROXY", "http://p:3128")]), true)
+            .unwrap()
+            .unwrap();
         assert_eq!(upper.endpoint.host, "p");
-        let lower = EnvProxy::from_env(&env(&[("https_proxy", "http://q:8080")]), true).unwrap();
+        let lower = EnvProxy::from_env(&env(&[("https_proxy", "http://q:8080")]), true)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (lower.endpoint.host.as_str(), lower.endpoint.port),
             ("q", 8080)
@@ -288,26 +298,41 @@ mod tests {
             &env(&[("HTTPS_PROXY", "http://p:1"), ("https_proxy", "http://q:2")]),
             true,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(both.endpoint.port, 1);
     }
 
     #[test]
     fn quando_variavel_nao_tem_esquema_deve_tratar_como_http() {
-        let settings = EnvProxy::from_env(&env(&[("HTTPS_PROXY", "p:3128")]), true).unwrap();
+        let settings = EnvProxy::from_env(&env(&[("HTTPS_PROXY", "p:3128")]), true)
+            .unwrap()
+            .unwrap();
         assert_eq!(settings.endpoint.port, 3128);
     }
 
     #[test]
-    fn quando_variavel_e_invalida_deve_ser_ignorada() {
+    fn quando_variavel_e_invalida_com_use_env_proxy_deve_dar_erro_sem_ecoar_a_url() {
         for value in ["socks5://p:1080", "https://p:1", "http://u:pw@p:1", "::::"] {
-            assert_eq!(
-                EnvProxy::from_env(&env(&[("HTTPS_PROXY", value)]), true),
-                None,
-                "{value}"
-            );
+            let result = EnvProxy::from_env(&env(&[("HTTPS_PROXY", value)]), true);
+            let Err(error) = result else {
+                unreachable!("{value} must be refused, got {result:?}");
+            };
+            assert!(matches!(error, ProxyError::Invalid(_)), "{value}");
+            let text = format!("{error} {error:?}");
+            assert!(!text.contains("pw"), "{text}");
         }
-        assert_eq!(EnvProxy::from_env(&env(&[]), true), None);
+    }
+
+    #[test]
+    fn quando_variavel_e_invalida_sem_use_env_proxy_deve_ser_ignorada() {
+        let vars = env(&[("HTTPS_PROXY", "http://u:pw@p:1")]);
+        assert_eq!(EnvProxy::from_env(&vars, false), Ok(None));
+    }
+
+    #[test]
+    fn quando_nao_ha_variavel_deve_dar_none() {
+        assert_eq!(EnvProxy::from_env(&env(&[]), true), Ok(None));
     }
 
     #[test]
@@ -316,7 +341,7 @@ mod tests {
             ("HTTPS_PROXY", "http://p:3128"),
             ("NO_PROXY", "localhost,.internal.corp"),
         ]);
-        let settings = EnvProxy::from_env(&vars, true).unwrap();
+        let settings = EnvProxy::from_env(&vars, true).unwrap().unwrap();
         assert_eq!(settings.endpoint_for("localhost"), None);
         assert_eq!(settings.endpoint_for("db.internal.corp"), None);
         assert!(settings.endpoint_for("example.com").is_some());
@@ -324,6 +349,7 @@ mod tests {
         let vars = env(&[("HTTPS_PROXY", "http://p:3128"), ("no_proxy", "*")]);
         assert_eq!(
             EnvProxy::from_env(&vars, true)
+                .unwrap()
                 .unwrap()
                 .endpoint_for("x.example"),
             None
