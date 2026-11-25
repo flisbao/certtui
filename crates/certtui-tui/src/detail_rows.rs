@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use certtui_app::present::{labels, pem};
 use certtui_domain::finding::{Finding, Severity};
 use certtui_domain::model::{
-    CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport, RevocationStatus,
+    CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport, StapleState,
 };
 use certtui_domain::sanitize::sanitize_display;
 
@@ -270,24 +270,16 @@ fn revocation_rows(report: &InspectionReport, cert: usize) -> Vec<DetailRow> {
         .iter()
         .find(|r| r.cert_index == cert)
         .map(|r| &r.status);
-    let text = match status {
-        None => "not evaluated".to_owned(),
-        Some(RevocationStatus::Good) => "good".to_owned(),
-        Some(RevocationStatus::Revoked { reason, at }) => {
-            let mut text = "revoked".to_owned();
-            if let Some(reason) = reason {
-                // Writing to a `String` cannot fail.
-                let _ = write!(text, " ({reason})");
-            }
-            if let Some(at) = at {
-                // Writing to a `String` cannot fail.
-                let _ = write!(text, " at {at}");
-            }
-            text
-        }
-        Some(RevocationStatus::Unknown { why }) => format!("unknown ({why})"),
-    };
-    vec![DetailRow::new("Status", &text)]
+    let text = status.map_or_else(|| "not evaluated".to_owned(), labels::revocation_text);
+    let mut rows = vec![DetailRow::new("Status", &text)];
+    // The staple belongs to the leaf; a file or an off run has none to report.
+    if cert == 0 && report.staple != StapleState::NotApplicable {
+        rows.push(DetailRow::new(
+            "OCSP staple",
+            &labels::staple_text(&report.staple),
+        ));
+    }
+    rows
 }
 
 fn finding_rows(report: &InspectionReport, cert: usize) -> Vec<DetailRow> {
@@ -455,6 +447,37 @@ mod tests {
         report.findings = vec![finding(FindingCode::WeakKey, Severity::Warning, Some(1))];
         let rows = rows_for_tab(&report, 0, Tab::Findings, FingerprintFormat::default());
         assert_eq!(rows, vec![DetailRow::new("Findings", "none")]);
+    }
+
+    #[test]
+    fn quando_alvo_de_rede_com_revogacao_deve_mostrar_status_e_staple_na_aba() {
+        let mut report = report_of(vec![record_with_cn("leaf", 0), record_with_cn("int", 1)]);
+        report.revocation = vec![certtui_domain::model::CertRevocation {
+            cert_index: 0,
+            status: certtui_domain::model::RevocationStatus::Good,
+        }];
+        report.staple = StapleState::Invalid("signature does not verify".to_owned());
+
+        let leaf = rows_for_tab(&report, 0, Tab::Revocation, FingerprintFormat::default());
+        assert_eq!(
+            leaf,
+            vec![
+                DetailRow::new("Status", "good"),
+                DetailRow::new("OCSP staple", "invalid (signature does not verify)"),
+            ]
+        );
+        let intermediate = rows_for_tab(&report, 1, Tab::Revocation, FingerprintFormat::default());
+        assert_eq!(
+            intermediate,
+            vec![DetailRow::new("Status", "not evaluated")]
+        );
+    }
+
+    #[test]
+    fn quando_staple_nao_se_aplica_deve_nao_mostrar_a_linha() {
+        let report = report_of(vec![record_with_cn("leaf", 0)]);
+        let rows = rows_for_tab(&report, 0, Tab::Revocation, FingerprintFormat::default());
+        assert_eq!(rows, vec![DetailRow::new("Status", "not evaluated")]);
     }
 
     #[test]

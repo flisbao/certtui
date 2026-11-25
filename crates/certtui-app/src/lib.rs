@@ -6,6 +6,8 @@ mod cancel;
 
 pub mod check;
 
+pub mod enrich;
+
 pub mod error;
 
 pub mod fetch;

@@ -7,6 +7,7 @@
 //! covers connect, redirects and the whole body (so a server that drips one
 //! byte a second still ends).
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -19,31 +20,38 @@ const USER_AGENT: &str = concat!("certtui/", env!("CARGO_PKG_VERSION"));
 
 /// `HttpFetcher` backed by `reqwest` with `rustls` (`ring` provider).
 ///
+/// The HTTP client (which loads the system trust roots) is built on the first
+/// request, so a run that never reaches the network pays nothing for it.
 /// No proxy is used until the configuration milestone (M8).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ReqwestHttpFetcher {
-    client: reqwest::Client,
+    client: OnceLock<Result<reqwest::Client, HttpError>>,
     max_redirects: usize,
 }
 
 impl ReqwestHttpFetcher {
-    /// Builds a fetcher that follows at most `max_redirects` redirects
+    /// A fetcher that follows at most `max_redirects` redirects
     /// (`Limits::max_http_redirects`).
-    ///
-    /// # Errors
-    ///
-    /// [`HttpError::Transport`] when the HTTP client cannot be built.
-    pub fn new(max_redirects: usize) -> Result<Self, HttpError> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .user_agent(USER_AGENT)
-            .build()
-            .map_err(|_| HttpError::Transport("client setup failed".to_owned()))?;
-        Ok(Self {
-            client,
+    #[must_use]
+    pub fn new(max_redirects: usize) -> Self {
+        Self {
+            client: OnceLock::new(),
             max_redirects,
-        })
+        }
+    }
+
+    fn client(&self) -> Result<&reqwest::Client, HttpError> {
+        self.client
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .no_proxy()
+                    .user_agent(USER_AGENT)
+                    .build()
+                    .map_err(|_| HttpError::Transport("client setup failed".to_owned()))
+            })
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     async fn execute(
@@ -69,7 +77,7 @@ impl ReqwestHttpFetcher {
     ) -> Result<Vec<u8>, HttpError> {
         let mut redirects = 0_usize;
         loop {
-            let mut request = self.client.request(method.clone(), url.clone());
+            let mut request = self.client()?.request(method.clone(), url.clone());
             if let Some((content_type, body)) = &payload {
                 request = request
                     .header(CONTENT_TYPE, *content_type)

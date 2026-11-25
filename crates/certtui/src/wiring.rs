@@ -15,6 +15,7 @@ use certtui_infra::trust::NativeTrustProvider;
 
 use crate::cli;
 use crate::exit_code::ExitCode;
+use crate::system_inspector::real_enricher;
 use crate::tui_launch::ProcessLauncher;
 
 /// Runs the CLI against the real process environment.
@@ -24,6 +25,7 @@ pub fn run_process() -> std::process::ExitCode {
     let fetcher = RustlsChainFetcher::new();
     let verifier = WebpkiChainVerifier::new();
     let clock = SystemClock;
+    let enricher = real_enricher();
     let trust_provider = |ca_files: Vec<PathBuf>| -> Box<dyn TrustStoreProvider> {
         Box::new(NativeTrustProvider::new(
             ca_files,
@@ -38,6 +40,7 @@ pub fn run_process() -> std::process::ExitCode {
         clock: &clock,
         trust_provider: &trust_provider,
         tui: &ProcessLauncher,
+        enricher: &enricher,
     };
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use certtui_app::enrich::RevocationOptions;
 use certtui_app::error::LoadError;
 use certtui_app::ports::{LoadedCerts, LocalSource, SourceLoader};
 use certtui_app::trust::TrustSource;
@@ -40,6 +41,8 @@ pub struct InspectorOptions {
     pub ca_files: Vec<PathBuf>,
     /// `--host-check`.
     pub host_check: Option<String>,
+    /// `--aia`, `--revocation` and `--no-revocation`.
+    pub revocation: RevocationOptions,
 }
 
 /// What the TUI is opened with.
@@ -95,6 +98,7 @@ impl TuiLauncher for ProcessLauncher {
                     Limits::default(),
                 ))
             }),
+            enricher: Arc::new(crate::system_inspector::real_enricher()),
             options: request.options,
             anchors: OnceCell::new(),
         };

@@ -38,6 +38,7 @@ x509-ocsp = { version = "0.2.1", default-features = false, features = ["std"] }
 x509-parser = { version = "0.18.1", features = ["verify"] }
 
 [dev-dependencies]
+certtui-app = { path = "../certtui-app", features = ["testing"] }
 rcgen = "0.14"
 wiremock = "0.6"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "time"] }

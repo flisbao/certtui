@@ -99,7 +99,10 @@ fn quando_inspect_rede_deve_sair_0_com_tls_no_json() {
     for phase in ["connect", "handshake", "total"] {
         assert!(timings[phase].is_u64(), "{phase}: {timings}");
     }
-    assert_eq!(json["ocsp_staple"], json!({"present": false, "bytes": 0}));
+    assert_eq!(
+        json["ocsp_staple"],
+        json!({"present": false, "bytes": 0, "state": "missing"})
+    );
     let certs = json["certificates"].as_array().unwrap();
     assert_eq!(certs.len(), 3, "leaf, intermediate and CA");
     for (position, cert) in certs.iter().enumerate() {
@@ -397,10 +400,39 @@ fn quando_cert_e_autoassinado_deve_sair_0_e_mostrar_a_cadeia() {
 }
 
 #[test]
+fn quando_flag_no_revocation_deve_nao_ter_status_nem_achados_de_revogacao() {
+    let fixture = Fixture::start(Behavior::Ok);
+    let json = fixture.json(&["--no-revocation"]);
+    assert_eq!(json["revocation"], json!([]));
+    assert_eq!(json["ocsp_staple"]["state"], "not_applicable");
+    let codes: Vec<&str> = json["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|finding| finding["code"].as_str())
+        .collect();
+    for revocation_code in ["REVOKED", "REVOCATION_UNKNOWN", "OCSP_STAPLE_MISSING"] {
+        assert!(!codes.contains(&revocation_code), "{codes:?}");
+    }
+}
+
+#[test]
+fn quando_alvo_sem_endpoints_de_revogacao_deve_dar_unknown_com_motivo_por_padrao() {
+    let fixture = Fixture::start(Behavior::Ok);
+    let json = fixture.json(&[]);
+    assert_eq!(json["revocation"][0]["cert_index"], 0);
+    assert_eq!(json["revocation"][0]["status"], "unknown");
+    assert_eq!(json["revocation"][0]["why"], "no revocation endpoints");
+}
+
+#[test]
 fn quando_server_tem_staple_deve_informar_presenca_e_tamanho() {
     let fixture = Fixture::start(Behavior::WithStaple(vec![0x5A; 37]));
     let json = fixture.json(&[]);
-    assert_eq!(json["ocsp_staple"], json!({"present": true, "bytes": 37}));
+    // The bytes are not an OCSP response: reported as invalid, never trusted.
+    assert_eq!(json["ocsp_staple"]["present"], true);
+    assert_eq!(json["ocsp_staple"]["bytes"], 37);
+    assert_eq!(json["ocsp_staple"]["state"], "invalid");
 }
 
 #[test]
@@ -565,7 +597,8 @@ fn quando_tls12_falha_apos_pedir_certificado_deve_relatar_captura_parcial() {
         report["notes"],
         json!([{"kind": "handshake_failed_after_client_cert_request", "peer_ip": "127.0.0.1"}])
     );
-    assert_eq!(report["ocsp_staple"], json!({"present": true, "bytes": 37}));
+    assert_eq!(report["ocsp_staple"]["present"], true);
+    assert_eq!(report["ocsp_staple"]["bytes"], 37);
     assert_eq!(report["certificates"].as_array().unwrap().len(), 3);
     for phase in ["connect", "handshake", "total"] {
         assert!(report["timings"][phase].is_u64(), "{phase}");

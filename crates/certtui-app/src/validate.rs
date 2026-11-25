@@ -67,7 +67,8 @@ pub fn validate(report: InspectionReport, inputs: ValidationInputs<'_>) -> Inspe
 }
 
 /// The subject of every anchor whose name parses.
-fn known_issuers(anchors: &TrustAnchors) -> Vec<KnownIssuer> {
+#[must_use]
+pub fn known_issuers(anchors: &TrustAnchors) -> Vec<KnownIssuer> {
     anchors
         .entries
         .iter()

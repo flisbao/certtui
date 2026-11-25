@@ -6,14 +6,16 @@ use std::path::PathBuf;
 
 use anyhow::Context as _;
 use certtui_app::check::FailOn;
+use certtui_app::enrich::{ReportEnricher, RevocationOptions};
 use certtui_app::error::{InspectError, LoadError};
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
 use certtui_app::ports::{
     ChainFetcher, ChainVerifier, Clock, LocalSource, SourceLoader, TrustStoreProvider,
 };
+use certtui_app::revocation::RevocationScope;
 use certtui_app::trust::{TrustAnchors, TrustSource, resolve_sources};
-use certtui_app::validate::{ValidationInputs, validate};
+use certtui_app::validate::{ValidationInputs, known_issuers, validate};
 use certtui_domain::limits::Limits;
 use certtui_domain::lint::Thresholds;
 use certtui_domain::model::{FingerprintFormat, InspectionReport, LoadNote};
@@ -65,6 +67,32 @@ pub struct Cli {
     /// is skipped for files.
     #[arg(long, global = true, value_name = "NAME")]
     host_check: Option<String>,
+    /// Download missing intermediate certificates from their AIA URLs (off by
+    /// default; marked `AIA_FETCHED` in the report).
+    #[arg(long, global = true)]
+    aia: bool,
+    /// Which certificates are checked for revocation on network targets: the
+    /// `leaf` (the default) or the `leaf` and every intermediate (`full`).
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "SCOPE",
+        conflicts_with = "no_revocation"
+    )]
+    revocation: Option<RevocationArg>,
+    /// Do not check revocation (no OCSP or CRL request is made).
+    #[arg(long, global = true)]
+    no_revocation: bool,
+}
+
+/// `--revocation` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RevocationArg {
+    /// Only the leaf.
+    Leaf,
+    /// The leaf and every intermediate.
+    Full,
 }
 
 /// Top-level subcommands.
@@ -245,6 +273,8 @@ pub struct Env<'a> {
     pub trust_provider: &'a dyn Fn(Vec<PathBuf>) -> Box<dyn TrustStoreProvider>,
     /// Opens the interactive UI.
     pub tui: &'a dyn TuiLauncher,
+    /// AIA chasing and revocation, between gathering and validating.
+    pub enricher: &'a dyn ReportEnricher,
 }
 
 /// Trust-related options shared by every command.
@@ -253,6 +283,8 @@ struct TrustOptions {
     sources: Vec<TrustSource>,
     ca_files: Vec<PathBuf>,
     host_check: Option<String>,
+    /// `--aia`, `--revocation` and `--no-revocation`.
+    revocation: RevocationOptions,
 }
 
 /// Loads the anchors of `options`, reporting warnings on `err`; a failure is
@@ -285,20 +317,29 @@ struct Validation<'a> {
     anchors: &'a TrustAnchors,
     thresholds: Thresholds,
     host_check: Option<&'a str>,
+    revocation: RevocationOptions,
 }
 
 impl Validation<'_> {
-    /// The report with its trust verdict and findings filled in; see
-    /// [`validate_for_target`].
-    fn apply(&self, report: InspectionReport) -> InspectionReport {
-        validate_for_target(
+    /// The report with AIA and revocation done, its trust verdict and its
+    /// findings filled in; see [`validate_for_target`].
+    fn apply(&self, report: InspectionReport) -> anyhow::Result<InspectionReport> {
+        // Nothing cancels the token yet: Ctrl-C ends the process through the
+        // default SIGINT disposition, which is all a one-shot command needs.
+        let report = runtime::block_on(self.env.enricher.enrich(
+            report,
+            &known_issuers(self.anchors),
+            self.revocation,
+            CancellationToken::new(),
+        ))?;
+        Ok(validate_for_target(
             report,
             self.env.verifier,
             self.anchors,
             self.env.clock,
             self.thresholds,
             self.host_check,
-        )
+        ))
     }
 }
 
@@ -394,6 +435,14 @@ pub fn run(
         sources: resolve_sources(&sources, !cli.ca_file.is_empty(), cli.ca_only),
         ca_files: cli.ca_file,
         host_check: cli.host_check,
+        revocation: RevocationOptions {
+            scope: match (cli.no_revocation, cli.revocation) {
+                (true, _) => RevocationScope::Off,
+                (false, Some(RevocationArg::Full)) => RevocationScope::Full,
+                (false, Some(RevocationArg::Leaf) | None) => RevocationScope::Leaf,
+            },
+            aia: cli.aia,
+        },
     };
     match cli.command {
         Some(Command::Inspect(inspect_args)) => inspect(
@@ -493,6 +542,7 @@ fn open_tui(
             trust_sources: trust_options.sources.clone(),
             ca_files: trust_options.ca_files.clone(),
             host_check: trust_options.host_check.clone(),
+            revocation: trust_options.revocation,
         },
     };
     env.tui.launch(request)?;
@@ -526,8 +576,9 @@ fn inspect(
         anchors: &anchors,
         thresholds: Thresholds::default(),
         host_check: trust_options.host_check.as_deref(),
+        revocation: trust_options.revocation,
     }
-    .apply(report);
+    .apply(report)?;
     let mode = args.mode();
     let only = match (args.index, mode) {
         (Some(index), _) => Some(index),
@@ -582,6 +633,7 @@ fn check(
         anchors: &anchors,
         thresholds,
         host_check: trust_options.host_check.as_deref(),
+        revocation: trust_options.revocation,
     };
     let mut checked: Vec<(&str, Result<InspectionReport, String>)> = Vec::new();
     for (raw, target) in targets {
@@ -589,7 +641,7 @@ fn check(
         // are captured so each can be attributed to its target.
         let mut failure = Vec::new();
         match gather(network_options, env, target, &mut failure)? {
-            Ok(report) => checked.push((raw, Ok(validation.apply(report)))),
+            Ok(report) => checked.push((raw, Ok(validation.apply(report)?))),
             Err(ExitCode::Usage) => {
                 err.write_all(&failure).context("writing the usage error")?;
                 return Ok(ExitCode::Usage);
@@ -792,6 +844,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    use certtui_app::enrich::NoEnricher;
     use certtui_app::error::LoadError;
     use certtui_app::fetch::{FetchError, FetchRequest, FetchedChain, Stage};
     use certtui_app::ports::{ChainVerification, LoadedCerts};
@@ -799,6 +852,7 @@ mod tests {
         FakeChainFetcher, FakeChainVerifier, FakeSourceLoader, FakeTrustProvider, FixedClock,
     };
     use certtui_app::trust::TrustAnchor;
+    use certtui_domain::model::{CertRevocation, RevocationStatus, StapleState};
     use certtui_domain::model::{Timings, TlsSessionInfo, TrustVerdict};
     use certtui_domain::time::Timestamp;
     use serde_json::Value;
@@ -900,6 +954,16 @@ mod tests {
         launcher: &dyn TuiLauncher,
         args: &[&str],
     ) -> (anyhow::Result<ExitCode>, Vec<u8>, Vec<u8>) {
+        run_full(loader, fetcher, launcher, &NoEnricher, args)
+    }
+
+    fn run_full(
+        loader: &dyn SourceLoader,
+        fetcher: &dyn ChainFetcher,
+        launcher: &dyn TuiLauncher,
+        enricher: &dyn ReportEnricher,
+        args: &[&str],
+    ) -> (anyhow::Result<ExitCode>, Vec<u8>, Vec<u8>) {
         let verifier = FakeChainVerifier::new(ChainVerification {
             trust: TrustVerdict::Trusted {
                 anchor: "Fake Root".to_owned(),
@@ -928,6 +992,7 @@ mod tests {
             clock: &clock,
             trust_provider: &provider,
             tui: launcher,
+            enricher,
         };
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -945,6 +1010,233 @@ mod tests {
             out: String::from_utf8(out).unwrap(),
             err: String::from_utf8(err).unwrap(),
         }
+    }
+
+    /// Records the options of every enrichment and fills in a canned
+    /// revocation outcome, like the real enricher would for a network target.
+    struct FakeEnricher {
+        calls: Mutex<Vec<RevocationOptions>>,
+        revocation: Vec<CertRevocation>,
+        staple: StapleState,
+    }
+
+    #[async_trait::async_trait]
+    impl ReportEnricher for FakeEnricher {
+        async fn enrich(
+            &self,
+            mut report: InspectionReport,
+            _anchors: &[certtui_domain::chain_analysis::KnownIssuer],
+            options: RevocationOptions,
+            _cancel: CancellationToken,
+        ) -> InspectionReport {
+            self.calls.lock().unwrap().push(options);
+            if options.scope != RevocationScope::Off {
+                report.revocation.clone_from(&self.revocation);
+                report.staple = self.staple.clone();
+            }
+            report
+        }
+    }
+
+    fn enricher(revocation: Vec<CertRevocation>, staple: StapleState) -> FakeEnricher {
+        FakeEnricher {
+            calls: Mutex::new(Vec::new()),
+            revocation,
+            staple,
+        }
+    }
+
+    fn run_enriched(enricher: &FakeEnricher, args: &[&str]) -> Outcome {
+        let loader = FakeSourceLoader(Err(LoadError::Io("no files in unit tests".to_owned())));
+        // The leaf of a 3-certificate chain: issued by someone else, so no
+        // self-signed error clouds the exit code the revocation tests check.
+        let leaf = std::fs::read(format!("{FIXTURES}/chain-3.der")).unwrap();
+        let fetcher = FakeChainFetcher(Ok(chain(vec![leaf])));
+        let (code, out, err) =
+            run_full(&loader, &fetcher, &FakeLauncher::new(false), enricher, args);
+        Outcome {
+            code: code.unwrap(),
+            out: String::from_utf8(out).unwrap(),
+            err: String::from_utf8(err).unwrap(),
+        }
+    }
+
+    fn entry(status: RevocationStatus) -> CertRevocation {
+        CertRevocation {
+            cert_index: 0,
+            status,
+        }
+    }
+
+    #[test]
+    fn quando_sem_flags_de_revogacao_deve_usar_leaf_sem_aia() {
+        let fake = enricher(Vec::new(), StapleState::Missing);
+        let got = run_enriched(&fake, &["inspect", "example.test", "--json"]);
+        assert_eq!(got.code, ExitCode::Ok, "{}", got.err);
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            vec![RevocationOptions::default()]
+        );
+    }
+
+    #[test]
+    fn quando_flags_de_revogacao_e_aia_deve_chegar_ao_enricher() {
+        let cases: [(&[&str], RevocationOptions); 4] = [
+            (
+                &["--revocation", "full"],
+                RevocationOptions {
+                    scope: RevocationScope::Full,
+                    aia: false,
+                },
+            ),
+            (
+                &["--revocation", "leaf", "--aia"],
+                RevocationOptions {
+                    scope: RevocationScope::Leaf,
+                    aia: true,
+                },
+            ),
+            (
+                &["--no-revocation"],
+                RevocationOptions {
+                    scope: RevocationScope::Off,
+                    aia: false,
+                },
+            ),
+            (
+                &["--aia", "--no-revocation"],
+                RevocationOptions {
+                    scope: RevocationScope::Off,
+                    aia: true,
+                },
+            ),
+        ];
+        for (flags, want) in cases {
+            let fake = enricher(Vec::new(), StapleState::Missing);
+            let mut args = vec!["inspect", "example.test", "--json"];
+            args.extend_from_slice(flags);
+            let got = run_enriched(&fake, &args);
+            assert_eq!(got.code, ExitCode::Ok, "{flags:?}: {}", got.err);
+            assert_eq!(*fake.calls.lock().unwrap(), vec![want], "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn quando_revocation_e_no_revocation_juntos_deve_dar_erro_de_uso() {
+        let fake = enricher(Vec::new(), StapleState::Missing);
+        let got = run_enriched(
+            &fake,
+            &[
+                "inspect",
+                "example.test",
+                "--revocation",
+                "full",
+                "--no-revocation",
+            ],
+        );
+        assert_eq!(got.code, ExitCode::Usage);
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn quando_revocation_tem_valor_invalido_deve_dar_erro_de_uso() {
+        let fake = enricher(Vec::new(), StapleState::Missing);
+        let got = run_enriched(
+            &fake,
+            &["inspect", "example.test", "--revocation", "everything"],
+        );
+        assert_eq!(got.code, ExitCode::Usage);
+    }
+
+    #[test]
+    fn quando_revocation_full_deve_incluir_os_status_no_json() {
+        let fake = enricher(
+            vec![
+                entry(RevocationStatus::Good),
+                CertRevocation {
+                    cert_index: 1,
+                    status: RevocationStatus::Unknown {
+                        why: "ocsp: request timed out".to_owned(),
+                    },
+                },
+            ],
+            StapleState::Valid,
+        );
+        let got = run_enriched(
+            &fake,
+            &["inspect", "example.test", "--json", "--revocation", "full"],
+        );
+        assert_eq!(got.code, ExitCode::Ok, "{}", got.err);
+        let json: Value = serde_json::from_str(&got.out).unwrap();
+        assert_eq!(json["revocation"][0]["status"], "good");
+        assert_eq!(json["revocation"][1]["cert_index"], 1);
+        assert_eq!(json["revocation"][1]["why"], "ocsp: request timed out");
+        assert_eq!(json["ocsp_staple"]["state"], "valid");
+    }
+
+    /// Severity of the finding `code` in the `check --json` output, if any.
+    fn finding_severity(out: &str, code: &str) -> Option<String> {
+        let json: Value = serde_json::from_str(out).unwrap();
+        json["results"][0]["findings"]
+            .as_array()?
+            .iter()
+            .find(|finding| finding["code"] == code)
+            .and_then(|finding| finding["severity"].as_str().map(str::to_owned))
+    }
+
+    #[test]
+    fn quando_responder_ocsp_diz_revoked_deve_listar_revoked_como_erro() {
+        let revoked = RevocationStatus::Revoked {
+            reason: Some("keyCompromise".to_owned()),
+            at: None,
+        };
+        let fake = enricher(vec![entry(revoked)], StapleState::Missing);
+        let got = run_enriched(&fake, &["check", "example.test", "--json"]);
+        assert_eq!(got.code, ExitCode::Findings, "{}", got.err);
+        assert_eq!(
+            finding_severity(&got.out, "REVOKED").as_deref(),
+            Some("error")
+        );
+    }
+
+    #[test]
+    fn quando_responder_ocsp_cai_deve_listar_revocation_unknown_como_warning() {
+        let unknown = RevocationStatus::Unknown {
+            why: "ocsp: request timed out".to_owned(),
+        };
+        let fake = enricher(vec![entry(unknown)], StapleState::Missing);
+        let got = run_enriched(&fake, &["check", "example.test", "--json"]);
+        assert_eq!(
+            finding_severity(&got.out, "REVOCATION_UNKNOWN").as_deref(),
+            Some("warning"),
+            "{}",
+            got.out
+        );
+        assert!(got.out.contains("request timed out"), "{}", got.out);
+        assert_eq!(finding_severity(&got.out, "REVOKED"), None);
+    }
+
+    #[test]
+    fn quando_flag_no_revocation_deve_nao_ter_findings_de_revogacao() {
+        let revoked = RevocationStatus::Revoked {
+            reason: None,
+            at: None,
+        };
+        let fake = enricher(vec![entry(revoked)], StapleState::Missing);
+        let got = run_enriched(
+            &fake,
+            &["check", "example.test", "--json", "--no-revocation"],
+        );
+        assert_eq!(finding_severity(&got.out, "REVOKED"), None, "{}", got.out);
+        assert_eq!(finding_severity(&got.out, "REVOCATION_UNKNOWN"), None);
+    }
+
+    #[test]
+    fn quando_text_de_alvo_com_revogacao_deve_listar_a_secao() {
+        let fake = enricher(vec![entry(RevocationStatus::Good)], StapleState::Valid);
+        let got = run_enriched(&fake, &["inspect", "example.test", "--text"]);
+        assert_eq!(got.code, ExitCode::Ok, "{}", got.err);
+        assert!(got.out.contains("Revocation:\n  [0] good"), "{}", got.out);
     }
 
     fn recording(answer: Result<FetchedChain, FetchError>) -> Recording {

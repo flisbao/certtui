@@ -46,6 +46,17 @@ fn write_validation(out: &mut dyn Write, report: &InspectionReport) -> io::Resul
     }
     writeln!(out)?;
     writeln!(out, "Trust: {}", labels::trust_text(&report.trust))?;
+    if !report.revocation.is_empty() {
+        writeln!(out, "Revocation:")?;
+        for entry in &report.revocation {
+            writeln!(
+                out,
+                "  [{}] {}",
+                entry.cert_index,
+                labels::revocation_text(&entry.status)
+            )?;
+        }
+    }
     if report.findings.is_empty() {
         return writeln!(out, "Findings: none");
     }

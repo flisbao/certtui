@@ -5,14 +5,19 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use certtui_app::enrich::{NetworkEnricher, ReportEnricher};
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
 use certtui_app::ports::{ChainFetcher, ChainVerifier, Clock, SourceLoader, TrustStoreProvider};
 use certtui_app::trust::TrustAnchors;
+use certtui_app::validate::known_issuers;
 use certtui_domain::limits::Limits;
 use certtui_domain::lint::Thresholds;
 use certtui_domain::model::InspectionReport;
 use certtui_domain::target::{NetworkTarget, Target};
+use certtui_infra::clock::SystemClock;
+use certtui_infra::http::ReqwestHttpFetcher;
+use certtui_infra::revocation::X509RevocationProtocol;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
@@ -27,6 +32,19 @@ use crate::tui_launch::InspectorOptions;
 pub type TrustProviderFactory =
     Arc<dyn Fn(Vec<PathBuf>) -> Box<dyn TrustStoreProvider> + Send + Sync>;
 
+/// The enricher of the real program: reqwest over HTTP, `x509-ocsp` and
+/// `x509-parser` for the wire formats, the system clock.
+#[must_use]
+pub fn real_enricher() -> NetworkEnricher {
+    let limits = Limits::default();
+    NetworkEnricher::new(
+        Arc::new(ReqwestHttpFetcher::new(limits.max_http_redirects)),
+        Arc::new(X509RevocationProtocol),
+        Arc::new(SystemClock),
+        limits,
+    )
+}
+
 /// The ports and the command line options an inspection needs.
 pub struct SystemInspector {
     /// Reads local certificates.
@@ -39,6 +57,8 @@ pub struct SystemInspector {
     pub clock: Arc<dyn Clock>,
     /// Builds the trust store provider.
     pub trust_provider: TrustProviderFactory,
+    /// AIA chasing and revocation, between gathering and validating.
+    pub enricher: Arc<dyn ReportEnricher>,
     /// The command line options of the run.
     pub options: InspectorOptions,
     /// Anchors, loaded on the first inspection and reused after.
@@ -91,9 +111,14 @@ impl Inspector for SystemInspector {
         let report = match target {
             Target::Network(parsed) => {
                 let network = self.network_target(parsed);
-                inspect_network(self.fetcher.as_ref(), network, &self.limits(), cancel)
-                    .await
-                    .map_err(|error| single_line(&error.to_string()))?
+                inspect_network(
+                    self.fetcher.as_ref(),
+                    network,
+                    &self.limits(),
+                    cancel.clone(),
+                )
+                .await
+                .map_err(|error| single_line(&error.to_string()))?
             }
             local => {
                 let source = local_source(&local)
@@ -107,6 +132,15 @@ impl Inspector for SystemInspector {
                 .map_err(|error| single_line(&error.to_string()))?
             }
         };
+        let report = self
+            .enricher
+            .enrich(
+                report,
+                &known_issuers(&anchors),
+                self.options.revocation,
+                cancel,
+            )
+            .await;
         Ok(validate_for_target(
             report,
             self.verifier.as_ref(),

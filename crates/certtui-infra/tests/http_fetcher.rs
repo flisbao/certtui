@@ -20,7 +20,7 @@ const LIMIT: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn fetcher() -> ReqwestHttpFetcher {
-    ReqwestHttpFetcher::new(3).unwrap()
+    ReqwestHttpFetcher::new(3)
 }
 
 /// Reads the request head so the raw servers below answer like HTTP servers.
