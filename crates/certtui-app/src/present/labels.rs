@@ -2,12 +2,64 @@
 //! renderers. Pure functions; free text is sanitized and kept on one line by
 //! `single_line`.
 
+use std::fmt::Write as _;
+
 use certtui_domain::finding::{Finding, Severity};
 use certtui_domain::model::{
     CertOrigin, ExtendedKeyUsage, HashAlgorithm, KeyUsage, LoadNote, PublicKeyAlgorithm,
-    RejectReason, SubjectAltName, TrustVerdict,
+    RejectReason, RevocationStatus, SctEntry, StapleState, SubjectAltName, TrustVerdict,
 };
 use certtui_domain::sanitize::sanitize_display;
+
+/// One embedded SCT as a line: `log <64 hex digits> at <time> (v<version>)`.
+///
+/// The signature is not verified (spec: out of scope for v1), so this is
+/// what the certificate *claims*.
+#[must_use]
+pub fn sct_text(sct: &SctEntry) -> String {
+    let log_id = sct
+        .log_id
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            // Writing to a `String` cannot fail.
+            let _ = write!(hex, "{byte:02X}");
+            hex
+        });
+    format!("log {log_id} at {} (v{})", sct.timestamp, sct.version)
+}
+
+/// A revocation status on one line: `good`, `revoked (reason) at <time>` or
+/// `unknown (why)`. The free text is sanitized and kept on one line.
+#[must_use]
+pub fn revocation_text(status: &RevocationStatus) -> String {
+    match status {
+        RevocationStatus::Good => "good".to_owned(),
+        RevocationStatus::Revoked { reason, at } => {
+            let mut text = "revoked".to_owned();
+            if let Some(reason) = reason {
+                // Writing to a `String` cannot fail.
+                let _ = write!(text, " ({})", single_line(reason));
+            }
+            if let Some(at) = at {
+                // Writing to a `String` cannot fail.
+                let _ = write!(text, " at {at}");
+            }
+            text
+        }
+        RevocationStatus::Unknown { why } => format!("unknown ({})", single_line(why)),
+    }
+}
+
+/// The state of the stapled OCSP response on one line.
+#[must_use]
+pub fn staple_text(staple: &StapleState) -> String {
+    match staple {
+        StapleState::Missing => "missing".to_owned(),
+        StapleState::Valid => "valid".to_owned(),
+        StapleState::Invalid(why) => format!("invalid ({})", single_line(why)),
+        StapleState::NotApplicable => "not applicable".to_owned(),
+    }
+}
 
 /// Single-line display form of certificate-derived text.
 ///
@@ -248,6 +300,51 @@ fn path_note(path: Option<&str>, with_path: &str, without_path: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quando_status_de_revogacao_deve_ter_uma_linha_limpa() {
+        assert_eq!(revocation_text(&RevocationStatus::Good), "good");
+        let revoked = RevocationStatus::Revoked {
+            reason: Some("keyCompromise".to_owned()),
+            at: Some(certtui_domain::time::Timestamp::from_unix_saturating(
+                1_792_022_400,
+            )),
+        };
+        assert_eq!(
+            revocation_text(&revoked),
+            "revoked (keyCompromise) at 2026-10-15T00:00:00Z"
+        );
+        let unknown = RevocationStatus::Unknown {
+            why: "a\nb\u{1b}[31m".to_owned(),
+        };
+        let text = revocation_text(&unknown);
+        assert!(!text.contains('\n') && !text.contains('\u{1b}'), "{text:?}");
+    }
+
+    #[test]
+    fn quando_staple_deve_dizer_o_estado() {
+        assert_eq!(staple_text(&StapleState::Missing), "missing");
+        assert_eq!(staple_text(&StapleState::Valid), "valid");
+        assert_eq!(staple_text(&StapleState::NotApplicable), "not applicable");
+        assert_eq!(
+            staple_text(&StapleState::Invalid("bad".to_owned())),
+            "invalid (bad)"
+        );
+    }
+
+    #[test]
+    fn quando_sct_deve_mostrar_log_id_em_hex_e_data() {
+        let sct = SctEntry {
+            version: 1,
+            log_id: [0xAB; 32],
+            timestamp: certtui_domain::time::Timestamp::from_unix_saturating(1_700_000_000),
+        };
+        let text = sct_text(&sct);
+        assert_eq!(
+            text,
+            format!("log {} at 2023-11-14T22:13:20Z (v1)", "AB".repeat(32))
+        );
+    }
 
     #[test]
     fn quando_key_usage_deve_listar_so_os_bits_ligados_em_ordem() {

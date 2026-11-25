@@ -70,6 +70,7 @@ pub fn report_of(records: Vec<CertificateRecord>) -> InspectionReport {
             reason: "unknown issuer".to_owned(),
         },
         revocation: Vec::new(),
+        staple: certtui_domain::model::StapleState::NotApplicable,
         findings: Vec::new(),
         timings: Timings {
             handshake: Some(std::time::Duration::from_millis(42)),

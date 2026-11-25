@@ -156,6 +156,20 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
       "severity": "error"
     },
     {
+      "category": "revocation",
+      "cert_index": 0,
+      "code": "REVOCATION_UNKNOWN",
+      "message": "revocation status could not be determined: no revocation endpoints",
+      "severity": "warning"
+    },
+    {
+      "category": "revocation",
+      "cert_index": 0,
+      "code": "OCSP_STAPLE_MISSING",
+      "message": "the server did not staple an OCSP response",
+      "severity": "info"
+    },
+    {
       "category": "presentation",
       "cert_index": 2,
       "code": "CHAIN_ROOT_SENT",
@@ -166,8 +180,16 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
   "notes": [],
   "ocsp_staple": {
     "bytes": 0,
-    "present": false
+    "present": false,
+    "state": "missing"
   },
+  "revocation": [
+    {
+      "cert_index": 0,
+      "status": "unknown",
+      "why": "no revocation endpoints"
+    }
+  ],
   "schema_version": 1,
   "target": {
     "connect_to": "127.0.0.1:[port]",

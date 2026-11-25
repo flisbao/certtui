@@ -2,6 +2,12 @@
 
 pub mod clock;
 
+/// Capped HTTP(S) fetching for OCSP, CRL and AIA: the `HttpFetcher` adapter.
+pub mod http;
+
+/// OCSP and CRL wire formats: the `RevocationProtocol` adapter.
+pub mod revocation;
+
 /// Local filesystem and standard-input source adapters.
 pub mod source;
 

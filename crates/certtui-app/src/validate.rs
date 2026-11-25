@@ -56,6 +56,8 @@ pub fn validate(report: InspectionReport, inputs: ValidationInputs<'_>) -> Inspe
         trust: &verification.trust,
         hostname_ok: verification.hostname_ok,
         publicly_trusted,
+        revocation: &report.revocation,
+        staple: &report.staple,
     });
     InspectionReport {
         trust: verification.trust,
@@ -65,7 +67,8 @@ pub fn validate(report: InspectionReport, inputs: ValidationInputs<'_>) -> Inspe
 }
 
 /// The subject of every anchor whose name parses.
-fn known_issuers(anchors: &TrustAnchors) -> Vec<KnownIssuer> {
+#[must_use]
+pub fn known_issuers(anchors: &TrustAnchors) -> Vec<KnownIssuer> {
     anchors
         .entries
         .iter()
@@ -171,6 +174,7 @@ mod tests {
             chain: Chain::new(records, &Limits::default()).expect("chain"),
             trust: TrustVerdict::NotEvaluated,
             revocation: Vec::new(),
+            staple: certtui_domain::model::StapleState::NotApplicable,
             findings: Vec::new(),
             timings: Timings::default(),
             notes: Vec::new(),

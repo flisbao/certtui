@@ -302,7 +302,7 @@ fn quando_check_json_deve_ter_resultados_por_alvo_com_trust_e_findings() {
     let good = format!("localhost:{}", fixture.server.addr().port());
     let bad = format!("localhost:{}", closed_port());
     let out = certtui()
-        .args(["check", &good, &bad, "--json"])
+        .args(["check", &good, &bad, "--json", "--no-revocation"])
         .args(["--ca-only", "--ca-file", &fixture.ca_file()])
         .output()
         .unwrap();

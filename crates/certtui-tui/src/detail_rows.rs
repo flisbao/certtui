@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use certtui_app::present::{labels, pem};
 use certtui_domain::finding::{Finding, Severity};
 use certtui_domain::model::{
-    CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport, RevocationStatus,
+    CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport, StapleState,
 };
 use certtui_domain::sanitize::sanitize_display;
 
@@ -225,6 +225,12 @@ fn extension_rows(record: &CertificateRecord) -> Vec<DetailRow> {
             "Embedded SCTs",
             &summary.embedded_scts.len().to_string(),
         ));
+        rows.extend(
+            summary
+                .embedded_scts
+                .iter()
+                .map(|sct| DetailRow::item(&labels::sct_text(sct))),
+        );
     }
     let extensions: Vec<String> = summary
         .extensions
@@ -259,24 +265,21 @@ fn fingerprint_rows(record: &CertificateRecord, format: FingerprintFormat) -> Ve
 }
 
 fn revocation_rows(report: &InspectionReport, cert: usize) -> Vec<DetailRow> {
-    let text = match report.revocation.get(cert) {
-        None => "not evaluated".to_owned(),
-        Some(RevocationStatus::Good) => "good".to_owned(),
-        Some(RevocationStatus::Revoked { reason, at }) => {
-            let mut text = "revoked".to_owned();
-            if let Some(reason) = reason {
-                // Writing to a `String` cannot fail.
-                let _ = write!(text, " ({reason})");
-            }
-            if let Some(at) = at {
-                // Writing to a `String` cannot fail.
-                let _ = write!(text, " at {at}");
-            }
-            text
-        }
-        Some(RevocationStatus::Unknown { why }) => format!("unknown ({why})"),
-    };
-    vec![DetailRow::new("Status", &text)]
+    let status = report
+        .revocation
+        .iter()
+        .find(|r| r.cert_index == cert)
+        .map(|r| &r.status);
+    let text = status.map_or_else(|| "not evaluated".to_owned(), labels::revocation_text);
+    let mut rows = vec![DetailRow::new("Status", &text)];
+    // The staple belongs to the leaf; a file or an off run has none to report.
+    if cert == 0 && report.staple != StapleState::NotApplicable {
+        rows.push(DetailRow::new(
+            "OCSP staple",
+            &labels::staple_text(&report.staple),
+        ));
+    }
+    rows
 }
 
 fn finding_rows(report: &InspectionReport, cert: usize) -> Vec<DetailRow> {
@@ -343,7 +346,7 @@ mod tests {
     use certtui_domain::finding::{FindingCode, Severity};
 
     use super::*;
-    use crate::test_fixtures::{finding, record_with_cn, report_of, sample_report};
+    use crate::test_fixtures::{finding, fixture_record, record_with_cn, report_of, sample_report};
 
     #[test]
     fn quando_aba_fingerprints_deve_ter_tres_linhas_sha1_sha256_sha512() {
@@ -444,6 +447,59 @@ mod tests {
         report.findings = vec![finding(FindingCode::WeakKey, Severity::Warning, Some(1))];
         let rows = rows_for_tab(&report, 0, Tab::Findings, FingerprintFormat::default());
         assert_eq!(rows, vec![DetailRow::new("Findings", "none")]);
+    }
+
+    #[test]
+    fn quando_alvo_de_rede_com_revogacao_deve_mostrar_status_e_staple_na_aba() {
+        let mut report = report_of(vec![record_with_cn("leaf", 0), record_with_cn("int", 1)]);
+        report.revocation = vec![certtui_domain::model::CertRevocation {
+            cert_index: 0,
+            status: certtui_domain::model::RevocationStatus::Good,
+        }];
+        report.staple = StapleState::Invalid("signature does not verify".to_owned());
+
+        let leaf = rows_for_tab(&report, 0, Tab::Revocation, FingerprintFormat::default());
+        assert_eq!(
+            leaf,
+            vec![
+                DetailRow::new("Status", "good"),
+                DetailRow::new("OCSP staple", "invalid (signature does not verify)"),
+            ]
+        );
+        let intermediate = rows_for_tab(&report, 1, Tab::Revocation, FingerprintFormat::default());
+        assert_eq!(
+            intermediate,
+            vec![DetailRow::new("Status", "not evaluated")]
+        );
+    }
+
+    #[test]
+    fn quando_staple_nao_se_aplica_deve_nao_mostrar_a_linha() {
+        let report = report_of(vec![record_with_cn("leaf", 0)]);
+        let rows = rows_for_tab(&report, 0, Tab::Revocation, FingerprintFormat::default());
+        assert_eq!(rows, vec![DetailRow::new("Status", "not evaluated")]);
+    }
+
+    #[test]
+    fn quando_cert_tem_scts_deve_listar_cada_um_na_aba_extensions() {
+        let report = report_of(vec![fixture_record("public-leaf-with-sct", 0)]);
+        let rows = rows_for_tab(&report, 0, Tab::Extensions, FingerprintFormat::default());
+        let header = rows
+            .iter()
+            .position(|row| row.label == "Embedded SCTs")
+            .unwrap();
+        assert_eq!(rows.get(header).map(|row| row.value.as_str()), Some("2"));
+        let items: Vec<_> = rows
+            .iter()
+            .skip(header + 1)
+            .take(2)
+            .map(|row| row.value.as_str())
+            .collect();
+        assert_eq!(items.len(), 2);
+        for item in items {
+            assert!(item.starts_with("log "), "{item}");
+            assert!(item.contains(" at "), "{item}");
+        }
     }
 
     #[test]

@@ -6,7 +6,9 @@ use time::OffsetDateTime;
 use crate::chain_analysis::{ChainAnalysis, analyze_chain};
 use crate::limits::Limits;
 use crate::lint::{LintContext, Thresholds};
-use crate::model::{CertOrigin, CertificateRecord, Chain, TrustVerdict};
+use crate::model::{
+    CertOrigin, CertRevocation, CertificateRecord, Chain, StapleState, TrustVerdict,
+};
 use crate::time::Timestamp;
 
 /// Owns everything a [`LintContext`] borrows.
@@ -17,6 +19,8 @@ pub(crate) struct Fixture {
     pub trust: TrustVerdict,
     /// Whether contexts report a network target.
     pub network: bool,
+    pub revocation: Vec<CertRevocation>,
+    pub staple: StapleState,
 }
 
 /// A self-signed record valid between two Unix instants.
@@ -57,6 +61,8 @@ impl Fixture {
             thresholds: Thresholds::default(),
             trust: TrustVerdict::NotEvaluated,
             network: false,
+            revocation: Vec::new(),
+            staple: StapleState::NotApplicable,
         }
     }
 
@@ -72,6 +78,8 @@ impl Fixture {
             trust: &self.trust,
             hostname_ok: None,
             publicly_trusted,
+            revocation: &self.revocation,
+            staple: &self.staple,
         }
     }
 }

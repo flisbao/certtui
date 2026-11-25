@@ -72,6 +72,7 @@ fn build_report(target: Target, chain: Chain, notes: Vec<LoadNote>) -> Inspectio
         chain,
         trust: TrustVerdict::NotEvaluated,
         revocation: Vec::new(),
+        staple: certtui_domain::model::StapleState::NotApplicable,
         findings: Vec::new(),
         timings: Timings::default(),
         notes,

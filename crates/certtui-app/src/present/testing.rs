@@ -114,6 +114,7 @@ pub fn report(names: &[&str], notes: Vec<LoadNote>) -> InspectionReport {
         chain: Chain::new(records, &Limits::default()).unwrap(),
         trust: TrustVerdict::NotEvaluated,
         revocation: Vec::new(),
+        staple: certtui_domain::model::StapleState::NotApplicable,
         findings: Vec::new(),
         timings: Timings::default(),
         notes,

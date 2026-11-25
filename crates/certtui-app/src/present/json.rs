@@ -17,11 +17,13 @@ use std::time::Duration;
 
 use certtui_domain::finding::{Finding, FindingCategory, FindingCode, Severity};
 use certtui_domain::model::{
-    CertOrigin, CertificateRecord, FingerprintAlgorithm, FingerprintFormat, InspectionReport,
-    KeyId, LoadNote, Timings, TlsSessionInfo, TrustVerdict,
+    CertOrigin, CertRevocation, CertificateRecord, FingerprintAlgorithm, FingerprintFormat,
+    InspectionReport, KeyId, LoadNote, RevocationStatus, StapleState, Timings, TlsSessionInfo,
+    TrustVerdict,
 };
 use certtui_domain::sanitize::sanitize_display;
 use certtui_domain::target::Target;
+use certtui_domain::time::Timestamp;
 use serde::Serialize;
 
 use super::{View, labels};
@@ -105,7 +107,8 @@ pub fn finding(finding: &Finding) -> JsonFinding<'_> {
 struct JsonNetwork<'a> {
     tls: Option<JsonTls<'a>>,
     timings: JsonTimings,
-    ocsp_staple: JsonStaple,
+    ocsp_staple: JsonStaple<'a>,
+    revocation: Vec<JsonRevocation<'a>>,
 }
 
 #[derive(Serialize)]
@@ -146,9 +149,27 @@ struct JsonTimings {
 }
 
 #[derive(Serialize)]
-struct JsonStaple {
+struct JsonStaple<'a> {
     present: bool,
     bytes: usize,
+    /// `missing`, `valid`, `invalid` or `not_applicable`.
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<Cow<'a, str>>,
+}
+
+/// The revocation status of one certificate of the chain.
+#[derive(Serialize)]
+struct JsonRevocation<'a> {
+    cert_index: usize,
+    /// `good`, `revoked` or `unknown`.
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<Cow<'a, str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<Timestamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    why: Option<Cow<'a, str>>,
 }
 
 #[derive(Serialize)]
@@ -274,6 +295,7 @@ pub fn write(out: &mut dyn Write, view: &View<'_>) -> io::Result<()> {
             tls: report.tls.as_ref().map(tls),
             timings: timings(&report.timings),
             ocsp_staple: staple(report),
+            revocation: report.revocation.iter().map(revocation).collect(),
         }),
         notes: &view.report.notes,
         trust: trust(&report.trust),
@@ -309,10 +331,35 @@ fn timings(timings: &Timings) -> JsonTimings {
     }
 }
 
-fn staple(report: &InspectionReport) -> JsonStaple {
+fn staple(report: &InspectionReport) -> JsonStaple<'_> {
+    let (state, reason) = match &report.staple {
+        StapleState::Missing => ("missing", None),
+        StapleState::Valid => ("valid", None),
+        StapleState::Invalid(why) => ("invalid", Some(clean(why))),
+        StapleState::NotApplicable => ("not_applicable", None),
+    };
     JsonStaple {
         present: report.ocsp_staple.is_some(),
         bytes: report.ocsp_staple.as_ref().map_or(0, Vec::len),
+        state,
+        reason,
+    }
+}
+
+fn revocation(entry: &CertRevocation) -> JsonRevocation<'_> {
+    let (status, reason, at, why) = match &entry.status {
+        RevocationStatus::Good => ("good", None, None, None),
+        RevocationStatus::Revoked { reason, at } => {
+            ("revoked", reason.as_deref().map(clean), *at, None)
+        }
+        RevocationStatus::Unknown { why } => ("unknown", None, None, Some(clean(why))),
+    };
+    JsonRevocation {
+        cert_index: entry.cert_index,
+        status,
+        reason,
+        at,
+        why,
     }
 }
 
@@ -612,7 +659,7 @@ mod tests {
         );
         assert_eq!(
             json["ocsp_staple"],
-            serde_json::json!({"present": true, "bytes": 3})
+            serde_json::json!({"present": true, "bytes": 3, "state": "not_applicable"})
         );
     }
 
@@ -629,14 +676,63 @@ mod tests {
         assert_eq!(json["target"]["connect_to"], serde_json::Value::Null);
         assert_eq!(
             json["ocsp_staple"],
-            serde_json::json!({"present": false, "bytes": 0})
+            serde_json::json!({"present": false, "bytes": 0, "state": "not_applicable"})
         );
+    }
+
+    #[test]
+    fn quando_ha_revogacao_deve_listar_cert_index_status_e_detalhes() {
+        let mut report = network_report(&["rsa2048-leaf", "ec-p256-leaf"]);
+        report.staple = StapleState::Invalid("signature\u{1b}[31m does not verify".to_owned());
+        report.revocation = vec![
+            CertRevocation {
+                cert_index: 0,
+                status: RevocationStatus::Revoked {
+                    reason: Some("keyCompromise".to_owned()),
+                    at: Some(Timestamp::from_unix_saturating(1_792_022_400)),
+                },
+            },
+            CertRevocation {
+                cert_index: 1,
+                status: RevocationStatus::Unknown {
+                    why: "ocsp: request timed out".to_owned(),
+                },
+            },
+            CertRevocation {
+                cert_index: 2,
+                status: RevocationStatus::Good,
+            },
+        ];
+
+        let json = render(&report, None);
+
+        assert_eq!(
+            json["revocation"],
+            serde_json::json!([
+                {"cert_index": 0, "status": "revoked", "reason": "keyCompromise",
+                 "at": "2026-10-15T00:00:00Z"},
+                {"cert_index": 1, "status": "unknown", "why": "ocsp: request timed out"},
+                {"cert_index": 2, "status": "good"},
+            ])
+        );
+        assert_eq!(json["ocsp_staple"]["state"], "invalid");
+        let reason = json["ocsp_staple"]["reason"].as_str().unwrap();
+        assert!(!reason.contains('\u{1b}'), "{reason:?}");
+    }
+
+    #[test]
+    fn quando_staple_ausente_ou_valido_deve_marcar_o_estado() {
+        let mut report = network_report(&["rsa2048-leaf"]);
+        report.staple = StapleState::Missing;
+        assert_eq!(render(&report, None)["ocsp_staple"]["state"], "missing");
+        report.staple = StapleState::Valid;
+        assert_eq!(render(&report, None)["ocsp_staple"]["state"], "valid");
     }
 
     #[test]
     fn quando_alvo_local_nao_deve_ter_chaves_de_rede() {
         let json = render(&report(&["rsa2048-leaf"], Vec::new()), None);
-        for key in ["tls", "timings", "ocsp_staple"] {
+        for key in ["tls", "timings", "ocsp_staple", "revocation"] {
             assert!(json.get(key).is_none(), "{key}");
         }
         assert!(json["target"].get("sni").is_none());
