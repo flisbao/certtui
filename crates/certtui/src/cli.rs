@@ -668,6 +668,7 @@ fn open_tui(
         target,
         stdin,
         batch: None,
+        batch_concurrency: None,
         options: inspector_options(network_options, trust_options),
     };
     env.tui.launch(request)?;
@@ -1993,6 +1994,24 @@ mod tests {
             hosts,
             [("a.test".to_owned(), 443), ("b.test".to_owned(), 8443)]
         );
+    }
+
+    #[test]
+    fn quando_batch_com_terminal_e_concurrency_deve_passar_ao_tui() {
+        let list = ListFile::new("tty-conc", "a.test\n");
+        let launcher = FakeLauncher::new(true);
+        let args = ["batch", list.path(), "--concurrency", "8"];
+        let (code, _, _) = run_tui(&launcher, &no_files(), &args);
+        assert_eq!(code, ExitCode::Ok);
+        assert_eq!(launcher.requests().remove(0).batch_concurrency, Some(8));
+        let launcher = FakeLauncher::new(true);
+        let args = ["batch", list.path(), "--concurrency", "1000"];
+        let (_, _, err) = run_tui(&launcher, &no_files(), &args);
+        assert_eq!(launcher.requests().remove(0).batch_concurrency, Some(256));
+        assert!(err.contains("--concurrency 1000"), "{err}");
+        let launcher = FakeLauncher::new(true);
+        let (_, _, _) = run_tui(&launcher, &no_files(), &["batch", list.path()]);
+        assert_eq!(launcher.requests().remove(0).batch_concurrency, None);
     }
 
     #[test]

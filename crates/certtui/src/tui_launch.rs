@@ -58,6 +58,8 @@ pub struct TuiRequest {
     pub stdin: Option<LoadedCerts>,
     /// The targets of a batch to run at once; `target` is `None` then.
     pub batch: Option<Vec<NetworkTarget>>,
+    /// `--concurrency` of `certtui batch`; `None` keeps the default.
+    pub batch_concurrency: Option<usize>,
     /// The options of the command line.
     pub options: InspectorOptions,
 }
@@ -117,6 +119,7 @@ impl TuiLauncher for ProcessLauncher {
             TuiOptions {
                 initial: request.target,
                 initial_batch: request.batch,
+                batch_concurrency: request.batch_concurrency,
                 theme: if no_color {
                     ThemeKind::Mono
                 } else {

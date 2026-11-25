@@ -119,6 +119,7 @@ pub fn run(
             target: None,
             stdin: None,
             batch: Some(input.targets),
+            batch_concurrency: args.concurrency.map(|_| concurrency),
             options: inspector_options(network_options, trust_options),
         })?;
         return Ok(ExitCode::Ok);

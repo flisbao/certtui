@@ -42,6 +42,8 @@ pub struct TuiOptions {
     pub initial: Option<Target>,
     /// A batch to run at once, instead of `initial`.
     pub initial_batch: Option<Vec<NetworkTarget>>,
+    /// Targets a batch inspects at once; `None` keeps the default.
+    pub batch_concurrency: Option<usize>,
     /// Colors; `NO_COLOR` is applied by the caller.
     pub theme: ThemeKind,
     /// Which clipboard methods to use.
@@ -89,12 +91,15 @@ pub fn run(
         state.batch_loader = options.batch_loader;
         state.max_clipboard_bytes = options.limits.max_clipboard_bytes;
         let (msg_tx, msgs) = mpsc::channel(CHANNEL_CAPACITY);
-        let executor = CommandExecutor::new(
+        let mut executor = CommandExecutor::new(
             inspector,
             clipboard,
             options.limits.clipboard_timeout,
             writer,
         );
+        if let Some(concurrency) = options.batch_concurrency {
+            executor = executor.with_batch_concurrency(concurrency);
+        }
         if let Some(targets) = options.initial_batch {
             for command in start_batch(&mut state, targets) {
                 executor.run(command, msg_tx.clone());

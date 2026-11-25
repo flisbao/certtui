@@ -39,6 +39,8 @@ pub struct CommandExecutor {
     clipboard: Arc<dyn ClipboardSink>,
     clipboard_timeout: Duration,
     writer: Arc<dyn FileWriter>,
+    /// Targets a batch inspects at once.
+    batch_concurrency: usize,
     /// Token of every inspect job still running.
     jobs: Arc<Mutex<HashMap<JobId, CancellationToken>>>,
 }
@@ -58,8 +60,17 @@ impl CommandExecutor {
             clipboard,
             clipboard_timeout,
             writer,
+            batch_concurrency: Limits::default().batch_concurrency,
             jobs: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Sets how many targets a batch inspects at once (at least 1, at most
+    /// the hard cap).
+    #[must_use]
+    pub fn with_batch_concurrency(mut self, concurrency: usize) -> Self {
+        self.batch_concurrency = concurrency.clamp(1, Limits::HARD_CAPS.batch_concurrency);
+        self
     }
 
     /// Starts `command`; its outcome, if any, arrives on `tx`.
@@ -161,6 +172,7 @@ impl CommandExecutor {
         lock(&self.jobs).insert(id, token.clone());
         let inspector = InspectorAdapter(Arc::clone(&self.inspector));
         let jobs = Arc::clone(&self.jobs);
+        let concurrency = self.batch_concurrency;
         tokio::spawn(async move {
             // The inspector enforces the user's `--timeout`; this limit is
             // only the net under it.
@@ -171,7 +183,7 @@ impl CommandExecutor {
             let clock = SystemClock;
             let runner = BatchRunner::new(&inspector, &clock, &limits);
             let (events_tx, mut events_rx) = mpsc::channel(BATCH_CHANNEL);
-            let run = runner.run(targets, limits.batch_concurrency, events_tx, token.clone());
+            let run = runner.run(targets, concurrency, events_tx, token.clone());
             let forward = async {
                 while let Some(first) = events_rx.recv().await {
                     let mut events = vec![first];
@@ -272,6 +284,8 @@ mod tests {
         delay: Duration,
         result: Result<InspectionReport, InspectFailure>,
         started: AtomicUsize,
+        running: AtomicUsize,
+        peak: AtomicUsize,
         passwords: Mutex<Vec<Option<String>>>,
     }
 
@@ -281,6 +295,8 @@ mod tests {
                 delay,
                 result,
                 started: AtomicUsize::new(0),
+                running: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
                 passwords: Mutex::new(Vec::new()),
             })
         }
@@ -295,8 +311,11 @@ mod tests {
             _cancel: CancellationToken,
         ) -> Result<InspectionReport, InspectFailure> {
             self.started.fetch_add(1, Ordering::SeqCst);
+            let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
             lock(&self.passwords).push(password.map(|p| p.expose_secret().to_owned()));
             tokio::time::sleep(self.delay).await;
+            self.running.fetch_sub(1, Ordering::SeqCst);
             self.result.clone()
         }
     }
@@ -453,6 +472,31 @@ mod tests {
         };
         assert_eq!(row.status, certtui_domain::batch_row::RowStatus::Failed);
         assert_eq!(row.failure.as_deref(), Some("connection refused"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quando_batch_tem_concorrencia_configurada_deve_respeitar_o_limite() {
+        let inspector = FakeInspector::new(
+            Duration::from_millis(10),
+            Ok(network_report(&["rsa2048-leaf"])),
+        );
+        let exec = executor(
+            Arc::clone(&inspector),
+            sink(Ok(CopyMethod::Native), Duration::ZERO),
+            Duration::from_secs(1),
+        )
+        .with_batch_concurrency(3);
+        let (tx, mut rx) = mpsc::channel(8);
+        exec.run(
+            Command::RunBatch {
+                id: JobId(5),
+                targets: network_targets(20),
+            },
+            tx,
+        );
+        let events = batch_events(&mut rx, JobId(5)).await;
+        assert_eq!(events.len(), 20 + 1 + 20, "rows, progress and the end");
+        assert_eq!(inspector.peak.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test(start_paused = true)]
