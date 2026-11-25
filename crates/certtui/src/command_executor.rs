@@ -4,25 +4,30 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use certtui_app::export::{FileWriter, WriteError, render_export};
+use certtui_app::keystore::SecretString;
 use certtui_domain::model::InspectionReport;
 use certtui_domain::target::Target;
 use certtui_tui::clipboard::{ClipboardSink, copy_with_timeout};
-use certtui_tui::{Command, JobId, Msg};
+use certtui_tui::{Command, ExportFailure, ExportRequest, InspectFailure, JobId, Msg};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Inspects a target for the TUI: loads or fetches its chain and validates it.
 #[async_trait::async_trait]
 pub trait Inspector: Send + Sync {
-    /// The validated report of `target`, or a message fit for the screen.
+    /// The validated report of `target`, or why there is none.
     ///
-    /// `cancel` is cancelled when the user leaves the screen; the caller stops
-    /// waiting then, so an implementation only needs to stop early to save work.
+    /// `password` opens keystores (`None` uses the one from the command line,
+    /// if any). `cancel` is cancelled when the user leaves the screen; the
+    /// caller stops waiting then, so an implementation only needs to stop
+    /// early to save work.
     async fn inspect(
         &self,
         target: Target,
+        password: Option<SecretString>,
         cancel: CancellationToken,
-    ) -> Result<InspectionReport, String>;
+    ) -> Result<InspectionReport, InspectFailure>;
 }
 
 /// Executes commands and reports their outcome through a bounded channel.
@@ -30,22 +35,26 @@ pub struct CommandExecutor {
     inspector: Arc<dyn Inspector>,
     clipboard: Arc<dyn ClipboardSink>,
     clipboard_timeout: Duration,
+    writer: Arc<dyn FileWriter>,
     /// Token of every inspect job still running.
     jobs: Arc<Mutex<HashMap<JobId, CancellationToken>>>,
 }
 
 impl CommandExecutor {
-    /// An executor using `inspector` for inspections and `clipboard` for copies.
+    /// An executor using `inspector` for inspections, `clipboard` for copies
+    /// and `writer` for exports.
     #[must_use]
     pub fn new(
         inspector: Arc<dyn Inspector>,
         clipboard: Arc<dyn ClipboardSink>,
         clipboard_timeout: Duration,
+        writer: Arc<dyn FileWriter>,
     ) -> Self {
         Self {
             inspector,
             clipboard,
             clipboard_timeout,
+            writer,
             jobs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -55,7 +64,13 @@ impl CommandExecutor {
     /// Must be called from inside a tokio runtime.
     pub fn run(&self, command: Command, tx: mpsc::Sender<Msg>) {
         match command {
-            Command::Inspect { id, target } => self.inspect(id, target, tx),
+            Command::Inspect { id, target } => self.inspect(id, target, None, tx),
+            Command::InspectWithPassword {
+                id,
+                target,
+                password,
+            } => self.inspect(id, target, Some(password.into_secret()), tx),
+            Command::Export(request) => self.export(request, tx),
             Command::CancelJob(id) => self.cancel(id),
             Command::CopyToClipboard(payload) => {
                 let clipboard = Arc::clone(&self.clipboard);
@@ -80,7 +95,31 @@ impl CommandExecutor {
         }
     }
 
-    fn inspect(&self, id: JobId, target: Target, tx: mpsc::Sender<Msg>) {
+    fn export(&self, request: ExportRequest, tx: mpsc::Sender<Msg>) {
+        let writer = Arc::clone(&self.writer);
+        tokio::spawn(async move {
+            // Rendering and writing touch the disk: off the async threads.
+            let outcome =
+                tokio::task::spawn_blocking(move || write_export(&request, writer.as_ref()))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(ExportFailure::Message("the export task failed".to_owned()))
+                    });
+            let msg = match outcome {
+                Ok(path) => Msg::ExportDone { path },
+                Err(failure) => Msg::ExportFailed(failure),
+            };
+            let _ = tx.send(msg).await;
+        });
+    }
+
+    fn inspect(
+        &self,
+        id: JobId,
+        target: Target,
+        password: Option<SecretString>,
+        tx: mpsc::Sender<Msg>,
+    ) {
         let token = CancellationToken::new();
         lock(&self.jobs).insert(id, token.clone());
         let inspector = Arc::clone(&self.inspector);
@@ -88,14 +127,26 @@ impl CommandExecutor {
         tokio::spawn(async move {
             let outcome = tokio::select! {
                 () = token.cancelled() => None,
-                result = inspector.inspect(target, token.clone()) => Some(result),
+                result = inspector.inspect(target, password, token.clone()) => Some(result),
             };
             lock(&jobs).remove(&id);
             // A cancelled job leaves no result behind: the screen it fed is gone.
-            if let Some(result) = outcome {
-                let result = result.map(Arc::new);
-                let _ = tx.send(Msg::InspectDone { id, result }).await;
-            }
+            let msg = match outcome {
+                None => return,
+                Some(Ok(report)) => Msg::InspectDone {
+                    id,
+                    result: Ok(Arc::new(report)),
+                },
+                Some(Err(InspectFailure::PasswordRequired)) => {
+                    Msg::PasswordNeeded { id, wrong: false }
+                }
+                Some(Err(InspectFailure::WrongPassword)) => Msg::PasswordNeeded { id, wrong: true },
+                Some(Err(InspectFailure::Message(message))) => Msg::InspectDone {
+                    id,
+                    result: Err(message),
+                },
+            };
+            let _ = tx.send(msg).await;
         });
     }
 
@@ -104,6 +155,19 @@ impl CommandExecutor {
             token.cancel();
         }
     }
+}
+
+/// Renders and writes one export; the path shown on success, or why not.
+fn write_export(request: &ExportRequest, writer: &dyn FileWriter) -> Result<String, ExportFailure> {
+    let bytes = render_export(&request.report, request.format, request.selection)
+        .map_err(|error| ExportFailure::Message(error.to_string()))?;
+    writer
+        .write(&request.path, &bytes, request.overwrite)
+        .map(|()| request.path.to_string_lossy().into_owned())
+        .map_err(|error| match error {
+            WriteError::AlreadyExists => ExportFailure::AlreadyExists,
+            other => ExportFailure::Message(other.to_string()),
+        })
 }
 
 /// Locks `mutex`, ignoring poisoning: the map stays usable after a panic.
@@ -115,6 +179,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use certtui_app::keystore::ExposeSecret;
+    use certtui_app::testing::FakeFileWriter;
     use certtui_domain::target::NetworkTarget;
     use certtui_tui::clipboard::{ClipboardError, CopyMethod};
     use certtui_tui::copy::CopyPayload;
@@ -134,16 +200,18 @@ mod tests {
     /// Answers after `delay` with a canned result.
     struct FakeInspector {
         delay: Duration,
-        result: Result<InspectionReport, String>,
+        result: Result<InspectionReport, InspectFailure>,
         started: AtomicUsize,
+        passwords: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeInspector {
-        fn new(delay: Duration, result: Result<InspectionReport, String>) -> Arc<Self> {
+        fn new(delay: Duration, result: Result<InspectionReport, InspectFailure>) -> Arc<Self> {
             Arc::new(Self {
                 delay,
                 result,
                 started: AtomicUsize::new(0),
+                passwords: Mutex::new(Vec::new()),
             })
         }
     }
@@ -153,9 +221,11 @@ mod tests {
         async fn inspect(
             &self,
             _target: Target,
+            password: Option<SecretString>,
             _cancel: CancellationToken,
-        ) -> Result<InspectionReport, String> {
+        ) -> Result<InspectionReport, InspectFailure> {
             self.started.fetch_add(1, Ordering::SeqCst);
+            lock(&self.passwords).push(password.map(|p| p.expose_secret().to_owned()));
             tokio::time::sleep(self.delay).await;
             self.result.clone()
         }
@@ -188,7 +258,12 @@ mod tests {
         sink: Arc<FakeSink>,
         timeout: Duration,
     ) -> CommandExecutor {
-        CommandExecutor::new(inspector, sink, timeout)
+        CommandExecutor::new(
+            inspector,
+            sink,
+            timeout,
+            Arc::new(FakeFileWriter::new(Ok(()))),
+        )
     }
 
     #[tokio::test]
@@ -220,7 +295,10 @@ mod tests {
 
     #[tokio::test]
     async fn quando_inspect_falha_deve_devolver_a_mensagem() {
-        let inspector = FakeInspector::new(Duration::ZERO, Err("connection refused".to_owned()));
+        let inspector = FakeInspector::new(
+            Duration::ZERO,
+            Err(InspectFailure::Message("connection refused".to_owned())),
+        );
         let exec = executor(
             inspector,
             sink(Ok(CopyMethod::Native), Duration::ZERO),
@@ -273,7 +351,8 @@ mod tests {
 
     #[tokio::test]
     async fn quando_cancel_de_job_desconhecido_deve_ser_ignorado() {
-        let inspector = FakeInspector::new(Duration::ZERO, Err("x".to_owned()));
+        let inspector =
+            FakeInspector::new(Duration::ZERO, Err(InspectFailure::Message("x".to_owned())));
         let exec = executor(
             inspector,
             sink(Ok(CopyMethod::Native), Duration::ZERO),
@@ -287,7 +366,7 @@ mod tests {
     async fn quando_copy_deve_chamar_sink_e_devolver_copied() {
         let fake = sink(Ok(CopyMethod::Osc52), Duration::ZERO);
         let exec = executor(
-            FakeInspector::new(Duration::ZERO, Err("x".to_owned())),
+            FakeInspector::new(Duration::ZERO, Err(InspectFailure::Message("x".to_owned()))),
             fake.clone(),
             Duration::from_secs(1),
         );
@@ -322,7 +401,7 @@ mod tests {
             Duration::ZERO,
         );
         let exec = executor(
-            FakeInspector::new(Duration::ZERO, Err("x".to_owned())),
+            FakeInspector::new(Duration::ZERO, Err(InspectFailure::Message("x".to_owned()))),
             fake,
             Duration::from_secs(1),
         );
@@ -344,7 +423,7 @@ mod tests {
     async fn quando_sink_estoura_timeout_deve_devolver_copy_failed() {
         let fake = sink(Ok(CopyMethod::Native), Duration::from_millis(500));
         let exec = executor(
-            FakeInspector::new(Duration::ZERO, Err("x".to_owned())),
+            FakeInspector::new(Duration::ZERO, Err(InspectFailure::Message("x".to_owned()))),
             fake,
             Duration::from_millis(20),
         );
@@ -360,5 +439,159 @@ mod tests {
             Some(Msg::CopyFailed { reason }) => assert!(reason.contains("timed out"), "{reason}"),
             other => unreachable!("expected CopyFailed, got {other:?}"),
         }
+    }
+
+    // --- passwords and exports --------------------------------------------
+
+    #[tokio::test]
+    async fn quando_inspect_with_password_deve_passar_a_senha_ao_inspector() {
+        let inspector = FakeInspector::new(Duration::ZERO, Ok(network_report(&["rsa2048-leaf"])));
+        let exec = executor(
+            inspector.clone(),
+            sink(Ok(CopyMethod::Native), Duration::ZERO),
+            Duration::from_secs(1),
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+
+        exec.run(
+            Command::InspectWithPassword {
+                id: JobId(1),
+                target: target(),
+                password: certtui_tui::Password::new(SecretString::from("changeit".to_owned())),
+            },
+            tx.clone(),
+        );
+        assert!(matches!(rx.recv().await, Some(Msg::InspectDone { .. })));
+        exec.run(
+            Command::Inspect {
+                id: JobId(2),
+                target: target(),
+            },
+            tx,
+        );
+        assert!(matches!(rx.recv().await, Some(Msg::InspectDone { .. })));
+
+        assert_eq!(
+            *lock(&inspector.passwords),
+            vec![Some("changeit".to_owned()), None]
+        );
+    }
+
+    #[tokio::test]
+    async fn quando_inspector_pede_senha_deve_virar_password_needed_e_nao_inspect_done() {
+        for (failure, wrong) in [
+            (InspectFailure::PasswordRequired, false),
+            (InspectFailure::WrongPassword, true),
+        ] {
+            let inspector = FakeInspector::new(Duration::ZERO, Err(failure));
+            let exec = executor(
+                inspector,
+                sink(Ok(CopyMethod::Native), Duration::ZERO),
+                Duration::from_secs(1),
+            );
+            let (tx, mut rx) = mpsc::channel(8);
+
+            exec.run(
+                Command::Inspect {
+                    id: JobId(5),
+                    target: target(),
+                },
+                tx,
+            );
+
+            match rx.recv().await {
+                Some(Msg::PasswordNeeded { id, wrong: got }) => {
+                    assert_eq!(id, JobId(5));
+                    assert_eq!(got, wrong);
+                }
+                other => unreachable!("expected PasswordNeeded, got {other:?}"),
+            }
+        }
+    }
+
+    fn export_request(overwrite: certtui_app::export::Overwrite) -> ExportRequest {
+        ExportRequest {
+            report: Arc::new(network_report(&["rsa2048-leaf"])),
+            format: certtui_app::export::ExportFormat::Pem,
+            selection: certtui_app::export::ExportSelection::Index(0),
+            path: std::path::PathBuf::from("out.pem"),
+            overwrite,
+        }
+    }
+
+    async fn run_export(writer: Arc<FakeFileWriter>, request: ExportRequest) -> Msg {
+        let exec = CommandExecutor::new(
+            FakeInspector::new(Duration::ZERO, Err(InspectFailure::Message("x".to_owned()))),
+            sink(Ok(CopyMethod::Native), Duration::ZERO),
+            Duration::from_secs(1),
+            writer,
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        exec.run(Command::Export(request), tx);
+        rx.recv().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn quando_export_deve_escrever_o_pem_e_avisar_o_caminho() {
+        let fake = Arc::new(FakeFileWriter::new(Ok(())));
+
+        let msg = run_export(
+            Arc::clone(&fake),
+            export_request(certtui_app::export::Overwrite::Refuse),
+        )
+        .await;
+
+        assert!(
+            matches!(&msg, Msg::ExportDone { path } if path == "out.pem"),
+            "{msg:?}"
+        );
+        let writes = fake.writes();
+        assert_eq!(writes.len(), 1);
+        assert!(writes[0].1.starts_with(b"-----BEGIN CERTIFICATE-----\n"));
+        assert_eq!(writes[0].2, certtui_app::export::Overwrite::Refuse);
+    }
+
+    #[tokio::test]
+    async fn quando_arquivo_existe_deve_devolver_already_exists() {
+        let writer = Arc::new(FakeFileWriter::new(Err(WriteError::AlreadyExists)));
+        let msg = run_export(
+            writer,
+            export_request(certtui_app::export::Overwrite::Refuse),
+        )
+        .await;
+        assert!(
+            matches!(msg, Msg::ExportFailed(ExportFailure::AlreadyExists)),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quando_escrita_falha_deve_devolver_a_mensagem() {
+        let writer = Arc::new(FakeFileWriter::new(Err(WriteError::ParentMissing)));
+        let msg = run_export(
+            writer,
+            export_request(certtui_app::export::Overwrite::Allow),
+        )
+        .await;
+        assert!(
+            matches!(&msg, Msg::ExportFailed(ExportFailure::Message(m)) if m.contains("does not exist")),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quando_der_de_cadeia_deve_falhar_sem_escrever() {
+        let writer = Arc::new(FakeFileWriter::new(Ok(())));
+        let mut request = export_request(certtui_app::export::Overwrite::Refuse);
+        request.format = certtui_app::export::ExportFormat::Der;
+        request.selection = certtui_app::export::ExportSelection::Chain;
+
+        let msg = run_export(Arc::clone(&writer), request).await;
+
+        assert!(
+            matches!(&msg, Msg::ExportFailed(ExportFailure::Message(m)) if m.contains("DER cannot hold")),
+            "{msg:?}"
+        );
+        assert_eq!(writer.writes(), Vec::new());
     }
 }

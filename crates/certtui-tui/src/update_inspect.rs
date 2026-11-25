@@ -57,6 +57,7 @@ pub fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
         }
         Action::NextPane | Action::PrevPane => toggle_pane(state),
         Action::Enter => focus_details(state),
+        Action::Export => crate::update_modal::open_export(state),
         Action::NextTab => change_tab(state, true),
         Action::PrevTab => change_tab(state, false),
         Action::Down => move_cursor(state, true),
@@ -249,7 +250,10 @@ mod tests {
         let mut state = AppState::new(std::time::Instant::now());
         let id = state.jobs.start();
         state.screen = Screen::Inspect;
-        state.inspect = Some(InspectState::loading(id));
+        state.inspect = Some(InspectState::loading(
+            id,
+            certtui_domain::target::Target::Stdin,
+        ));
         (state, id)
     }
 

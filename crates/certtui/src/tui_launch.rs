@@ -13,6 +13,7 @@ use certtui_app::ports::{LoadedCerts, LocalSource, SourceLoader};
 use certtui_app::trust::TrustSource;
 use certtui_domain::limits::Limits;
 use certtui_domain::target::Target;
+use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
 use certtui_infra::clock::SystemClock;
 use certtui_infra::source::FsSourceLoader;
@@ -119,6 +120,7 @@ impl TuiLauncher for ProcessLauncher {
                 target_parser: parse_for_tui,
             },
             Arc::new(inspector),
+            Arc::new(AtomicFileWriter),
         )
     }
 }

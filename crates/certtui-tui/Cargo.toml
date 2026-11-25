@@ -16,6 +16,8 @@ certtui-domain = { path = "../certtui-domain" }
 crossterm = "0.29"
 base64 = "0.23.1"
 thiserror = "2"
+# The password the user types is wiped from memory when the dialog closes.
+zeroize = "1"
 # The OS clipboard (X11 and Wayland); off with `--no-default-features`.
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"], optional = true }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "underline-color"] }

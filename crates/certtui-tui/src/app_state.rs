@@ -3,10 +3,14 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use certtui_app::export::{ExportFormat, ExportSelection};
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{FingerprintFormat, InspectionReport};
 use certtui_domain::target::Target;
 
+use zeroize::Zeroizing;
+
+use crate::msg::{ExportRequest, Password};
 use crate::theme::ThemeKind;
 use crate::toast::Toast;
 
@@ -23,11 +27,112 @@ pub enum Screen {
     Inspect,
 }
 
+/// What is typed into the password dialog: shown as dots, wiped when dropped,
+/// never printed by `Debug`.
+#[derive(Clone)]
+pub struct Masked(Zeroizing<String>);
+
+impl Masked {
+    /// An empty buffer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Zeroizing::new(String::new()))
+    }
+
+    /// Appends a typed character.
+    pub fn push(&mut self, c: char) {
+        self.0.push(c);
+    }
+
+    /// Removes the last character.
+    pub fn pop(&mut self) {
+        self.0.pop();
+    }
+
+    /// Number of characters typed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.chars().count()
+    }
+
+    /// Whether nothing was typed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The typed text as a secret, ready to send.
+    #[must_use]
+    pub fn to_password(&self) -> Password {
+        Password::new(certtui_app::keystore::SecretString::from(
+            self.0.to_string(),
+        ))
+    }
+}
+
+impl Default for Masked {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for Masked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Masked({} chars)", self.len())
+    }
+}
+
+/// The keystore password dialog.
+#[derive(Debug, Clone)]
+pub struct PasswordModal {
+    /// What was being opened.
+    pub target: Target,
+    /// What the user typed so far.
+    pub input: Masked,
+    /// Why the last attempt failed.
+    pub error: Option<String>,
+}
+
+/// The export dialog.
+#[derive(Debug, Clone)]
+pub struct ExportModal {
+    /// The report whose certificates are exported.
+    pub report: Arc<InspectionReport>,
+    /// File format.
+    pub format: ExportFormat,
+    /// Which certificates.
+    pub selection: ExportSelection,
+    /// File name being typed.
+    pub path: String,
+    /// Why the last attempt failed.
+    pub error: Option<String>,
+}
+
 /// A dialog drawn over the screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Modal {
     /// Key reference.
     Help,
+    /// Asks for a keystore password.
+    Password(PasswordModal),
+    /// Asks where and how to export.
+    Export(ExportModal),
+    /// Asks whether to replace an existing file.
+    ConfirmOverwrite(ExportRequest),
+}
+
+impl Modal {
+    /// Whether this is the help dialog.
+    #[must_use]
+    pub fn is_help(&self) -> bool {
+        matches!(self, Modal::Help)
+    }
+
+    /// Whether the dialog takes typed text, so keys must not reach the keymap.
+    #[must_use]
+    pub fn takes_text(&self) -> bool {
+        !self.is_help()
+    }
 }
 
 /// State of the Home screen.
@@ -146,6 +251,8 @@ pub enum Pane {
 pub struct InspectState {
     /// Job that feeds this screen; results of other jobs are ignored.
     pub job: JobId,
+    /// What the job inspects (kept to retry with a password).
+    pub target: Target,
     /// Where the job stands.
     pub phase: Phase,
     /// Index of the selected certificate in the chain.
@@ -163,9 +270,10 @@ pub struct InspectState {
 impl InspectState {
     /// A screen waiting for job `job`.
     #[must_use]
-    pub fn loading(job: JobId) -> Self {
+    pub fn loading(job: JobId, target: Target) -> Self {
         Self {
             job,
+            target,
             phase: Phase::Loading,
             selected_cert: 0,
             tab: Tab::default(),
@@ -237,6 +345,8 @@ pub struct AppState {
     pub inspect: Option<InspectState>,
     /// Dialog over the screen.
     pub modal: Option<Modal>,
+    /// The export in flight, kept to ask for confirmation or to retry.
+    pub pending_export: Option<ExportRequest>,
     /// First visible line of the help dialog.
     pub help_scroll: u16,
     /// Transient message.
@@ -273,6 +383,7 @@ impl AppState {
             home: HomeState::default(),
             inspect: None,
             modal: None,
+            pending_export: None,
             help_scroll: 0,
             toast: None,
             jobs: JobTracker::default(),

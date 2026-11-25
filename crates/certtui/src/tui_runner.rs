@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
+use certtui_app::export::FileWriter;
 use certtui_domain::limits::Limits;
 use certtui_domain::target::Target;
 use certtui_tui::app_state::TargetParser;
@@ -57,7 +58,11 @@ pub struct TuiOptions {
 /// # Errors
 ///
 /// The clipboard setting cannot be honored, or the terminal failed.
-pub fn run(options: TuiOptions, inspector: Arc<dyn Inspector>) -> anyhow::Result<()> {
+pub fn run(
+    options: TuiOptions,
+    inspector: Arc<dyn Inspector>,
+    writer: Arc<dyn FileWriter>,
+) -> anyhow::Result<()> {
     let (osc_tx, osc_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let sinks = build_sinks(
         options.clipboard,
@@ -79,7 +84,12 @@ pub fn run(options: TuiOptions, inspector: Arc<dyn Inspector>) -> anyhow::Result
         state.target_parser = options.target_parser;
         state.max_clipboard_bytes = options.limits.max_clipboard_bytes;
         let (msg_tx, msgs) = mpsc::channel(CHANNEL_CAPACITY);
-        let executor = CommandExecutor::new(inspector, clipboard, options.limits.clipboard_timeout);
+        let executor = CommandExecutor::new(
+            inspector,
+            clipboard,
+            options.limits.clipboard_timeout,
+            writer,
+        );
         if let Some(target) = options.initial {
             for command in start_inspect(&mut state, target) {
                 executor.run(command, msg_tx.clone());
@@ -249,6 +259,9 @@ mod tests {
     use ratatui::backend::TestBackend;
     use tokio_util::sync::CancellationToken;
 
+    use certtui_app::keystore::SecretString;
+    use certtui_tui::InspectFailure;
+
     use super::*;
     use crate::command_executor::Inspector;
 
@@ -259,10 +272,11 @@ mod tests {
         async fn inspect(
             &self,
             _target: Target,
+            _password: Option<SecretString>,
             cancel: CancellationToken,
-        ) -> Result<InspectionReport, String> {
+        ) -> Result<InspectionReport, InspectFailure> {
             cancel.cancelled().await;
-            Err("cancelled".to_owned())
+            Err(InspectFailure::Message("cancelled".to_owned()))
         }
     }
 
@@ -288,6 +302,7 @@ mod tests {
                 Arc::new(NeverInspector),
                 Arc::new(NullSink),
                 Duration::from_secs(1),
+                Arc::new(certtui_app::testing::FakeFileWriter::new(Ok(()))),
             ),
             msgs,
             msg_tx,
@@ -375,6 +390,7 @@ mod tests {
                 Arc::new(NeverInspector),
                 Arc::new(NullSink),
                 Duration::from_secs(1),
+                Arc::new(certtui_app::testing::FakeFileWriter::new(Ok(()))),
             ),
             msgs,
             msg_tx,

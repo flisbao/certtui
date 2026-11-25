@@ -19,7 +19,7 @@ expression: "text(&render_state(&s, 80, 24))"
 ││  f             favorite the target (not yet)                               ││
 ││  /             filter rows (not yet)                                       ││
 ││  s             sort rows (not yet)                                         ││
-││  e             export to a file (not yet)                                  ││
+││  e             export to a file                                            ││
 ││  y             copy the field under the cursor                             ││
 ││  Y             copy the visible tab as text                                ││
 ││  c             copy the certificate as PEM                                 ││

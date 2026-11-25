@@ -3,6 +3,7 @@
 pub mod help;
 pub mod home;
 pub mod inspect;
+pub mod modals;
 pub mod tabs;
 pub mod toast;
 pub mod too_small;
@@ -36,8 +37,10 @@ pub fn view(state: &AppState, frame: &mut Frame) {
         Screen::Home => home::render(state, frame, area, &theme),
         Screen::Inspect => inspect::render(state, frame, area, &theme),
     }
-    if state.modal == Some(Modal::Help) {
+    if state.modal.as_ref().is_some_and(Modal::is_help) {
         help::render(frame, area, state.help_scroll, &theme);
+    } else if let Some(modal) = &state.modal {
+        modals::render(modal, frame, area, &theme);
     }
     if let Some(toast) = &state.toast {
         toast::render(toast, frame, area, &theme);

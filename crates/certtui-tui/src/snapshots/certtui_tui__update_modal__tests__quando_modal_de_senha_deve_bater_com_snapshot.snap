@@ -1,0 +1,28 @@
+---
+source: crates/certtui-tui/src/update_modal.rs
+expression: "text(&render(&state, 80, 24))"
+---
+┌ certtui ─────────────────────────────────────────────────────────────────────┐
+│Failed: a password is required to open this keystore                          │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│       ┌ Keystore password ───────────────────────────────────────────┐       │
+│       │Password for store.p12                                        │       │
+│       │                                                              │       │
+│       │▏                                                             │       │
+│       │                                                              │       │
+│       │wrong password or corrupt keystore                            │       │
+│       │Enter opens · Esc cancels                                     │       │
+│       └──────────────────────────────────────────────────────────────┘       │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Esc back · ? help
