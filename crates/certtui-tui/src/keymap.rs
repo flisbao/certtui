@@ -200,9 +200,18 @@ pub enum KeymapError {
         shorten(.0)
     )]
     UnknownKey(String),
-    /// `Esc` and `Ctrl-C` always keep their meaning.
+    /// `Ctrl-C` and `Esc` always keep their meaning.
     #[error("`{}` is reserved: Esc always goes back and Ctrl-C always quits", shorten(.0))]
     Reserved(String),
+    /// The key always means one action (Esc, the arrows, Enter, Tab,
+    /// Shift-Tab) and cannot be given to another.
+    #[error("key `{key}` always means `{action}` and cannot be rebound to another action")]
+    Pinned {
+        /// The key, as shown in the help.
+        key: String,
+        /// The action that keeps it.
+        action: String,
+    },
     /// Two actions would answer to the same key.
     #[error("key `{key}` would be bound to both `{a}` and `{b}`")]
     Conflict {
@@ -306,6 +315,12 @@ impl Keymap {
         for (index, (key, action)) in self.bindings.iter().enumerate() {
             let rest = self.bindings.iter().skip(index + 1);
             if let Some((_, other)) = rest.into_iter().find(|(other_key, _)| other_key == key) {
+                if let Some((_, owner)) = PINNED.iter().find(|(pinned, _)| pinned == key) {
+                    return Err(KeymapError::Pinned {
+                        key: key_label(*key),
+                        action: owner.name().to_owned(),
+                    });
+                }
                 let (mut a, mut b) = (action.name(), other.name());
                 if b < a {
                     std::mem::swap(&mut a, &mut b);
@@ -550,9 +565,20 @@ mod tests {
     }
 
     #[test]
-    fn quando_outra_acao_pede_uma_tecla_fixa_deve_dar_conflict() {
+    fn quando_outra_acao_pede_uma_tecla_fixa_deve_dizer_que_a_tecla_e_fixa() {
         // The arrow stays with Down, so Quit cannot take it.
         let error = Keymap::from_overrides(&overrides(&[("quit", "down")])).unwrap_err();
+        assert_eq!(
+            error,
+            KeymapError::Pinned {
+                key: "\u{2193}".to_owned(),
+                action: "down".to_owned(),
+            }
+        );
+        let text = error.to_string();
+        assert!(text.contains("always") && text.contains("down"), "{text}");
+        // A key two ordinary actions fight over is still a plain conflict.
+        let error = Keymap::from_overrides(&overrides(&[("quit", "f")])).unwrap_err();
         assert!(matches!(error, KeymapError::Conflict { .. }), "{error:?}");
     }
 
@@ -682,9 +708,9 @@ mod tests {
     #[test]
     fn quando_nome_da_tecla_tem_outra_caixa_deve_aceitar() {
         let keymap = Keymap::from_overrides(&overrides(&[("quit", "F10"), ("help", "ENTER")]));
-        // `enter` is Enter's own key: remapping help onto it conflicts.
+        // `enter` is Enter's own pinned key: help cannot take it.
         assert!(
-            matches!(keymap, Err(KeymapError::Conflict { .. })),
+            matches!(keymap, Err(KeymapError::Pinned { .. })),
             "{keymap:?}"
         );
         let keymap = Keymap::from_overrides(&overrides(&[("quit", "f10")])).unwrap();

@@ -838,8 +838,14 @@ fn proxy_settings(
             endpoint: parse_proxy_url(url).map_err(|error| error.to_string())?,
             no_proxy: None,
         })),
-        None => EnvProxy::from_env(vars, resolved.use_env_proxy)
-            .map_err(|error| format!("HTTPS_PROXY: {error}")),
+        None => EnvProxy::from_env(vars, resolved.use_env_proxy).map_err(|error| {
+            let name = if vars.get("HTTPS_PROXY").is_some() {
+                "HTTPS_PROXY"
+            } else {
+                "https_proxy"
+            };
+            format!("{name}: {error}")
+        }),
     }
 }
 

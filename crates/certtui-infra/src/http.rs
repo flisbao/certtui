@@ -109,15 +109,25 @@ impl ReqwestHttpFetcher {
         let Some(host) = url.host_str() else {
             return Ok(());
         };
-        let proxied = self
-            .proxy
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .is_some_and(|settings| settings.endpoint_for(host).is_some());
+        let (proxied, is_proxy_name) = {
+            let guard = self.proxy.read().unwrap_or_else(PoisonError::into_inner);
+            guard.as_ref().map_or((false, false), |settings| {
+                (
+                    settings.endpoint_for(host).is_some(),
+                    settings.endpoint.host.eq_ignore_ascii_case(host),
+                )
+            })
+        };
+        // A direct hop to the very name the proxy is reached by (`NO_PROXY`
+        // lists it) is resolved by the exempt resolver, so it is checked here
+        // too, and refused when this check cannot tell.
+        let direct_to_proxy_name = !proxied && is_proxy_name;
         // Literal addresses were already checked by `parse_url` and
         // `redirect_target`.
-        if !proxied || self.internal_allowed() || host.parse::<IpAddr>().is_ok() {
+        if !(proxied || direct_to_proxy_name)
+            || self.internal_allowed()
+            || host.parse::<IpAddr>().is_ok()
+        {
             return Ok(());
         }
         let port = url.port_or_known_default().unwrap_or(80);
@@ -129,10 +139,10 @@ impl ReqwestHttpFetcher {
                 .await
                 .map(|found| found.map(|addr| addr.ip()).collect::<Vec<_>>())
         };
-        if any_blocked(lookup, dns_timeout).await {
-            Err(HttpError::DisallowedDestination)
-        } else {
-            Ok(())
+        match lookup_verdict(lookup, dns_timeout).await {
+            Verdict::Blocked => Err(HttpError::DisallowedDestination),
+            Verdict::Unknown if direct_to_proxy_name => Err(HttpError::DisallowedDestination),
+            Verdict::Clear | Verdict::Unknown => Ok(()),
         }
     }
 
@@ -192,16 +202,27 @@ impl ReqwestHttpFetcher {
     }
 }
 
-/// Whether the lookup answers within `timeout` with at least one address the
-/// policy refuses. A lookup that fails or runs out of time counts as "no":
-/// the name is then left to the proxy.
-async fn any_blocked(
+/// What a local lookup of a proxied name says about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// An address the policy refuses.
+    Blocked,
+    /// Answered, and every address is allowed.
+    Clear,
+    /// Failed or ran out of time: the proxy may know the name.
+    Unknown,
+}
+
+/// Looks the name up within `timeout`. One refused address is enough to
+/// refuse the name: the proxy may pick any of them.
+async fn lookup_verdict(
     lookup: impl std::future::Future<Output = std::io::Result<Vec<IpAddr>>>,
     timeout: Duration,
-) -> bool {
+) -> Verdict {
     match tokio::time::timeout(timeout, lookup).await {
-        Ok(Ok(addresses)) => addresses.into_iter().any(is_blocked),
-        Ok(Err(_)) | Err(_) => false,
+        Ok(Ok(addresses)) if addresses.iter().copied().any(is_blocked) => Verdict::Blocked,
+        Ok(Ok(_)) => Verdict::Clear,
+        Ok(Err(_)) | Err(_) => Verdict::Unknown,
     }
 }
 
@@ -374,11 +395,13 @@ fn map_reqwest_error(err: &reqwest::Error) -> HttpError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[tokio::test]
-    async fn quando_lookup_trava_deve_estourar_o_timeout_e_deixar_o_proxy_resolver() {
+    async fn quando_lookup_trava_deve_estourar_o_timeout_e_ficar_desconhecido() {
         let started = std::time::Instant::now();
-        let blocked = any_blocked(std::future::pending(), Duration::from_millis(30)).await;
-        assert!(!blocked);
+        let verdict = lookup_verdict(std::future::pending(), Duration::from_millis(30)).await;
+        assert_eq!(verdict, Verdict::Unknown);
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
@@ -387,13 +410,17 @@ mod tests {
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
         let public: IpAddr = "8.8.8.8".parse().unwrap();
         let timeout = Duration::from_secs(1);
-        assert!(any_blocked(async { Ok(vec![public, loopback]) }, timeout).await);
-        assert!(!any_blocked(async { Ok(vec![public]) }, timeout).await);
+        assert_eq!(
+            lookup_verdict(async { Ok(vec![public, loopback]) }, timeout).await,
+            Verdict::Blocked
+        );
+        assert_eq!(
+            lookup_verdict(async { Ok(vec![public]) }, timeout).await,
+            Verdict::Clear
+        );
         let failed = async { Err(std::io::Error::other("no such host")) };
-        assert!(!any_blocked(failed, timeout).await);
+        assert_eq!(lookup_verdict(failed, timeout).await, Verdict::Unknown);
     }
-
-    use super::*;
 
     fn url(raw: &str) -> Url {
         Url::parse(raw).unwrap()

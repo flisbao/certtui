@@ -76,6 +76,12 @@ impl Fixture {
     /// `certtui <before> inspect localhost:<port> --text --ca-only --ca-file <CA>`.
     fn inspect(&self, before: &[&str], envs: &[(&str, String)]) -> Output {
         let mut command = certtui();
+        // A developer's own config must never leak into these tests: without an
+        // explicit one, an empty config stands in.
+        if !before.contains(&"--config") {
+            let empty = self.config("{}");
+            command.args(["--config", &empty]);
+        }
         command.args(before);
         for (key, value) in envs {
             command.env(key, value);
@@ -313,4 +319,16 @@ fn quando_aia_e_no_aia_juntos_deve_sair_2() {
     let fixture = Fixture::start(ProxyBehavior::Ok);
     let out = fixture.inspect(&["--aia", "--no-aia"], &[]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn quando_a_variavel_invalida_e_minuscula_a_mensagem_deve_citar_o_nome_minusculo() {
+    let fixture = Fixture::start(ProxyBehavior::Ok);
+    let config = fixture.config(r#"{"network":{"use_env_proxy":true}}"#);
+    let out = fixture.inspect(
+        &["--config", &config],
+        &[("https_proxy", "socks5://127.0.0.1:1".to_owned())],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("https_proxy:"), "{}", stderr(&out));
 }

@@ -507,3 +507,35 @@ async fn quando_proxy_e_dado_por_nome_de_loopback_deve_poder_ser_alcancado() {
 
     assert_eq!(got, Ok(vec![4, 2]));
 }
+
+#[tokio::test]
+async fn quando_host_do_proxy_esta_no_no_proxy_nao_deve_isentar_o_destino_direto() {
+    // The proxy is `localhost` and `NO_PROXY` lists `localhost`: a certificate
+    // asking for `http://localhost:<port>/` goes direct, and the exemption that
+    // lets us reach the proxy by name must not let it through.
+    let victim = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![6]))
+        .mount(&victim)
+        .await;
+    let fetcher = ReqwestHttpFetcher::new(3);
+    fetcher.use_proxy(Some(certtui_app::proxy::ProxySettings {
+        endpoint: certtui_app::proxy::ProxyEndpoint {
+            host: "localhost".to_owned(),
+            port: 3128,
+        },
+        no_proxy: Some("localhost".to_owned()),
+    }));
+
+    let got = fetcher
+        .get(
+            &format!("http://localhost:{}/secret", victim.address().port()),
+            LIMIT,
+            TIMEOUT,
+        )
+        .await;
+
+    assert_eq!(got, Err(HttpError::DisallowedDestination));
+    assert_eq!(victim.received_requests().await.unwrap().len(), 0);
+}
