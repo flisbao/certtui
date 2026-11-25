@@ -2,6 +2,9 @@
 
 pub mod clock;
 
+/// Which destinations a certificate-supplied URL may reach (SSRF guard).
+pub mod destination;
+
 /// Capped HTTP(S) fetching for OCSP, CRL and AIA: the `HttpFetcher` adapter.
 pub mod http;
 

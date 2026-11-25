@@ -35,6 +35,7 @@ use crate::tui_launch::{InspectorOptions, TuiLauncher, TuiRequest};
 /// Inspect and analyze X.509 certificates.
 #[derive(Debug, Parser)]
 #[command(name = "certtui", version, about)]
+#[allow(clippy::struct_excessive_bools)] // Justificativa: cada flag global do clap é um booleano independente da linha de comando.
 pub struct Cli {
     /// What to do. Without a command, the interactive UI opens.
     #[command(subcommand)]
@@ -84,6 +85,11 @@ pub struct Cli {
     /// Do not check revocation (no OCSP or CRL request is made).
     #[arg(long, global = true)]
     no_revocation: bool,
+    /// Let the OCSP, CRL and AIA URLs found in certificates reach loopback,
+    /// link-local and cloud metadata addresses (refused by default; private
+    /// ranges such as 10.x are always allowed).
+    #[arg(long, global = true)]
+    allow_internal_urls: bool,
 }
 
 /// `--revocation` values.
@@ -442,6 +448,7 @@ pub fn run(
                 (false, Some(RevocationArg::Leaf) | None) => RevocationScope::Leaf,
             },
             aia: cli.aia,
+            allow_internal_urls: cli.allow_internal_urls,
         },
     };
     match cli.command {
@@ -1081,34 +1088,31 @@ mod tests {
 
     #[test]
     fn quando_flags_de_revogacao_e_aia_deve_chegar_ao_enricher() {
-        let cases: [(&[&str], RevocationOptions); 4] = [
+        let with = |scope, aia, allow_internal_urls| RevocationOptions {
+            scope,
+            aia,
+            allow_internal_urls,
+        };
+        let cases: [(&[&str], RevocationOptions); 5] = [
             (
                 &["--revocation", "full"],
-                RevocationOptions {
-                    scope: RevocationScope::Full,
-                    aia: false,
-                },
+                with(RevocationScope::Full, false, false),
             ),
             (
                 &["--revocation", "leaf", "--aia"],
-                RevocationOptions {
-                    scope: RevocationScope::Leaf,
-                    aia: true,
-                },
+                with(RevocationScope::Leaf, true, false),
             ),
             (
                 &["--no-revocation"],
-                RevocationOptions {
-                    scope: RevocationScope::Off,
-                    aia: false,
-                },
+                with(RevocationScope::Off, false, false),
             ),
             (
                 &["--aia", "--no-revocation"],
-                RevocationOptions {
-                    scope: RevocationScope::Off,
-                    aia: true,
-                },
+                with(RevocationScope::Off, true, false),
+            ),
+            (
+                &["--allow-internal-urls"],
+                with(RevocationScope::Leaf, false, true),
             ),
         ];
         for (flags, want) in cases {

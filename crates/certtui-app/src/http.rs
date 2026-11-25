@@ -16,6 +16,10 @@ pub enum HttpError {
     /// The URL scheme is neither `http` nor `https`.
     #[error("URL scheme is not allowed")]
     DisallowedScheme,
+    /// The destination is loopback, link-local, a cloud metadata address or
+    /// similar, which the default policy refuses.
+    #[error("destination address is not allowed")]
+    DisallowedDestination,
     /// A redirect went from `https` to `http`.
     #[error("redirect from https to http refused")]
     DowngradeRedirect,
