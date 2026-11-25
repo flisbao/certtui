@@ -1,7 +1,7 @@
 //! The read-only input every lint receives.
 
 use crate::chain_analysis::ChainAnalysis;
-use crate::model::{CertRevocation, CertificateRecord, Chain, StapleState, TrustVerdict};
+use crate::model::{CertRevocation, CertificateRecord, Chain, LoadNote, StapleState, TrustVerdict};
 use crate::time::Timestamp;
 
 /// Day-based limits that drive the validity lints.
@@ -51,6 +51,9 @@ pub struct LintContext<'a> {
     pub revocation: &'a [CertRevocation],
     /// What became of the stapled OCSP response.
     pub staple: &'a StapleState,
+    /// Diagnostics from loading the input (for example a keystore read
+    /// without its integrity check).
+    pub notes: &'a [LoadNote],
 }
 
 impl<'a> LintContext<'a> {

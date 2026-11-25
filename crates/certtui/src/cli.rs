@@ -10,6 +10,7 @@ use certtui_app::enrich::{ReportEnricher, RevocationOptions};
 use certtui_app::error::{InspectError, LoadError};
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
+use certtui_app::keystore::SecretString;
 use certtui_app::ports::{
     ChainFetcher, ChainVerifier, Clock, LocalSource, SourceLoader, TrustStoreProvider,
 };
@@ -28,6 +29,7 @@ use crate::network_args::{ConnectTo, parse_connect_to, parse_sni, parse_timeout,
 use crate::output::check::TargetResult;
 use crate::output::field::Field;
 use crate::output::{self, View};
+use crate::password::{PasswordSource, resolve_password};
 use crate::runtime;
 use crate::target_parse::{local_source, parse_target};
 use crate::tui_launch::{InspectorOptions, TuiLauncher, TuiRequest};
@@ -85,6 +87,17 @@ pub struct Cli {
     /// Do not check revocation (no OCSP or CRL request is made).
     #[arg(long, global = true)]
     no_revocation: bool,
+    /// Read the keystore password (PKCS#12, JKS) from this environment
+    /// variable. Never pass a password as an argument.
+    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["password_file", "password_stdin"])]
+    password_env: Option<String>,
+    /// Read the keystore password from the first line of this file.
+    #[arg(long, global = true, value_name = "PATH", conflicts_with_all = ["password_env", "password_stdin"])]
+    password_file: Option<PathBuf>,
+    /// Read the keystore password from the first line of standard input
+    /// (not with the target `-`, which also reads standard input).
+    #[arg(long, global = true, conflicts_with_all = ["password_env", "password_file"])]
+    password_stdin: bool,
     /// Let the OCSP, CRL and AIA URLs found in certificates reach loopback,
     /// link-local and cloud metadata addresses (refused by default; private
     /// ranges such as 10.x are always allowed).
@@ -291,6 +304,8 @@ struct TrustOptions {
     host_check: Option<String>,
     /// `--aia`, `--revocation` and `--no-revocation`.
     revocation: RevocationOptions,
+    /// The keystore password, when one was given.
+    password: Option<SecretString>,
 }
 
 /// Loads the anchors of `options`, reporting warnings on `err`; a failure is
@@ -436,6 +451,32 @@ pub fn run(
         },
         Err(message) => return usage(err, &format!("--sni: {message}")),
     };
+    let password_source = match (
+        cli.password_env.clone(),
+        cli.password_file.clone(),
+        cli.password_stdin,
+    ) {
+        (Some(name), _, _) => Some(PasswordSource::Env(name)),
+        (None, Some(path), _) => Some(PasswordSource::File(path)),
+        (None, None, true) => Some(PasswordSource::Stdin),
+        (None, None, false) => None,
+    };
+    if password_source == Some(PasswordSource::Stdin) && reads_stdin_target(cli.command.as_ref()) {
+        return usage(
+            err,
+            "--password-stdin cannot be combined with the target `-`: both read standard input; \
+             use --password-env or --password-file for the password",
+        );
+    }
+    let password = match resolve_password(
+        password_source.as_ref(),
+        &mut std::io::stdin().lock(),
+        &|name| std::env::var(name).ok(),
+    ) {
+        Ok(password) => password,
+        Err(error) => return usage(err, &error.to_string()),
+    };
+    env.loader.set_password(password.clone());
     let sources: Vec<TrustSource> = cli.trust.iter().copied().map(TrustSource::from).collect();
     let trust_options = TrustOptions {
         sources: resolve_sources(&sources, !cli.ca_file.is_empty(), cli.ca_only),
@@ -450,6 +491,7 @@ pub fn run(
             aia: cli.aia,
             allow_internal_urls: cli.allow_internal_urls,
         },
+        password,
     };
     match cli.command {
         Some(Command::Inspect(inspect_args)) => inspect(
@@ -478,6 +520,16 @@ pub fn run(
             ),
         },
         None => open_tui(None, &network_options, &trust_options, env, out, err),
+    }
+}
+
+/// Whether the command names `-` (standard input) as a target.
+fn reads_stdin_target(command: Option<&Command>) -> bool {
+    match command {
+        Some(Command::Inspect(args)) => args.target == "-",
+        Some(Command::Check(args)) => args.targets.iter().any(|target| target == "-"),
+        Some(Command::External(words)) => words.iter().any(|word| word == "-"),
+        None => false,
     }
 }
 
@@ -550,6 +602,7 @@ fn open_tui(
             ca_files: trust_options.ca_files.clone(),
             host_check: trust_options.host_check.clone(),
             revocation: trust_options.revocation,
+            password: trust_options.password.clone(),
         },
     };
     env.tui.launch(request)?;
@@ -839,6 +892,13 @@ fn inspect_failure(err: &mut dyn Write, error: &InspectError) -> anyhow::Result<
 
 fn load_failure(err: &mut dyn Write, error: &LoadError) -> anyhow::Result<ExitCode> {
     writeln!(err, "certtui: {error}").context("writing the load error")?;
+    if matches!(error, LoadError::PasswordRequired) {
+        writeln!(
+            err,
+            "certtui: use --password-env, --password-file or --password-stdin"
+        )
+        .context("writing the load error")?;
+    }
     if let LoadError::NoCertificatesFound { notes } = error {
         write_notes(err, notes)?;
     }

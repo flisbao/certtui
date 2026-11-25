@@ -5,6 +5,7 @@ mod command_executor;
 mod exit_code;
 mod network_args;
 mod output;
+mod password;
 mod runtime;
 mod system_inspector;
 mod target_parse;

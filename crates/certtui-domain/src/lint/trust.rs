@@ -2,7 +2,7 @@
 
 use crate::finding::{Finding, FindingCategory, FindingCode, Severity};
 use crate::lint::{Lint, LintContext};
-use crate::model::TrustVerdict;
+use crate::model::{LoadNote, TrustVerdict};
 use crate::sanitize::sanitize_display;
 
 /// The chain does not validate against the chosen anchors.
@@ -12,6 +12,32 @@ pub struct TrustUntrustedLint;
 /// The target name does not match the leaf's SANs.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HostnameMismatchLint;
+
+/// A keystore was read without its integrity check, so what it lists is
+/// unauthenticated.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KeystoreIntegrityUnverifiedLint;
+
+impl Lint for KeystoreIntegrityUnverifiedLint {
+    fn code(&self) -> FindingCode {
+        FindingCode::KeystoreIntegrityUnverified
+    }
+
+    fn check(&self, ctx: &LintContext<'_>) -> Vec<Finding> {
+        if !ctx.notes.contains(&LoadNote::KeystoreIntegrityUnverified) {
+            return Vec::new();
+        }
+        vec![Finding {
+            code: FindingCode::KeystoreIntegrityUnverified,
+            severity: Severity::Warning,
+            category: FindingCategory::Trust,
+            cert_index: None,
+            message: "the keystore was read without verifying its integrity \
+                      (no password, or no MAC): its contents are unauthenticated"
+                .to_owned(),
+        }]
+    }
+}
 
 impl Lint for TrustUntrustedLint {
     fn code(&self) -> FindingCode {
@@ -65,6 +91,32 @@ mod tests {
 
     fn fixture() -> crate::lint::test_support::Fixture {
         network_fixture_of(vec![fixture_record("rsa2048-leaf.der")])
+    }
+
+    #[test]
+    fn quando_keystore_foi_lido_sem_integridade_deve_dar_warning() {
+        let mut f = fixture();
+        f.notes = vec![LoadNote::KeystoreIntegrityUnverified];
+        let findings = KeystoreIntegrityUnverifiedLint.check(&f.ctx(0, false));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, FindingCode::KeystoreIntegrityUnverified);
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert_eq!(findings[0].category, FindingCategory::Trust);
+        assert_eq!(findings[0].cert_index, None);
+    }
+
+    #[test]
+    fn quando_keystore_foi_verificado_ou_nao_e_keystore_deve_nao_dar_warning() {
+        let mut f = fixture();
+        assert_eq!(
+            KeystoreIntegrityUnverifiedLint.check(&f.ctx(0, false)),
+            Vec::new()
+        );
+        f.notes = vec![LoadNote::PrivateKeyBlocksIgnored { count: 1 }];
+        assert_eq!(
+            KeystoreIntegrityUnverifiedLint.check(&f.ctx(0, false)),
+            Vec::new()
+        );
     }
 
     #[test]

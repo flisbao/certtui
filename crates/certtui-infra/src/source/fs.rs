@@ -2,14 +2,18 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, stdin};
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use certtui_app::error::LoadError;
+use certtui_app::keystore::{KeystoreError, KeystoreFormat, KeystoreReader, SecretString};
 use certtui_app::ports::{LoadedCerts, LocalSource, RawCert, SourceLoader};
 use certtui_domain::extract::{CandidateKind, scan_text};
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{
     CertOrigin, DiagnosticNoteCollector, Digest, Fingerprints, LoadNote, parse_der_cert,
 };
+
+use crate::keystore::{JksReader, Pkcs12Reader};
 
 use super::bounded::read_limited;
 use super::format::{DetectedFormat, detect_format};
@@ -28,26 +32,51 @@ pub(crate) enum OriginKind {
     Stdin,
 }
 
+/// Whether the loader may open keystores it meets, and with which password.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Keystores<'a> {
+    /// Keystores are refused (directory scans never open them).
+    Skip,
+    /// Keystores are opened with this password, if any.
+    Open(Option<&'a SecretString>),
+}
+
 /// Loads certificates from files and standard input based on their contents.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FsSourceLoader;
+#[derive(Debug, Default)]
+pub struct FsSourceLoader {
+    /// The password for keystores, set by the command line or a prompt.
+    password: Mutex<Option<SecretString>>,
+}
 
 impl FsSourceLoader {
-    /// Creates a filesystem source loader.
+    /// Creates a filesystem source loader with no keystore password.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// The same loader with `password` set.
+    #[must_use]
+    pub fn with_password(self, password: Option<SecretString>) -> Self {
+        self.set_password(password);
+        self
     }
 }
 
 impl SourceLoader for FsSourceLoader {
+    fn set_password(&self, password: Option<SecretString>) {
+        *self.password.lock().unwrap_or_else(PoisonError::into_inner) = password;
+    }
+
     fn load(&self, src: &LocalSource, limits: &Limits) -> Result<LoadedCerts, LoadError> {
+        let guard = self.password.lock().unwrap_or_else(PoisonError::into_inner);
+        let keystores = Keystores::Open(guard.as_ref());
         match src {
             LocalSource::File(path) => {
                 let file = File::open(path).map_err(|error| LoadError::Io(error.to_string()))?;
-                load_reader(file, OriginKind::File(path.clone()), limits)
+                load_reader(file, OriginKind::File(path.clone()), limits, keystores)
             }
-            LocalSource::Stdin => load_reader(stdin().lock(), OriginKind::Stdin, limits),
+            LocalSource::Stdin => load_reader(stdin().lock(), OriginKind::Stdin, limits, keystores),
             LocalSource::Directory { path, recursive } => super::dir::load_directory(
                 path,
                 super::dir::DirectoryOptions {
@@ -67,6 +96,7 @@ pub(super) fn load_reader<R: Read>(
     reader: R,
     origin: OriginKind,
     limits: &Limits,
+    keystores: Keystores<'_>,
 ) -> Result<LoadedCerts, LoadError> {
     let limit = match &origin {
         OriginKind::File(_) => limits.max_input_file_bytes,
@@ -74,10 +104,10 @@ pub(super) fn load_reader<R: Read>(
     };
     let bytes = read_limited(reader, limit)?;
     match detect_format(&bytes) {
-        DetectedFormat::Jks => Err(LoadError::Unsupported(
-            "JKS keystores arrive in a later release",
-        )),
-        DetectedFormat::BinaryDer => load_binary_der(&bytes, &origin, limits),
+        DetectedFormat::Jks => {
+            load_keystore(KeystoreFormat::Jks, &bytes, &origin, limits, keystores)
+        }
+        DetectedFormat::BinaryDer => load_binary_der(&bytes, &origin, limits, keystores),
         DetectedFormat::Utf16Text => {
             let decoded = utf16_to_utf8_bytes(&bytes);
             load_text(
@@ -98,6 +128,7 @@ fn load_binary_der(
     bytes: &[u8],
     origin: &OriginKind,
     limits: &Limits,
+    keystores: Keystores<'_>,
 ) -> Result<LoadedCerts, LoadError> {
     if parse_der_cert(bytes, limits).is_ok() {
         return Ok(LoadedCerts {
@@ -141,9 +172,9 @@ fn load_binary_der(
             }
         }
         Err(error) if has_cms_content_info_prefix(bytes) => Err(error),
-        Err(_) if has_pkcs12_pfx_prefix(bytes) => Err(LoadError::Unsupported(
-            "PKCS#12 keystores arrive in a later release",
-        )),
+        Err(_) if has_pkcs12_pfx_prefix(bytes) => {
+            load_keystore(KeystoreFormat::Pkcs12, bytes, origin, limits, keystores)
+        }
         Err(_) => {
             // Neither an X.509 certificate, CMS nor a PFX: the leading 0x30 may
             // be plain text (a log line), a certificate with trailing bytes or
@@ -157,6 +188,65 @@ fn load_binary_der(
             };
             load_text(bytes, origin, limits, empty_note)
         }
+    }
+}
+
+/// Reads the certificates of a keystore and maps its diagnostics: an
+/// unverified integrity and skipped non-X.509 entries become notes.
+fn load_keystore(
+    format: KeystoreFormat,
+    bytes: &[u8],
+    origin: &OriginKind,
+    limits: &Limits,
+    keystores: Keystores<'_>,
+) -> Result<LoadedCerts, LoadError> {
+    let Keystores::Open(password) = keystores else {
+        return Err(LoadError::Unsupported(
+            "keystores are not opened while scanning a directory",
+        ));
+    };
+    let result = match format {
+        KeystoreFormat::Jks => JksReader.read_certs(bytes, password, limits),
+        KeystoreFormat::Pkcs12 => Pkcs12Reader.read_certs(bytes, password, limits),
+    };
+    let contents = result.map_err(|error| match error {
+        KeystoreError::PasswordRequired => LoadError::PasswordRequired,
+        KeystoreError::TooLarge { limit } => LoadError::TooLarge { limit },
+        other => LoadError::Keystore(other),
+    })?;
+    let mut notes = Vec::new();
+    if contents.integrity_unverified {
+        notes.push(LoadNote::KeystoreIntegrityUnverified);
+    }
+    if contents.ignored > 0 {
+        notes.push(LoadNote::KeystoreEntriesIgnored {
+            count: contents.ignored,
+        });
+    }
+    let certs: Vec<RawCert> = contents
+        .entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| RawCert {
+            der: entry.der,
+            origin: keystore_origin(origin, &entry.alias, index),
+        })
+        .collect();
+    if certs.is_empty() {
+        return Err(LoadError::NoCertificatesFound { notes });
+    }
+    Ok(LoadedCerts { certs, notes })
+}
+
+/// Where a keystore certificate came from. Standard input has no path to
+/// keep, so its keystores report the plain stdin origin.
+fn keystore_origin(origin: &OriginKind, alias: &str, index: usize) -> CertOrigin {
+    match origin {
+        OriginKind::File(path) => CertOrigin::Keystore {
+            path: path.clone(),
+            alias: alias.to_owned(),
+        },
+        OriginKind::Stdin => CertOrigin::Stdin { index },
     }
 }
 
@@ -280,11 +370,12 @@ mod tests {
     use std::path::PathBuf;
 
     use certtui_app::error::LoadError;
+    use certtui_app::keystore::KeystoreError;
     use certtui_app::ports::{LocalSource, SourceLoader};
     use certtui_domain::limits::Limits;
 
     use super::super::format::{DetectedFormat, detect_format};
-    use super::{FsSourceLoader, OriginKind, load_reader};
+    use super::{FsSourceLoader, Keystores, OriginKind, load_reader};
     use crate::source::text::utf16_to_utf8_bytes;
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures");
@@ -298,7 +389,7 @@ mod tests {
         origin: OriginKind,
         limits: &Limits,
     ) -> Result<certtui_app::ports::LoadedCerts, LoadError> {
-        load_reader(bytes, origin, limits)
+        load_reader(bytes, origin, limits, Keystores::Open(None))
     }
 
     #[test]
@@ -395,16 +486,18 @@ mod tests {
     }
 
     #[test]
-    fn quando_magic_jks_deve_dar_unsupported_claro() {
-        assert_eq!(
-            load_bytes(
-                &[0xFE, 0xED, 0xFE, 0xED],
-                OriginKind::Stdin,
-                &Limits::default()
+    fn quando_magic_jks_sem_estrutura_deve_dar_keystore_malformed() {
+        let result = load_bytes(
+            &[0xFE, 0xED, 0xFE, 0xED],
+            OriginKind::Stdin,
+            &Limits::default(),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(LoadError::Keystore(KeystoreError::Malformed(_)))
             ),
-            Err(LoadError::Unsupported(
-                "JKS keystores arrive in a later release"
-            ))
+            "{result:?}"
         );
     }
 
@@ -746,14 +839,16 @@ mod tests {
     }
 
     #[test]
-    fn quando_der_tem_forma_de_pfx_deve_dar_unsupported_pkcs12() {
+    fn quando_der_tem_forma_de_pfx_deve_ir_para_o_leitor_pkcs12_e_dar_malformed() {
         // SEQUENCE { INTEGER 3, SEQUENCE { INTEGER 0 } }
         let pfx = [0x30, 0x08, 0x02, 0x01, 0x03, 0x30, 0x03, 0x02, 0x01, 0x00];
-        assert_eq!(
-            load_bytes(&pfx, OriginKind::Stdin, &Limits::default()),
-            Err(LoadError::Unsupported(
-                "PKCS#12 keystores arrive in a later release"
-            ))
+        let result = load_bytes(&pfx, OriginKind::Stdin, &Limits::default());
+        assert!(
+            matches!(
+                result,
+                Err(LoadError::Keystore(KeystoreError::Malformed(_)))
+            ),
+            "{result:?}"
         );
     }
 

@@ -428,6 +428,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "insta",
+ "p12-keystore",
  "ratatui",
  "rcgen",
  "rustls",

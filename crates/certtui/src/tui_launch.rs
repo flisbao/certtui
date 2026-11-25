@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use certtui_app::enrich::RevocationOptions;
 use certtui_app::error::LoadError;
+use certtui_app::keystore::SecretString;
 use certtui_app::ports::{LoadedCerts, LocalSource, SourceLoader};
 use certtui_app::trust::TrustSource;
 use certtui_domain::limits::Limits;
@@ -43,6 +44,8 @@ pub struct InspectorOptions {
     pub host_check: Option<String>,
     /// `--aia`, `--revocation` and `--no-revocation`.
     pub revocation: RevocationOptions,
+    /// The keystore password given on the command line, if any.
+    pub password: Option<SecretString>,
 }
 
 /// What the TUI is opened with.
@@ -82,7 +85,7 @@ impl TuiLauncher for ProcessLauncher {
 
     fn launch(&self, request: TuiRequest) -> anyhow::Result<()> {
         let loader: Arc<dyn SourceLoader> = Arc::new(StdinPreloaded {
-            inner: Arc::new(FsSourceLoader::new()),
+            inner: Arc::new(FsSourceLoader::new().with_password(request.options.password.clone())),
             stdin: request.stdin,
         });
         let trust_loader: Arc<FsSourceLoader> = Arc::new(FsSourceLoader::new());
@@ -133,6 +136,10 @@ struct StdinPreloaded {
 }
 
 impl SourceLoader for StdinPreloaded {
+    fn set_password(&self, password: Option<SecretString>) {
+        self.inner.set_password(password);
+    }
+
     fn load(&self, src: &LocalSource, limits: &Limits) -> Result<LoadedCerts, LoadError> {
         match src {
             LocalSource::Stdin => self.stdin.clone().ok_or(LoadError::Unsupported(

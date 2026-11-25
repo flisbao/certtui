@@ -14,7 +14,7 @@ use certtui_domain::limits::Limits;
 use certtui_domain::model::{DiagnosticNoteCollector, LoadNote};
 use certtui_domain::sanitize::sanitize_display;
 
-use super::fs::{OriginKind, load_reader};
+use super::fs::{Keystores, OriginKind, load_reader};
 
 /// Loads a directory under its traversal and certificate limits.
 ///
@@ -209,7 +209,9 @@ impl DirectoryScan {
         let relative = self.relative(&path).unwrap_or_default();
         let result = File::open(&path)
             .map_err(|error| LoadError::Io(error.to_string()))
-            .and_then(|file| load_reader(file, OriginKind::File(path), &file_limits));
+            .and_then(|file| {
+                load_reader(file, OriginKind::File(path), &file_limits, Keystores::Skip)
+            });
         self.process_child_result(result, &relative, limits);
     }
 

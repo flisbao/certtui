@@ -7,7 +7,7 @@ use crate::chain_analysis::{ChainAnalysis, analyze_chain};
 use crate::limits::Limits;
 use crate::lint::{LintContext, Thresholds};
 use crate::model::{
-    CertOrigin, CertRevocation, CertificateRecord, Chain, StapleState, TrustVerdict,
+    CertOrigin, CertRevocation, CertificateRecord, Chain, LoadNote, StapleState, TrustVerdict,
 };
 use crate::time::Timestamp;
 
@@ -21,6 +21,7 @@ pub(crate) struct Fixture {
     pub network: bool,
     pub revocation: Vec<CertRevocation>,
     pub staple: StapleState,
+    pub notes: Vec<LoadNote>,
 }
 
 /// A self-signed record valid between two Unix instants.
@@ -63,6 +64,7 @@ impl Fixture {
             network: false,
             revocation: Vec::new(),
             staple: StapleState::NotApplicable,
+            notes: Vec::new(),
         }
     }
 
@@ -80,6 +82,7 @@ impl Fixture {
             publicly_trusted,
             revocation: &self.revocation,
             staple: &self.staple,
+            notes: &self.notes,
         }
     }
 }
