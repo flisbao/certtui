@@ -1,5 +1,6 @@
 //! What can be copied and the text that results.
 
+pub mod batch;
 pub mod copyable;
 pub mod render_text;
 
