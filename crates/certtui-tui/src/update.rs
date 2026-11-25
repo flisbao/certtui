@@ -7,7 +7,7 @@ use crate::keymap::{Action, Keymap};
 use crate::msg::{Command, Msg};
 use crate::toast::Toast;
 use crate::view::help;
-use crate::{update_home, update_inspect};
+use crate::{update_home, update_inspect, update_modal};
 use certtui_domain::model::FingerprintFormat;
 
 /// Applies `msg` to `state` and returns the side effects to run.
@@ -17,9 +17,23 @@ pub fn update(state: &mut AppState, msg: Msg) -> Vec<Command> {
     match msg {
         Msg::Key(key) => on_key(state, key),
         Msg::Paste(text) => {
-            if state.modal.is_none() && state.screen == Screen::Home {
+            if state.modal.is_some() {
+                update_modal::on_paste(state, &text);
+            } else if state.screen == Screen::Home {
                 update_home::on_paste(state, &text);
             }
+            Vec::new()
+        }
+        Msg::PasswordNeeded { id, wrong } => {
+            update_modal::on_password_needed(state, id, wrong);
+            Vec::new()
+        }
+        Msg::ExportDone { path } => {
+            update_modal::on_export_done(state, &path);
+            Vec::new()
+        }
+        Msg::ExportFailed(failure) => {
+            update_modal::on_export_failed(state, failure);
             Vec::new()
         }
         Msg::Resize(columns, rows) => {
@@ -59,6 +73,10 @@ pub fn update(state: &mut AppState, msg: Msg) -> Vec<Command> {
 }
 
 fn on_key(state: &mut AppState, key: KeyEvent) -> Vec<Command> {
+    // A dialog that takes text owns every key: nothing may reach the keymap.
+    if state.modal.as_ref().is_some_and(Modal::takes_text) {
+        return update_modal::on_key(state, key);
+    }
     if state.modal.is_none()
         && state.screen == Screen::Home
         && state.home.editing
@@ -101,7 +119,9 @@ fn on_modal_action(state: &mut AppState, action: Action) -> Vec<Command> {
             state.modal = None;
             state.help_scroll = 0;
         }
-        Action::Down | Action::Up if state.modal == Some(Modal::Help) => scroll_help(state, action),
+        Action::Down | Action::Up if state.modal.as_ref().is_some_and(Modal::is_help) => {
+            scroll_help(state, action);
+        }
         _ => {}
     }
     Vec::new()
@@ -161,9 +181,9 @@ mod tests {
     fn quando_interrogacao_deve_abrir_modal_help_e_esc_fechar() {
         let mut s = state();
         update(&mut s, key('?'));
-        assert_eq!(s.modal, Some(Modal::Help));
+        assert!(matches!(s.modal, Some(Modal::Help)));
         update(&mut s, esc());
-        assert_eq!(s.modal, None);
+        assert!(s.modal.is_none());
         assert!(!s.should_quit);
     }
 

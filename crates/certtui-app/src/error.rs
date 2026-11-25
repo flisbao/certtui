@@ -4,6 +4,7 @@ use certtui_domain::model::LoadNote;
 use thiserror::Error;
 
 use crate::fetch::FetchError;
+use crate::keystore::KeystoreError;
 
 /// Error loading certificates from a local source (file, stdin, directory).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -30,6 +31,12 @@ pub enum LoadError {
     /// The source is structurally invalid.
     #[error("malformed input: {0}")]
     Malformed(String),
+    /// The keystore is encrypted and no password was given.
+    #[error("keystore requires a password")]
+    PasswordRequired,
+    /// A keystore could not be read (wrong password, corrupt, unsupported).
+    #[error("{0}")]
+    Keystore(KeystoreError),
     /// More certificates than the applicable cap were parsed: for local
     /// sources `Limits::max_certs_per_source`. This is the application-level
     /// mapping of `ChainError::TooLong`.

@@ -141,7 +141,7 @@ fn byte_index(text: &str, chars: usize) -> usize {
 pub fn start_inspect(state: &mut AppState, target: Target) -> Vec<Command> {
     let id = state.jobs.start();
     state.screen = Screen::Inspect;
-    state.inspect = Some(InspectState::loading(id));
+    state.inspect = Some(InspectState::loading(id, target.clone()));
     state.home.editing = false;
     vec![Command::Inspect { id, target }]
 }

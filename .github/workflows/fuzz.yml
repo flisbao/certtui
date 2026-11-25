@@ -24,7 +24,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse_der_cert, extract_text_certs, parse_pkcs7, parse_target]
+        target:
+          [
+            parse_der_cert,
+            extract_text_certs,
+            parse_pkcs7,
+            parse_target,
+            parse_pkcs12,
+            parse_jks,
+          ]
     env:
       # 60 s on pull requests, 30 min on the nightly schedule.
       FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '60' }}
@@ -40,8 +48,13 @@ jobs:
         with:
           tool: cargo-fuzz
 
+      # AddressSanitizer keeps freed memory in a 256 MiB quarantine by default,
+      # which alone trips the 256 MiB RSS limit on fast targets (the JKS target
+      # does ~60k execs/s). The real heap stays near 90 MiB.
       - name: Run fuzz target
         working-directory: fuzz
+        env:
+          ASAN_OPTIONS: quarantine_size_mb=16
         run: >-
           cargo +nightly fuzz run "${{ matrix.target }}"
           -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=256 -timeout=2

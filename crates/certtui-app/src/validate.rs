@@ -58,6 +58,7 @@ pub fn validate(report: InspectionReport, inputs: ValidationInputs<'_>) -> Inspe
         publicly_trusted,
         revocation: &report.revocation,
         staple: &report.staple,
+        notes: &report.notes,
     });
     InspectionReport {
         trust: verification.trust,

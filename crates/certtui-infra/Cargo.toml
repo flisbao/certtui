@@ -18,6 +18,9 @@ der = { version = "0.7.10", features = ["std"] }
 # HTTP for OCSP/CRL/AIA. 0.12.x on purpose: `rustls-tls-native-roots` uses the `ring`
 # provider, while 0.13 only ships aws-lc (a C build). Redirects are handled by hand.
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots"] }
+# PKCS#12 reader. No `pbes1`: RC2/3DES-protected files are refused by name instead of
+# pulling in weak-cipher crates.
+p12-keystore = { version = "0.4.1", default-features = false }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.5"
 sha1 = "0.11.0"

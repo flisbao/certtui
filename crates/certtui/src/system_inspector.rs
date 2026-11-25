@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use certtui_app::enrich::{NetworkEnricher, ReportEnricher};
+use certtui_app::error::LoadError;
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
+use certtui_app::keystore::{KeystoreError, SecretString};
 use certtui_app::ports::{ChainFetcher, ChainVerifier, Clock, SourceLoader, TrustStoreProvider};
 use certtui_app::trust::TrustAnchors;
 use certtui_app::validate::known_issuers;
@@ -22,6 +24,8 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::validate_for_target;
+use certtui_tui::InspectFailure;
+
 use crate::command_executor::Inspector;
 use crate::network_args::with_timeout;
 use crate::output::single_line;
@@ -43,6 +47,16 @@ pub fn real_enricher() -> NetworkEnricher {
         Arc::new(SystemClock),
         limits,
     )
+}
+
+/// How a load error reaches the screen: a keystore password problem opens the
+/// dialog, anything else is a message.
+fn load_failure(error: &LoadError) -> InspectFailure {
+    match error {
+        LoadError::PasswordRequired => InspectFailure::PasswordRequired,
+        LoadError::Keystore(KeystoreError::WrongPasswordOrCorrupt) => InspectFailure::WrongPassword,
+        other => InspectFailure::Message(single_line(&other.to_string())),
+    }
 }
 
 /// The ports and the command line options an inspection needs.
@@ -105,9 +119,16 @@ impl Inspector for SystemInspector {
     async fn inspect(
         &self,
         target: Target,
+        password: Option<SecretString>,
         cancel: CancellationToken,
-    ) -> Result<InspectionReport, String> {
-        let anchors = self.anchors().await?;
+    ) -> Result<InspectionReport, InspectFailure> {
+        // The password typed in the dialog wins; otherwise the one from the
+        // command line (if any) applies, and nothing from an earlier job
+        // lingers.
+        self.loader
+            .set_password(password.or_else(|| self.options.password.clone()));
+        let message = |text: String| InspectFailure::Message(text);
+        let anchors = self.anchors().await.map_err(message)?;
         let report = match target {
             Target::Network(parsed) => {
                 let network = self.network_target(parsed);
@@ -118,18 +139,21 @@ impl Inspector for SystemInspector {
                     cancel.clone(),
                 )
                 .await
-                .map_err(|error| single_line(&error.to_string()))?
+                .map_err(|error| InspectFailure::Message(single_line(&error.to_string())))?
             }
             local => {
-                let source = local_source(&local)
-                    .ok_or_else(|| "a network target reached the local loader".to_owned())?;
+                let source = local_source(&local).ok_or_else(|| {
+                    InspectFailure::Message("a network target reached the local loader".to_owned())
+                })?;
                 let loader = Arc::clone(&self.loader);
                 tokio::task::spawn_blocking(move || {
                     inspect_local(loader.as_ref(), &source, local, &Limits::default())
                 })
                 .await
-                .map_err(|error| format!("reading the certificates failed: {error}"))?
-                .map_err(|error| single_line(&error.to_string()))?
+                .map_err(|error| {
+                    InspectFailure::Message(format!("reading the certificates failed: {error}"))
+                })?
+                .map_err(|error| load_failure(&error))?
             }
         };
         let report = self

@@ -8,8 +8,12 @@ use anyhow::Context as _;
 use certtui_app::check::FailOn;
 use certtui_app::enrich::{ReportEnricher, RevocationOptions};
 use certtui_app::error::{InspectError, LoadError};
+use certtui_app::export::{
+    ExportError, ExportFormat, ExportSelection, FileWriter, Overwrite, WriteError, render_export,
+};
 use certtui_app::inspect::inspect_local;
 use certtui_app::inspect_network::inspect_network;
+use certtui_app::keystore::SecretString;
 use certtui_app::ports::{
     ChainFetcher, ChainVerifier, Clock, LocalSource, SourceLoader, TrustStoreProvider,
 };
@@ -28,6 +32,7 @@ use crate::network_args::{ConnectTo, parse_connect_to, parse_sni, parse_timeout,
 use crate::output::check::TargetResult;
 use crate::output::field::Field;
 use crate::output::{self, View};
+use crate::password::{PasswordSource, resolve_password};
 use crate::runtime;
 use crate::target_parse::{local_source, parse_target};
 use crate::tui_launch::{InspectorOptions, TuiLauncher, TuiRequest};
@@ -85,6 +90,17 @@ pub struct Cli {
     /// Do not check revocation (no OCSP or CRL request is made).
     #[arg(long, global = true)]
     no_revocation: bool,
+    /// Read the keystore password (PKCS#12, JKS) from this environment
+    /// variable. Never pass a password as an argument.
+    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["password_file", "password_stdin"])]
+    password_env: Option<String>,
+    /// Read the keystore password from the first line of this file.
+    #[arg(long, global = true, value_name = "PATH", conflicts_with_all = ["password_env", "password_stdin"])]
+    password_file: Option<PathBuf>,
+    /// Read the keystore password from the first line of standard input
+    /// (not with the target `-`, which also reads standard input).
+    #[arg(long, global = true, conflicts_with_all = ["password_env", "password_file"])]
+    password_stdin: bool,
     /// Let the OCSP, CRL and AIA URLs found in certificates reach loopback,
     /// link-local and cloud metadata addresses (refused by default; private
     /// ranges such as 10.x are always allowed).
@@ -108,6 +124,8 @@ pub enum Command {
     Inspect(InspectArgs),
     /// Validate the certificates of one or more targets and report findings.
     Check(CheckArgs),
+    /// Write the certificates of a target to a file as PEM, DER or JSON.
+    Export(ExportArgs),
     /// `certtui <TARGET>`: open the interactive UI on a file, a directory, `-`
     /// for standard input, or a TLS server. Without a terminal it is
     /// inspected like `certtui inspect --text <TARGET>`. Options go before
@@ -154,6 +172,59 @@ impl From<FailOnArg> for FailOn {
             FailOnArg::Error => FailOn::Error,
         }
     }
+}
+
+/// Export file format (`--format`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormatArg {
+    /// PEM text.
+    Pem,
+    /// DER, one certificate.
+    Der,
+    /// The JSON document of `inspect --json`.
+    Json,
+}
+
+impl From<ExportFormatArg> for ExportFormat {
+    fn from(arg: ExportFormatArg) -> Self {
+        match arg {
+            ExportFormatArg::Pem => ExportFormat::Pem,
+            ExportFormatArg::Der => ExportFormat::Der,
+            ExportFormatArg::Json => ExportFormat::Json,
+        }
+    }
+}
+
+/// Arguments of `certtui export`.
+#[allow(clippy::struct_excessive_bools)]
+// Justificativa: the CLI contract is a set of independent boolean flags.
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// What to export from: a file, a keystore, `-` for standard input, or a
+    /// TLS server.
+    pub target: String,
+    /// File format.
+    #[arg(long, value_enum)]
+    pub format: ExportFormatArg,
+    /// Export the certificate at this chain index (default 0).
+    #[arg(long, value_name = "N", conflicts_with = "chain")]
+    pub index: Option<usize>,
+    /// Export every certificate, in the order they were presented (PEM or
+    /// JSON; DER holds a single certificate).
+    #[arg(long)]
+    pub chain: bool,
+    /// Where to write the file.
+    #[arg(long, value_name = "PATH")]
+    pub out: PathBuf,
+    /// Replace the file if it already exists.
+    #[arg(long)]
+    pub force: bool,
+    /// Treat the target as a file even if it looks like a host name.
+    #[arg(long)]
+    pub file: bool,
+    /// Descend into subdirectories when the target is a directory.
+    #[arg(long)]
+    pub recursive: bool,
 }
 
 /// Arguments of `certtui check`.
@@ -279,6 +350,8 @@ pub struct Env<'a> {
     pub trust_provider: &'a dyn Fn(Vec<PathBuf>) -> Box<dyn TrustStoreProvider>,
     /// Opens the interactive UI.
     pub tui: &'a dyn TuiLauncher,
+    /// Writes export files.
+    pub writer: &'a dyn FileWriter,
     /// AIA chasing and revocation, between gathering and validating.
     pub enricher: &'a dyn ReportEnricher,
 }
@@ -291,6 +364,8 @@ struct TrustOptions {
     host_check: Option<String>,
     /// `--aia`, `--revocation` and `--no-revocation`.
     revocation: RevocationOptions,
+    /// The keystore password, when one was given.
+    password: Option<SecretString>,
 }
 
 /// Loads the anchors of `options`, reporting warnings on `err`; a failure is
@@ -436,6 +511,32 @@ pub fn run(
         },
         Err(message) => return usage(err, &format!("--sni: {message}")),
     };
+    let password_source = match (
+        cli.password_env.clone(),
+        cli.password_file.clone(),
+        cli.password_stdin,
+    ) {
+        (Some(name), _, _) => Some(PasswordSource::Env(name)),
+        (None, Some(path), _) => Some(PasswordSource::File(path)),
+        (None, None, true) => Some(PasswordSource::Stdin),
+        (None, None, false) => None,
+    };
+    if password_source == Some(PasswordSource::Stdin) && reads_stdin_target(cli.command.as_ref()) {
+        return usage(
+            err,
+            "--password-stdin cannot be combined with the target `-`: both read standard input; \
+             use --password-env or --password-file for the password",
+        );
+    }
+    let password = match resolve_password(
+        password_source.as_ref(),
+        &mut std::io::stdin().lock(),
+        &|name| std::env::var(name).ok(),
+    ) {
+        Ok(password) => password,
+        Err(error) => return usage(err, &error.to_string()),
+    };
+    env.loader.set_password(password.clone());
     let sources: Vec<TrustSource> = cli.trust.iter().copied().map(TrustSource::from).collect();
     let trust_options = TrustOptions {
         sources: resolve_sources(&sources, !cli.ca_file.is_empty(), cli.ca_only),
@@ -450,6 +551,7 @@ pub fn run(
             aia: cli.aia,
             allow_internal_urls: cli.allow_internal_urls,
         },
+        password,
     };
     match cli.command {
         Some(Command::Inspect(inspect_args)) => inspect(
@@ -462,6 +564,9 @@ pub fn run(
         ),
         Some(Command::Check(check_args)) => {
             check(&check_args, &network_options, &trust_options, env, out, err)
+        }
+        Some(Command::Export(export_args)) => {
+            export(&export_args, &network_options, &trust_options, env, err)
         }
         Some(Command::External(words)) => match words.as_slice() {
             [target] => open_tui(
@@ -478,6 +583,17 @@ pub fn run(
             ),
         },
         None => open_tui(None, &network_options, &trust_options, env, out, err),
+    }
+}
+
+/// Whether the command names `-` (standard input) as a target.
+fn reads_stdin_target(command: Option<&Command>) -> bool {
+    match command {
+        Some(Command::Inspect(args)) => args.target == "-",
+        Some(Command::Check(args)) => args.targets.iter().any(|target| target == "-"),
+        Some(Command::Export(args)) => args.target == "-",
+        Some(Command::External(words)) => words.iter().any(|word| word == "-"),
+        None => false,
     }
 }
 
@@ -550,6 +666,7 @@ fn open_tui(
             ca_files: trust_options.ca_files.clone(),
             host_check: trust_options.host_check.clone(),
             revocation: trust_options.revocation,
+            password: trust_options.password.clone(),
         },
     };
     env.tui.launch(request)?;
@@ -610,6 +727,88 @@ fn inspect(
     };
     render(mode, &view, out, err)?;
     Ok(ExitCode::Ok)
+}
+
+/// `certtui export`: render the certificates and write them atomically.
+fn export(
+    args: &ExportArgs,
+    network_options: &NetworkOptions,
+    trust_options: &TrustOptions,
+    env: &Env<'_>,
+    err: &mut dyn Write,
+) -> anyhow::Result<ExitCode> {
+    let target = match parse_target(&args.target, args.file, args.recursive, &|path| {
+        path.exists()
+    }) {
+        Ok(target) => target,
+        Err(error) => return usage(err, &error.to_string()),
+    };
+    let format = ExportFormat::from(args.format);
+    let selection = if args.chain {
+        ExportSelection::Chain
+    } else {
+        ExportSelection::Index(args.index.unwrap_or(0))
+    };
+    // A request that cannot work is refused before touching the target: no
+    // network round trip, no password prompt for a file that would not be written.
+    if format == ExportFormat::Der && selection == ExportSelection::Chain {
+        return usage(err, &ExportError::DerCannotRepresentChain.to_string());
+    }
+    let report = match gather(network_options, env, target, err)? {
+        Ok(report) => report,
+        Err(code) => return Ok(code),
+    };
+    // The JSON is the document `inspect --json` prints, validation included;
+    // PEM and DER need only the certificates.
+    let report = if format == ExportFormat::Json {
+        let anchors = match load_anchors(trust_options, env, err)? {
+            Ok(anchors) => anchors,
+            Err(code) => return Ok(code),
+        };
+        Validation {
+            env,
+            anchors: &anchors,
+            thresholds: Thresholds::default(),
+            host_check: trust_options.host_check.as_deref(),
+            revocation: trust_options.revocation,
+        }
+        .apply(report)?
+    } else {
+        report
+    };
+    let bytes = match render_export(&report, format, selection) {
+        Ok(bytes) => bytes,
+        Err(error) => return usage(err, &error.to_string()),
+    };
+    let overwrite = if args.force {
+        Overwrite::Allow
+    } else {
+        Overwrite::Refuse
+    };
+    let shown = output::single_line(&args.out.to_string_lossy());
+    match env.writer.write(&args.out, &bytes, overwrite) {
+        Ok(()) => {
+            writeln!(err, "certtui: wrote {shown} ({} bytes)", bytes.len())
+                .context("writing the confirmation")?;
+            Ok(ExitCode::Ok)
+        }
+        Err(WriteError::AlreadyExists) => usage(
+            err,
+            &format!("{shown} already exists; use --force to replace it"),
+        ),
+        Err(error @ (WriteError::IsDirectory | WriteError::ParentMissing)) => {
+            usage(err, &format!("{shown}: {error}"))
+        }
+        Err(WriteError::Io(message)) => {
+            writeln!(
+                err,
+                "certtui: cannot write {shown}: {}",
+                output::single_line(&message)
+            )
+            .context("writing the error")?;
+            Ok(ExitCode::Internal)
+        }
+    }
 }
 
 fn check(
@@ -839,6 +1038,13 @@ fn inspect_failure(err: &mut dyn Write, error: &InspectError) -> anyhow::Result<
 
 fn load_failure(err: &mut dyn Write, error: &LoadError) -> anyhow::Result<ExitCode> {
     writeln!(err, "certtui: {error}").context("writing the load error")?;
+    if matches!(error, LoadError::PasswordRequired) {
+        writeln!(
+            err,
+            "certtui: use --password-env, --password-file or --password-stdin"
+        )
+        .context("writing the load error")?;
+    }
     if let LoadError::NoCertificatesFound { notes } = error {
         write_notes(err, notes)?;
     }
@@ -856,7 +1062,8 @@ mod tests {
     use certtui_app::fetch::{FetchError, FetchRequest, FetchedChain, Stage};
     use certtui_app::ports::{ChainVerification, LoadedCerts};
     use certtui_app::testing::{
-        FakeChainFetcher, FakeChainVerifier, FakeSourceLoader, FakeTrustProvider, FixedClock,
+        FakeChainFetcher, FakeChainVerifier, FakeFileWriter, FakeSourceLoader, FakeTrustProvider,
+        FixedClock,
     };
     use certtui_app::trust::TrustAnchor;
     use certtui_domain::model::{CertRevocation, RevocationStatus, StapleState};
@@ -961,7 +1168,14 @@ mod tests {
         launcher: &dyn TuiLauncher,
         args: &[&str],
     ) -> (anyhow::Result<ExitCode>, Vec<u8>, Vec<u8>) {
-        run_full(loader, fetcher, launcher, &NoEnricher, args)
+        run_full(
+            loader,
+            fetcher,
+            launcher,
+            &NoEnricher,
+            &FakeFileWriter::new(Ok(())),
+            args,
+        )
     }
 
     fn run_full(
@@ -969,6 +1183,7 @@ mod tests {
         fetcher: &dyn ChainFetcher,
         launcher: &dyn TuiLauncher,
         enricher: &dyn ReportEnricher,
+        writer: &dyn FileWriter,
         args: &[&str],
     ) -> (anyhow::Result<ExitCode>, Vec<u8>, Vec<u8>) {
         let verifier = FakeChainVerifier::new(ChainVerification {
@@ -999,6 +1214,7 @@ mod tests {
             clock: &clock,
             trust_provider: &provider,
             tui: launcher,
+            writer,
             enricher,
         };
         let mut out = Vec::new();
@@ -1059,8 +1275,14 @@ mod tests {
         // self-signed error clouds the exit code the revocation tests check.
         let leaf = std::fs::read(format!("{FIXTURES}/chain-3.der")).unwrap();
         let fetcher = FakeChainFetcher(Ok(chain(vec![leaf])));
-        let (code, out, err) =
-            run_full(&loader, &fetcher, &FakeLauncher::new(false), enricher, args);
+        let (code, out, err) = run_full(
+            &loader,
+            &fetcher,
+            &FakeLauncher::new(false),
+            enricher,
+            &FakeFileWriter::new(Ok(())),
+            args,
+        );
         Outcome {
             code: code.unwrap(),
             out: String::from_utf8(out).unwrap(),
@@ -1241,6 +1463,112 @@ mod tests {
         let got = run_enriched(&fake, &["inspect", "example.test", "--text"]);
         assert_eq!(got.code, ExitCode::Ok, "{}", got.err);
         assert!(got.out.contains("Revocation:\n  [0] good"), "{}", got.out);
+    }
+
+    fn run_export(writer: &FakeFileWriter, args: &[&str]) -> Outcome {
+        let loader = FakeSourceLoader(Err(LoadError::Io("no files in unit tests".to_owned())));
+        let fetcher = FakeChainFetcher(Ok(chain(vec![leaf_der()])));
+        let (code, out, err) = run_full(
+            &loader,
+            &fetcher,
+            &FakeLauncher::new(false),
+            &NoEnricher,
+            writer,
+            args,
+        );
+        Outcome {
+            code: code.unwrap(),
+            out: String::from_utf8(out).unwrap(),
+            err: String::from_utf8(err).unwrap(),
+        }
+    }
+
+    #[test]
+    fn quando_export_deve_entregar_ao_writer_o_pem_e_o_modo_sem_sobrescrever() {
+        let fake = FakeFileWriter::new(Ok(()));
+        let got = run_export(
+            &fake,
+            &[
+                "export",
+                "example.test",
+                "--format",
+                "pem",
+                "--out",
+                "out.pem",
+            ],
+        );
+        assert_eq!(got.code, ExitCode::Ok, "{}", got.err);
+        let writes = fake.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, PathBuf::from("out.pem"));
+        assert!(writes[0].1.starts_with(b"-----BEGIN CERTIFICATE-----\n"));
+        assert_eq!(writes[0].2, certtui_app::export::Overwrite::Refuse);
+        assert_eq!(got.out, "", "the confirmation goes to stderr");
+    }
+
+    #[test]
+    fn quando_export_com_force_deve_pedir_allow_ao_writer() {
+        let writer = FakeFileWriter::new(Ok(()));
+        run_export(
+            &writer,
+            &[
+                "export",
+                "example.test",
+                "--format",
+                "der",
+                "--force",
+                "--out",
+                "o.der",
+            ],
+        );
+        assert_eq!(writer.writes()[0].2, certtui_app::export::Overwrite::Allow);
+    }
+
+    #[test]
+    fn quando_writer_falha_com_io_deve_sair_4_com_a_mensagem() {
+        let writer = FakeFileWriter::new(Err(certtui_app::export::WriteError::Io(
+            "no space left on device".to_owned(),
+        )));
+        let got = run_export(
+            &writer,
+            &[
+                "export",
+                "example.test",
+                "--format",
+                "pem",
+                "--out",
+                "out.pem",
+            ],
+        );
+        assert_eq!(got.code, ExitCode::Internal);
+        assert!(
+            got.err
+                .contains("cannot write out.pem: no space left on device"),
+            "{}",
+            got.err
+        );
+    }
+
+    #[test]
+    fn quando_writer_diz_already_exists_deve_sair_2_sugerindo_force() {
+        let writer = FakeFileWriter::new(Err(certtui_app::export::WriteError::AlreadyExists));
+        let got = run_export(
+            &writer,
+            &[
+                "export",
+                "example.test",
+                "--format",
+                "pem",
+                "--out",
+                "out.pem",
+            ],
+        );
+        assert_eq!(got.code, ExitCode::Usage);
+        assert!(
+            got.err.contains("already exists; use --force"),
+            "{}",
+            got.err
+        );
     }
 
     fn recording(answer: Result<FetchedChain, FetchError>) -> Recording {

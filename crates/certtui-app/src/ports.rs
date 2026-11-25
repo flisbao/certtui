@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::LoadError;
 use crate::fetch::{FetchError, FetchRequest, FetchedChain};
 use crate::http::HttpError;
+use crate::keystore::SecretString;
 use crate::trust::{TrustAnchors, TrustError, TrustSource};
 
 /// Source of the current time.
@@ -80,6 +81,11 @@ impl fmt::Debug for LoadedCerts {
 
 /// Reads certificates from files, stdin or directories.
 pub trait SourceLoader: Send + Sync {
+    /// Sets the password used to open keystores (PKCS#12, JKS) the next loads
+    /// meet; `None` means no password. Loaders that read no keystores ignore
+    /// it. The password is held only as a [`SecretString`].
+    fn set_password(&self, _password: Option<SecretString>) {}
+
     /// Loads the candidate certificates of `src`, reading at most the bytes
     /// allowed by `limits`.
     ///

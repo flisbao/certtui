@@ -327,3 +327,47 @@ impl HttpFetcher for FakeHttpFetcher {
         self.serve("POST", url, body, max_bytes).await
     }
 }
+
+/// A [`FileWriter`](crate::export::FileWriter) that records every write and
+/// answers a canned result.
+#[derive(Debug)]
+pub struct FakeFileWriter {
+    /// What every call returns.
+    pub result: Result<(), crate::export::WriteError>,
+    writes: Mutex<Vec<(std::path::PathBuf, Vec<u8>, crate::export::Overwrite)>>,
+}
+
+impl FakeFileWriter {
+    /// A writer that answers `result`.
+    #[must_use]
+    pub fn new(result: Result<(), crate::export::WriteError>) -> Self {
+        Self {
+            result,
+            writes: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every `(path, bytes, overwrite)` written so far.
+    #[must_use]
+    pub fn writes(&self) -> Vec<(std::path::PathBuf, Vec<u8>, crate::export::Overwrite)> {
+        self.writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl crate::export::FileWriter for FakeFileWriter {
+    fn write(
+        &self,
+        path: &std::path::Path,
+        bytes: &[u8],
+        overwrite: crate::export::Overwrite,
+    ) -> Result<(), crate::export::WriteError> {
+        self.writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((path.to_path_buf(), bytes.to_vec(), overwrite));
+        self.result.clone()
+    }
+}

@@ -8,10 +8,12 @@ use std::time::Duration;
 
 use certtui_app::enrich::RevocationOptions;
 use certtui_app::error::LoadError;
+use certtui_app::keystore::SecretString;
 use certtui_app::ports::{LoadedCerts, LocalSource, SourceLoader};
 use certtui_app::trust::TrustSource;
 use certtui_domain::limits::Limits;
 use certtui_domain::target::Target;
+use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
 use certtui_infra::clock::SystemClock;
 use certtui_infra::source::FsSourceLoader;
@@ -43,6 +45,8 @@ pub struct InspectorOptions {
     pub host_check: Option<String>,
     /// `--aia`, `--revocation` and `--no-revocation`.
     pub revocation: RevocationOptions,
+    /// The keystore password given on the command line, if any.
+    pub password: Option<SecretString>,
 }
 
 /// What the TUI is opened with.
@@ -81,11 +85,15 @@ impl TuiLauncher for ProcessLauncher {
     }
 
     fn launch(&self, request: TuiRequest) -> anyhow::Result<()> {
+        // One loader for the targets and for `--ca-file`: a keystore used as a
+        // CA file needs the same password, and so does one the dialog opens.
+        let files: Arc<FsSourceLoader> =
+            Arc::new(FsSourceLoader::new().with_password(request.options.password.clone()));
+        let trust_loader: Arc<dyn SourceLoader> = files.clone();
         let loader: Arc<dyn SourceLoader> = Arc::new(StdinPreloaded {
-            inner: Arc::new(FsSourceLoader::new()),
+            inner: files,
             stdin: request.stdin,
         });
-        let trust_loader: Arc<FsSourceLoader> = Arc::new(FsSourceLoader::new());
         let inspector = SystemInspector {
             loader,
             fetcher: Arc::new(RustlsChainFetcher::new()),
@@ -94,7 +102,7 @@ impl TuiLauncher for ProcessLauncher {
             trust_provider: Arc::new(move |ca_files| {
                 Box::new(NativeTrustProvider::new(
                     ca_files,
-                    trust_loader.clone(),
+                    Arc::clone(&trust_loader),
                     Limits::default(),
                 ))
             }),
@@ -116,6 +124,7 @@ impl TuiLauncher for ProcessLauncher {
                 target_parser: parse_for_tui,
             },
             Arc::new(inspector),
+            Arc::new(AtomicFileWriter),
         )
     }
 }
@@ -133,6 +142,10 @@ struct StdinPreloaded {
 }
 
 impl SourceLoader for StdinPreloaded {
+    fn set_password(&self, password: Option<SecretString>) {
+        self.inner.set_password(password);
+    }
+
     fn load(&self, src: &LocalSource, limits: &Limits) -> Result<LoadedCerts, LoadError> {
         match src {
             LocalSource::Stdin => self.stdin.clone().ok_or(LoadError::Unsupported(

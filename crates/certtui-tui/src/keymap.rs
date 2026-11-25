@@ -101,7 +101,7 @@ impl Action {
             Action::CopyPem => "copy the certificate as PEM",
             Action::CopyChainPem => "copy the whole chain as PEM",
             Action::CopyJson => "copy the report as JSON",
-            Action::Export => "export to a file (not yet)",
+            Action::Export => "export to a file",
             Action::Filter => "filter rows (not yet)",
             Action::Sort => "sort rows (not yet)",
         }

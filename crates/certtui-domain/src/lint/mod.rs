@@ -31,7 +31,7 @@ pub use revocation::{
     AiaFetchedLint, OcspStapleInvalidLint, OcspStapleMissingLint, RevocationUnknownLint,
     RevokedLint,
 };
-pub use trust::{HostnameMismatchLint, TrustUntrustedLint};
+pub use trust::{HostnameMismatchLint, KeystoreIntegrityUnverifiedLint, TrustUntrustedLint};
 pub use validity::{
     ExpiredLint, ExpiresSoonCriticalLint, ExpiresSoonLint, NotYetValidLint, ValidityTooLongLint,
 };
@@ -68,6 +68,7 @@ pub fn registry() -> Vec<Box<dyn Lint>> {
         Box::new(AiaFetchedLint),
         Box::new(TrustUntrustedLint),
         Box::new(HostnameMismatchLint),
+        Box::new(KeystoreIntegrityUnverifiedLint),
         Box::new(ExpiredLint),
         Box::new(NotYetValidLint),
         Box::new(ExpiresSoonCriticalLint),

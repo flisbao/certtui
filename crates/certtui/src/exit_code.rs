@@ -64,6 +64,8 @@ mod tests {
             LoadError::Unsupported("x"),
             LoadError::Malformed("x".to_owned()),
             LoadError::TooManyCerts { len: 2, max: 1 },
+            LoadError::PasswordRequired,
+            LoadError::Keystore(certtui_app::keystore::KeystoreError::WrongPasswordOrCorrupt),
         ];
         for error in &errors {
             assert_eq!(ExitCode::from(error), ExitCode::Input, "{error}");

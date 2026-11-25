@@ -101,7 +101,7 @@ pub fn inspect_state(report: InspectionReport) -> AppState {
     let mut state = AppState::new(Instant::now());
     let id = state.jobs.start();
     state.screen = Screen::Inspect;
-    let mut inspect = InspectState::loading(id);
+    let mut inspect = InspectState::loading(id, certtui_domain::target::Target::Stdin);
     inspect.phase = Phase::Ready(Arc::new(report));
     state.inspect = Some(inspect);
     state

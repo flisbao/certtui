@@ -1,5 +1,8 @@
 //! Infrastructure layer: adapters implementing the application ports.
 
+/// Atomic file writes for exports.
+pub mod atomic_write;
+
 pub mod clock;
 
 /// Which destinations a certificate-supplied URL may reach (SSRF guard).
@@ -10,6 +13,9 @@ pub mod http;
 
 /// OCSP and CRL wire formats: the `RevocationProtocol` adapter.
 pub mod revocation;
+
+/// PKCS#12 and JKS keystore readers (certificates only).
+pub mod keystore;
 
 /// Local filesystem and standard-input source adapters.
 pub mod source;
