@@ -89,6 +89,14 @@ impl ReqwestHttpFetcher {
     /// ANY address is blocked (the proxy may pick any of them). A name this
     /// machine cannot resolve is left to the proxy, which may know internal
     /// names that only it can see. Runs on every hop, redirects included.
+    ///
+    /// This is a best-effort check, not a guarantee: a lookup that fails here
+    /// is allowed (fail-open) because a proxy-only network often cannot
+    /// resolve public names locally, and a DNS answer can change between this
+    /// lookup and the proxy's own (rebinding). Pinning the vetted address
+    /// would break TLS name checks on `https` URLs. Where internal
+    /// destinations must be unreachable, enforce egress filtering at the
+    /// proxy.
     async fn check_proxied_destination(&self, url: &Url) -> Result<(), HttpError> {
         let Some(host) = url.host_str() else {
             return Ok(());
