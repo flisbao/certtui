@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{CertOrigin, Chain, LoadNote, TrustVerdict};
@@ -10,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::LoadError;
 use crate::fetch::{FetchError, FetchRequest, FetchedChain};
+use crate::http::HttpError;
 use crate::trust::{TrustAnchors, TrustError, TrustSource};
 
 /// Source of the current time.
@@ -141,4 +143,43 @@ pub trait ChainVerifier: Send + Sync {
         hostname: Option<&str>,
         now: Timestamp,
     ) -> ChainVerification;
+}
+
+/// Plain HTTP(S) transport for OCSP, CRL and AIA downloads.
+///
+/// Object safe. URLs come from certificate extensions, so they are hostile:
+/// implementations accept only `http` and `https`, refuse credentials,
+/// whitespace and control characters, follow a bounded number of redirects
+/// without ever downgrading from `https` to `http`, and enforce `max_bytes`
+/// while the body streams in (never after buffering it whole).
+#[async_trait::async_trait]
+pub trait HttpFetcher: Send + Sync {
+    /// Fetches `url` with a GET, reading at most `max_bytes` of body and
+    /// finishing, redirects and body included, within `timeout`.
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError`] when the URL is unacceptable, a limit is exceeded, the
+    /// status is not a success, or the transport fails.
+    async fn get(
+        &self,
+        url: &str,
+        max_bytes: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, HttpError>;
+
+    /// Sends `body` to `url` with a POST of the given `content_type`, under
+    /// the same limits as [`get`](Self::get).
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError`], as for [`get`](Self::get).
+    async fn post(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: Vec<u8>,
+        max_bytes: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, HttpError>;
 }

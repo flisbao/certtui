@@ -6,6 +6,8 @@ pub mod error;
 
 pub mod fetch;
 
+pub mod http;
+
 pub mod inspect;
 
 pub mod inspect_network;

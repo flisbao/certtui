@@ -2,6 +2,9 @@
 
 pub mod clock;
 
+/// Capped HTTP(S) fetching for OCSP, CRL and AIA: the `HttpFetcher` adapter.
+pub mod http;
+
 /// Local filesystem and standard-input source adapters.
 pub mod source;
 
