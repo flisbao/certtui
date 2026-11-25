@@ -22,7 +22,8 @@ Plataformas dos binários: Linux x86_64 e aarch64 (musl, estáticos), macOS x86_
 e aarch64 e Windows x86_64.
 
 > **Os binários Linux (musl) são compilados sem o clipboard nativo.** Neles a
-> cópia funciona só por **OSC 52** (veja [Clipboard](#clipboard)). Para ter o
+> cópia funciona só por **OSC 52** (veja [Clipboard](#clipboard)). Isto vale
+> também para o Homebrew no Linux, que instala o mesmo binário musl. Para ter o
 > clipboard nativo no Linux, instale com `cargo install certtui --locked` (a
 > feature `native-clipboard` vem ligada por padrão). Nos binários musl,
 > `ui.clipboard` com `native` é erro de configuração (exit 2).
@@ -229,7 +230,7 @@ head -n 1 "${TMPDIR:-/tmp}/cadeia.pem"
 }
 ```
 
-O TUI usa teclas vim e setas (`j`/`k`, `h`/`l`/`Tab`, `[`/`]` troca de aba, `/`
+O TUI usa teclas vim e setas (`j`/`k`; `h`/`l`/`Tab` troca de painel; `[`/`]` troca de aba; `/`
 filtra no batch, `o` novo alvo, `e` exportar, `?` ajuda, `q` sai). A ajuda `?`
 sempre mostra as teclas em vigor; o mapa é remapeável em `ui.keymap`. Os temas
 são `dark`, `light` e `mono`; `NO_COLOR` é respeitado e o mouse vem desligado.

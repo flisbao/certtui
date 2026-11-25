@@ -17,6 +17,10 @@
 //! pipes such as `cat file | certtui inspect -` work as written), must exit 0
 //! and its stdout must contain every `expect` line. The test also fails when
 //! the README has too few marked blocks, so it cannot pass vacuously.
+//!
+//! Fixture expiry: the leaf of `tests/fixtures/chain-3.pem`
+//! expires on 2031-11-22. The README `--ca-only` example and other tests depend
+//! on it, so regenerate the fixtures before ~2031-10.
 
 // Justificativa: an integration-test crate; its helpers (outside `#[test]`
 // fns) may unwrap and panic, which is what a failing test should do.
@@ -28,7 +32,7 @@ use std::time::Duration;
 use assert_cmd::Command;
 
 /// At least this many marked blocks must exist and run.
-const MIN_BLOCKS: usize = 6;
+const MIN_BLOCKS: usize = 9;
 
 /// Marker line that announces an executable example.
 const MARKER: &str = "<!-- test -->";
