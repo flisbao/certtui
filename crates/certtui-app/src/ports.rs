@@ -154,6 +154,12 @@ pub trait ChainVerifier: Send + Sync {
 /// while the body streams in (never after buffering it whole).
 #[async_trait::async_trait]
 pub trait HttpFetcher: Send + Sync {
+    /// Lifts (`true`) or restores (`false`) the refusal of internal
+    /// destinations (loopback, link-local, cloud metadata). The default is
+    /// refusal; the call is `--allow-internal-urls`. Implementations that
+    /// have no such policy ignore it.
+    fn allow_internal_urls(&self, _allow: bool) {}
+
     /// Fetches `url` with a GET, reading at most `max_bytes` of body and
     /// finishing, redirects and body included, within `timeout`.
     ///

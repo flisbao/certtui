@@ -19,8 +19,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const LIMIT: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Local servers live on loopback, which the default policy refuses.
 fn fetcher() -> ReqwestHttpFetcher {
-    ReqwestHttpFetcher::new(3)
+    ReqwestHttpFetcher::new(3).with_internal_allowed(true)
 }
 
 /// Reads the request head so the raw servers below answer like HTTP servers.
@@ -248,4 +249,57 @@ async fn quando_url_tem_espaco_ou_credenciais_deve_dar_invalid_url() {
         let got = fetcher().get(url, LIMIT, TIMEOUT).await;
         assert!(matches!(got, Err(HttpError::InvalidUrl(_))), "{url}");
     }
+}
+
+#[tokio::test]
+async fn quando_politica_padrao_deve_recusar_ip_literal_interno_sem_conectar() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    // `server.uri()` is `http://127.0.0.1:<port>`.
+    let got = ReqwestHttpFetcher::new(3)
+        .get(&server.uri(), LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(got, Err(HttpError::DisallowedDestination));
+}
+
+#[tokio::test]
+async fn quando_politica_padrao_deve_recusar_nome_que_resolve_para_loopback() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let port = server.address().port();
+
+    let got = ReqwestHttpFetcher::new(3)
+        .get(&format!("http://localhost:{port}/"), LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(got, Err(HttpError::DisallowedDestination));
+}
+
+#[tokio::test]
+async fn quando_flag_libera_urls_internas_deve_conectar_em_loopback_por_nome_e_por_ip() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1]))
+        .mount(&server)
+        .await;
+    let port = server.address().port();
+    let fetcher = ReqwestHttpFetcher::new(3);
+    fetcher.allow_internal_urls(true);
+
+    let by_ip = fetcher.get(&server.uri(), LIMIT, TIMEOUT).await;
+    let by_name = fetcher
+        .get(&format!("http://localhost:{port}/"), LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(by_ip, Ok(vec![1]));
+    assert_eq!(by_name, Ok(vec![1]));
 }

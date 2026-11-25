@@ -24,6 +24,9 @@ pub struct RevocationOptions {
     pub scope: RevocationScope,
     /// Download missing issuers from AIA.
     pub aia: bool,
+    /// Let certificate-supplied URLs reach loopback, link-local and cloud
+    /// metadata addresses (`--allow-internal-urls`); refused by default.
+    pub allow_internal_urls: bool,
 }
 
 impl Default for RevocationOptions {
@@ -32,6 +35,7 @@ impl Default for RevocationOptions {
         Self {
             scope: RevocationScope::Leaf,
             aia: false,
+            allow_internal_urls: false,
         }
     }
 }
@@ -104,6 +108,7 @@ impl ReportEnricher for NetworkEnricher {
         cancel: CancellationToken,
     ) -> InspectionReport {
         let mut report = report;
+        self.http.allow_internal_urls(options.allow_internal_urls);
         if options.aia {
             let (chain, _urls) = chase_aia(
                 self.http.as_ref(),
@@ -219,7 +224,11 @@ mod tests {
     }
 
     fn options(scope: RevocationScope, aia: bool) -> RevocationOptions {
-        RevocationOptions { scope, aia }
+        RevocationOptions {
+            scope,
+            aia,
+            allow_internal_urls: false,
+        }
     }
 
     #[tokio::test]
@@ -361,5 +370,6 @@ mod tests {
         let defaults = RevocationOptions::default();
         assert_eq!(defaults.scope, RevocationScope::Leaf);
         assert!(!defaults.aia);
+        assert!(!defaults.allow_internal_urls);
     }
 }

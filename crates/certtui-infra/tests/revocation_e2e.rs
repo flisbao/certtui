@@ -97,7 +97,7 @@ fn chain(leaf: &[u8]) -> Chain {
 
 async fn check(server: &MockServer, leaf: &[u8], staple: Option<&[u8]>) -> RevocationOutcome {
     let http = Rewrite {
-        inner: ReqwestHttpFetcher::new(3),
+        inner: ReqwestHttpFetcher::new(3).with_internal_allowed(true),
         base: server.uri(),
     };
     let service = RevocationService::new(
@@ -333,7 +333,7 @@ async fn quando_servidor_nao_responde_a_tempo_deve_dar_unknown_dentro_do_timeout
         .mount(&server)
         .await;
     let http = Rewrite {
-        inner: ReqwestHttpFetcher::new(3),
+        inner: ReqwestHttpFetcher::new(3).with_internal_allowed(true),
         base: server.uri(),
     };
     let limits = Limits {
