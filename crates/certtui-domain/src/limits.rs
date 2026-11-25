@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One kibibyte (1024 bytes).
 const KIB: usize = 1024;
@@ -270,7 +270,7 @@ impl Default for Limits {
 ///
 /// Field names match [`Limits`]; timeouts carry a `_secs` suffix and are
 /// expressed in whole seconds. Unknown fields are rejected on deserialization.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsOverrides {
     /// Override for [`Limits::max_cert_der_bytes`].

@@ -10,6 +10,8 @@ mod cancel;
 
 pub mod check;
 
+pub mod config;
+
 pub mod enrich;
 
 pub mod error;
