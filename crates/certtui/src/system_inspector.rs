@@ -14,7 +14,6 @@ use certtui_app::ports::{ChainFetcher, ChainVerifier, Clock, SourceLoader, Trust
 use certtui_app::trust::TrustAnchors;
 use certtui_app::validate::known_issuers;
 use certtui_domain::limits::Limits;
-use certtui_domain::lint::Thresholds;
 use certtui_domain::model::InspectionReport;
 use certtui_domain::target::{NetworkTarget, Target};
 use certtui_infra::clock::SystemClock;
@@ -27,7 +26,6 @@ use crate::cli::validate_for_target;
 use certtui_tui::InspectFailure;
 
 use crate::command_executor::Inspector;
-use crate::network_args::with_timeout;
 use crate::output::single_line;
 use crate::target_parse::local_source;
 use crate::tui_launch::InspectorOptions;
@@ -106,11 +104,7 @@ impl SystemInspector {
     }
 
     fn limits(&self) -> Limits {
-        self.options
-            .timeout
-            .map_or_else(Limits::default, |timeout| {
-                with_timeout(&Limits::default(), timeout)
-            })
+        self.options.limits
     }
 }
 
@@ -170,7 +164,7 @@ impl Inspector for SystemInspector {
             self.verifier.as_ref(),
             &anchors,
             self.clock.as_ref(),
-            Thresholds::default(),
+            self.options.thresholds,
             self.options.host_check.as_deref(),
         ))
     }

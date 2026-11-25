@@ -22,11 +22,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Env, FailOnArg, NetworkOptions, TrustOptions, inspector_options, load_anchors, usage,
-    validate_for_target,
+    Env, FailOnArg, NetworkOptions, TrustOptions, inspector_options, load_anchors, to_thresholds,
+    usage, validate_for_target,
 };
 use crate::exit_code::ExitCode;
-use crate::network_args::with_timeout;
 use crate::output;
 use crate::runtime;
 use crate::tui_launch::TuiRequest;
@@ -49,9 +48,10 @@ pub struct BatchArgs {
     /// CSV, one line per target.
     #[arg(long, conflicts_with = "json")]
     pub csv: bool,
-    /// Lowest severity of a finding that makes the command exit 1.
-    #[arg(long, value_enum, default_value_t)]
-    pub fail_on: FailOnArg,
+    /// Lowest severity of a finding that makes the command exit 1 (default
+    /// `error`).
+    #[arg(long, value_enum)]
+    pub fail_on: Option<FailOnArg>,
 }
 
 /// Runs `certtui batch`.
@@ -75,11 +75,7 @@ pub fn run(
         );
         return usage(err, &message);
     }
-    let limits = network_options
-        .timeout
-        .map_or_else(Limits::default, |timeout| {
-            with_timeout(&Limits::default(), timeout)
-        });
+    let limits = network_options.limits;
     let concurrency = match concurrency(args.concurrency, &limits, err)? {
         Ok(concurrency) => concurrency,
         Err(code) => return Ok(code),
@@ -121,6 +117,7 @@ pub fn run(
             batch: Some(input.targets),
             batch_concurrency: args.concurrency.map(|_| concurrency),
             options: inspector_options(network_options, trust_options),
+            ui: trust_options.ui.clone(),
         })?;
         return Ok(ExitCode::Ok);
     }
@@ -135,7 +132,7 @@ pub fn run(
         enricher: env.enricher,
         anchors: &anchors,
         issuers: known_issuers(&anchors),
-        thresholds: Thresholds::default(),
+        thresholds: to_thresholds(&trust_options.thresholds),
         host_check: trust_options.host_check.as_deref(),
         revocation: trust_options.revocation,
         limits,
@@ -156,7 +153,11 @@ pub fn run(
         output::batch::write_json(out, &rows, &input.skipped)
     }
     .context("writing the output")?;
-    Ok(exit_code_of(&rows, args.fail_on.into()))
+    Ok(exit_code_of(
+        &rows,
+        args.fail_on
+            .map_or(trust_options.thresholds.fail_on, Into::into),
+    ))
 }
 
 /// The number of workers: the request or the default, cut to the hard cap

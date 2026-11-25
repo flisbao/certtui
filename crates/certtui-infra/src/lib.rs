@@ -5,6 +5,15 @@ pub mod atomic_write;
 
 pub mod clock;
 
+/// Reading the configuration file.
+pub mod config;
+
+/// The environment variables the adapters read.
+pub mod env;
+
+/// Where the configuration and the history live.
+pub mod paths;
+
 /// Which destinations a certificate-supplied URL may reach (SSRF guard).
 pub mod destination;
 

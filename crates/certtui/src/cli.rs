@@ -2,10 +2,14 @@
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use certtui_app::check::FailOn;
+use certtui_app::config::{
+    CliOverrides, Config, ConfigError, FingerprintFormatConfig, ResolvedConfig, RevocationMode,
+    ThresholdsConfig, UiConfig,
+};
 use certtui_app::enrich::{ReportEnricher, RevocationOptions};
 use certtui_app::error::{InspectError, LoadError};
 use certtui_app::export::{
@@ -24,11 +28,12 @@ use certtui_domain::limits::Limits;
 use certtui_domain::lint::Thresholds;
 use certtui_domain::model::{FingerprintFormat, InspectionReport, LoadNote};
 use certtui_domain::target::{NetworkTarget, Target};
+use certtui_tui::clipboard::ClipboardStrategy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
 
 use crate::exit_code::ExitCode;
-use crate::network_args::{ConnectTo, parse_connect_to, parse_sni, parse_timeout, with_timeout};
+use crate::network_args::{ConnectTo, parse_connect_to, parse_sni, parse_timeout};
 use crate::output::check::TargetResult;
 use crate::output::field::Field;
 use crate::output::{self, View};
@@ -48,6 +53,10 @@ pub struct Cli {
     /// What to do. Without a command, the interactive UI opens.
     #[command(subcommand)]
     pub command: Option<Command>,
+    /// Configuration file; `$CERTTUI_CONFIG` takes precedence over it. Without
+    /// either, `~/.config/certtui/config.json` is read if it exists.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     /// Server name to send in SNI instead of the host (network targets only).
     /// An IP literal sends no SNI.
     #[arg(long, global = true, value_name = "NAME")]
@@ -239,9 +248,10 @@ pub struct CheckArgs {
     /// servers, as for `inspect`.
     #[arg(required = true)]
     pub targets: Vec<String>,
-    /// Lowest severity of a finding that makes the command exit 1.
-    #[arg(long, value_enum, default_value_t)]
-    pub fail_on: FailOnArg,
+    /// Lowest severity of a finding that makes the command exit 1 (default
+    /// `error`).
+    #[arg(long, value_enum)]
+    pub fail_on: Option<FailOnArg>,
     /// Warn when a certificate expires within this many days (default 30).
     #[arg(long, value_name = "N")]
     pub warn_days: Option<u32>,
@@ -282,6 +292,25 @@ impl From<FingerprintFormatArg> for FingerprintFormat {
     }
 }
 
+impl From<FingerprintFormatArg> for FingerprintFormatConfig {
+    fn from(arg: FingerprintFormatArg) -> Self {
+        match arg {
+            FingerprintFormatArg::Colon => FingerprintFormatConfig::Colon,
+            FingerprintFormatArg::Hex => FingerprintFormatConfig::Hex,
+            FingerprintFormatArg::Base64 => FingerprintFormatConfig::Base64,
+        }
+    }
+}
+
+/// The display format a configuration value names.
+fn fingerprint_format_of(config: FingerprintFormatConfig) -> FingerprintFormat {
+    match config {
+        FingerprintFormatConfig::Colon => FingerprintFormat::ColonHexUpper,
+        FingerprintFormatConfig::Hex => FingerprintFormat::HexLower,
+        FingerprintFormatConfig::Base64 => FingerprintFormat::Base64,
+    }
+}
+
 /// Arguments of `certtui inspect`.
 #[allow(clippy::struct_excessive_bools)]
 // Justificativa: the CLI contract is a set of independent boolean flags.
@@ -305,9 +334,9 @@ pub struct InspectArgs {
     /// Print only the value of one field of the certificate, no decoration.
     #[arg(long, value_name = "FIELD", value_enum)]
     pub field: Option<Field>,
-    /// How to display fingerprints.
-    #[arg(long, value_enum, default_value_t)]
-    pub fingerprint_format: FingerprintFormatArg,
+    /// How to display fingerprints (default `colon`).
+    #[arg(long, value_enum)]
+    pub fingerprint_format: Option<FingerprintFormatArg>,
     /// Treat the target as a file even if it looks like a host name.
     #[arg(long)]
     pub file: bool,
@@ -323,7 +352,10 @@ pub struct InspectArgs {
 struct NetworkOptions {
     sni: Option<String>,
     connect_to: Option<ConnectTo>,
+    /// `--timeout`, kept to tell that the flag was given.
     timeout: Option<std::time::Duration>,
+    /// The limits of the run: defaults, then the config, then `--timeout`.
+    limits: Limits,
 }
 
 impl NetworkOptions {
@@ -359,6 +391,8 @@ pub struct Env<'a> {
     pub writer: &'a dyn FileWriter,
     /// AIA chasing and revocation, between gathering and validating.
     pub enricher: &'a dyn ReportEnricher,
+    /// Loads the configuration file; the argument is `--config`.
+    pub config: &'a dyn Fn(Option<&Path>) -> Result<Config, ConfigError>,
 }
 
 /// Trust-related options shared by every command.
@@ -371,6 +405,12 @@ struct TrustOptions {
     revocation: RevocationOptions,
     /// The keystore password, when one was given.
     password: Option<SecretString>,
+    /// Expiry thresholds and the failure policy: config, then flags.
+    thresholds: ThresholdsConfig,
+    /// How fingerprints are displayed unless `--fingerprint-format` says.
+    fingerprint_format: FingerprintFormat,
+    /// Interface settings, for the TUI.
+    ui: UiConfig,
 }
 
 /// Loads the anchors of `options`, reporting warnings on `err`; a failure is
@@ -508,55 +548,45 @@ pub fn run(
             return code;
         }
     };
+    let resolved = match load_settings(&cli, env, err)? {
+        Ok(resolved) => resolved,
+        Err(code) => return Ok(code),
+    };
     let network_options = match cli.sni.as_deref().map(parse_sni).transpose() {
         Ok(sni) => NetworkOptions {
             sni,
             connect_to: cli.connect_to,
             timeout: cli.timeout,
+            limits: resolved.limits,
         },
         Err(message) => return usage(err, &format!("--sni: {message}")),
     };
-    let password_source = match (
-        cli.password_env.clone(),
-        cli.password_file.clone(),
-        cli.password_stdin,
-    ) {
-        (Some(name), _, _) => Some(PasswordSource::Env(name)),
-        (None, Some(path), _) => Some(PasswordSource::File(path)),
-        (None, None, true) => Some(PasswordSource::Stdin),
-        (None, None, false) => None,
-    };
-    if password_source == Some(PasswordSource::Stdin) && reads_stdin_target(cli.command.as_ref()) {
-        return usage(
-            err,
-            "--password-stdin cannot be combined with the target `-`: both read standard input; \
-             use --password-env or --password-file for the password",
-        );
-    }
-    let password = match resolve_password(
-        password_source.as_ref(),
-        &mut std::io::stdin().lock(),
-        &|name| std::env::var(name).ok(),
-    ) {
+    let password = match read_password(&cli, err)? {
         Ok(password) => password,
-        Err(error) => return usage(err, &error.to_string()),
+        Err(code) => return Ok(code),
     };
     env.loader.set_password(password.clone());
-    let sources: Vec<TrustSource> = cli.trust.iter().copied().map(TrustSource::from).collect();
     let trust_options = TrustOptions {
-        sources: resolve_sources(&sources, !cli.ca_file.is_empty(), cli.ca_only),
-        ca_files: cli.ca_file,
+        sources: resolve_sources(
+            &resolved.trust_sources,
+            !resolved.ca_files.is_empty(),
+            cli.ca_only,
+        ),
+        ca_files: resolved.ca_files,
         host_check: cli.host_check,
         revocation: RevocationOptions {
-            scope: match (cli.no_revocation, cli.revocation) {
-                (true, _) => RevocationScope::Off,
-                (false, Some(RevocationArg::Full)) => RevocationScope::Full,
-                (false, Some(RevocationArg::Leaf) | None) => RevocationScope::Leaf,
+            scope: match resolved.revocation {
+                RevocationMode::Off => RevocationScope::Off,
+                RevocationMode::Full => RevocationScope::Full,
+                RevocationMode::Leaf => RevocationScope::Leaf,
             },
-            aia: cli.aia,
+            aia: resolved.aia,
             allow_internal_urls: cli.allow_internal_urls,
         },
         password,
+        thresholds: resolved.thresholds,
+        fingerprint_format: fingerprint_format_of(resolved.ui.fingerprint_format),
+        ui: resolved.ui,
     };
     match cli.command {
         Some(Command::Inspect(inspect_args)) => inspect(
@@ -592,6 +622,105 @@ pub fn run(
         },
         None => open_tui(None, &network_options, &trust_options, env, out, err),
     }
+}
+
+/// The keystore password the command line asks for, or the exit code of a
+/// usage error.
+fn read_password(
+    cli: &Cli,
+    err: &mut dyn Write,
+) -> anyhow::Result<Result<Option<SecretString>, ExitCode>> {
+    let password_source = match (
+        cli.password_env.clone(),
+        cli.password_file.clone(),
+        cli.password_stdin,
+    ) {
+        (Some(name), _, _) => Some(PasswordSource::Env(name)),
+        (None, Some(path), _) => Some(PasswordSource::File(path)),
+        (None, None, true) => Some(PasswordSource::Stdin),
+        (None, None, false) => None,
+    };
+    if password_source == Some(PasswordSource::Stdin) && reads_stdin_target(cli.command.as_ref()) {
+        return usage(
+            err,
+            "--password-stdin cannot be combined with the target `-`: both read standard input; \
+             use --password-env or --password-file for the password",
+        )
+        .map(Err);
+    }
+    match resolve_password(
+        password_source.as_ref(),
+        &mut std::io::stdin().lock(),
+        &|name| std::env::var(name).ok(),
+    ) {
+        Ok(password) => Ok(Ok(password)),
+        Err(error) => usage(err, &error.to_string()).map(Err),
+    }
+}
+
+/// The configuration file merged with the command line, or the exit code of
+/// a configuration that cannot be used.
+fn load_settings(
+    cli: &Cli,
+    env: &Env<'_>,
+    err: &mut dyn Write,
+) -> anyhow::Result<Result<ResolvedConfig, ExitCode>> {
+    let config = match (env.config)(cli.config.as_deref()) {
+        Ok(config) => config,
+        Err(error) => return config_error(err, &error).map(Err),
+    };
+    let resolved = match config.resolve(&overrides_from(cli)) {
+        Ok(resolved) => resolved,
+        Err(error) => return config_error(err, &error).map(Err),
+    };
+    if let Err(error) = resolved
+        .ui
+        .clipboard
+        .parse::<ClipboardStrategy>()
+        .and_then(ClipboardStrategy::check_supported)
+    {
+        return usage(err, &format!("ui.clipboard: {error}")).map(Err);
+    }
+    Ok(Ok(resolved))
+}
+
+/// The settings the command line gives; they win over the config file.
+fn overrides_from(cli: &Cli) -> CliOverrides {
+    let (warn_days, critical_days, fail_on) = match &cli.command {
+        Some(Command::Check(args)) => (
+            args.warn_days,
+            args.critical_days,
+            args.fail_on.map(FailOn::from),
+        ),
+        Some(Command::Batch(args)) => (None, None, args.fail_on.map(FailOn::from)),
+        _ => (None, None, None),
+    };
+    let fingerprint_format = match &cli.command {
+        Some(Command::Inspect(args)) => args.fingerprint_format.map(Into::into),
+        _ => None,
+    };
+    CliOverrides {
+        trust_sources: cli.trust.iter().copied().map(TrustSource::from).collect(),
+        ca_files: cli.ca_file.clone(),
+        warn_days,
+        critical_days,
+        fail_on,
+        timeout_secs: cli.timeout.map(|timeout| timeout.as_secs()),
+        aia: cli.aia.then_some(true),
+        revocation: match (cli.no_revocation, cli.revocation) {
+            (true, _) => Some(RevocationMode::Off),
+            (false, Some(RevocationArg::Full)) => Some(RevocationMode::Full),
+            (false, Some(RevocationArg::Leaf)) => Some(RevocationMode::Leaf),
+            (false, None) => None,
+        },
+        fingerprint_format,
+        ..CliOverrides::default()
+    }
+}
+
+/// A configuration that cannot be used is a usage error (exit 2).
+fn config_error(err: &mut dyn Write, error: &ConfigError) -> anyhow::Result<ExitCode> {
+    usage(err, &output::single_line(&error.to_string()))
 }
 
 /// Whether the command names `-` (standard input) as a target.
@@ -637,7 +766,7 @@ fn open_tui(
             pem: false,
             index: None,
             field: None,
-            fingerprint_format: FingerprintFormatArg::default(),
+            fingerprint_format: None,
             file: false,
             recursive: false,
             no_color: false,
@@ -657,7 +786,10 @@ fn open_tui(
     // Standard input is read whole before the terminal enters raw mode: the
     // keys then come from the terminal device, and a pipe never blocks them.
     let stdin = if matches!(target, Some(Target::Stdin)) {
-        match env.loader.load(&LocalSource::Stdin, &Limits::default()) {
+        match env
+            .loader
+            .load(&LocalSource::Stdin, &network_options.limits)
+        {
             Ok(loaded) => Some(loaded),
             Err(error) => return load_failure(err, &error),
         }
@@ -670,6 +802,7 @@ fn open_tui(
         batch: None,
         batch_concurrency: None,
         options: inspector_options(network_options, trust_options),
+        ui: trust_options.ui.clone(),
     };
     env.tui.launch(request)?;
     Ok(ExitCode::Ok)
@@ -683,7 +816,8 @@ fn inspector_options(
     InspectorOptions {
         sni: network_options.sni.clone(),
         connect_to: network_options.connect_to,
-        timeout: network_options.timeout,
+        limits: network_options.limits,
+        thresholds: to_thresholds(&trust_options.thresholds),
         trust_sources: trust_options.sources.clone(),
         ca_files: trust_options.ca_files.clone(),
         host_check: trust_options.host_check.clone(),
@@ -717,7 +851,7 @@ fn inspect(
     let report = Validation {
         env,
         anchors: &anchors,
-        thresholds: Thresholds::default(),
+        thresholds: to_thresholds(&trust_options.thresholds),
         host_check: trust_options.host_check.as_deref(),
         revocation: trust_options.revocation,
     }
@@ -742,7 +876,9 @@ fn inspect(
     let view = View {
         report: &report,
         only,
-        fingerprint_format: args.fingerprint_format.into(),
+        fingerprint_format: args
+            .fingerprint_format
+            .map_or(trust_options.fingerprint_format, Into::into),
     };
     render(mode, &view, out, err)?;
     Ok(ExitCode::Ok)
@@ -787,7 +923,7 @@ fn export(
         Validation {
             env,
             anchors: &anchors,
-            thresholds: Thresholds::default(),
+            thresholds: to_thresholds(&trust_options.thresholds),
             host_check: trust_options.host_check.as_deref(),
             revocation: trust_options.revocation,
         }
@@ -845,7 +981,7 @@ fn check(
             Err(error) => return usage(err, &error.to_string()),
         }
     }
-    let thresholds = match thresholds(args) {
+    let thresholds = match thresholds(args, &trust_options.thresholds) {
         Ok(thresholds) => thresholds,
         Err(message) => return usage(err, &message),
     };
@@ -890,7 +1026,11 @@ fn check(
         output::check::write_text(out, &results)
     }
     .context("writing the output")?;
-    Ok(exit_code_of(&results, args.fail_on.into()))
+    Ok(exit_code_of(
+        &results,
+        args.fail_on
+            .map_or(trust_options.thresholds.fail_on, Into::into),
+    ))
 }
 
 /// Writes a captured failure on `err`, each line attributed to `target`, and
@@ -928,20 +1068,35 @@ fn exit_code_of(results: &[TargetResult<'_>], fail_on: FailOn) -> ExitCode {
     }
 }
 
-fn thresholds(args: &CheckArgs) -> Result<Thresholds, String> {
-    let defaults = Thresholds::default();
-    let warn_days = args.warn_days.unwrap_or(defaults.warn_days);
-    let critical_days = args.critical_days.unwrap_or(defaults.critical_days);
-    if critical_days > warn_days {
-        return Err(format!(
-            "--critical-days ({critical_days}) must not exceed --warn-days ({warn_days})"
-        ));
-    }
-    Ok(Thresholds {
+/// The thresholds of a `check`: the config and the flags are already merged
+/// in `merged`; only their consistency is checked here.
+fn thresholds(args: &CheckArgs, merged: &ThresholdsConfig) -> Result<Thresholds, String> {
+    let ThresholdsConfig {
         warn_days,
         critical_days,
-        ..defaults
-    })
+        ..
+    } = *merged;
+    if critical_days > warn_days {
+        let from_flags = args.warn_days.is_some() || args.critical_days.is_some();
+        return Err(if from_flags {
+            format!("--critical-days ({critical_days}) must not exceed --warn-days ({warn_days})")
+        } else {
+            format!(
+                "thresholds.critical_days ({critical_days}) must not exceed \
+                 thresholds.warn_days ({warn_days})"
+            )
+        });
+    }
+    Ok(to_thresholds(merged))
+}
+
+/// The lint thresholds of the configuration.
+pub(crate) fn to_thresholds(config: &ThresholdsConfig) -> Thresholds {
+    Thresholds {
+        warn_days: config.warn_days,
+        critical_days: config.critical_days,
+        ..Thresholds::default()
+    }
 }
 
 /// The report of `target`, or the exit code of a failure already reported on
@@ -972,7 +1127,7 @@ fn gather_local(
     }
     let source = local_source(&target)
         .ok_or_else(|| anyhow::anyhow!("a network target reached the local loader"))?;
-    match inspect_local(env.loader, &source, target, &Limits::default()) {
+    match inspect_local(env.loader, &source, target, &network_options.limits) {
         Ok(report) => Ok(Ok(report)),
         Err(error) => load_failure(err, &error).map(Err),
     }
@@ -984,11 +1139,7 @@ fn gather_network(
     parsed: NetworkTarget,
     err: &mut dyn Write,
 ) -> anyhow::Result<Result<InspectionReport, ExitCode>> {
-    let limits = network_options
-        .timeout
-        .map_or_else(Limits::default, |timeout| {
-            with_timeout(&Limits::default(), timeout)
-        });
+    let limits = network_options.limits;
     let target = NetworkTarget {
         sni: network_options.sni.clone(),
         connect_to: network_options.connect_to.map(|connect_to| {
@@ -1235,6 +1386,7 @@ mod tests {
             tui: launcher,
             writer,
             enricher,
+            config: &|_| Ok(Config::default()),
         };
         let mut out = Vec::new();
         let mut err = Vec::new();

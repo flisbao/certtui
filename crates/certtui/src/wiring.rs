@@ -2,14 +2,17 @@
 
 use std::io::{self, Write};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use certtui_app::config::{Config, ConfigError, ConfigRepository};
 use certtui_app::ports::{SourceLoader, TrustStoreProvider};
 use certtui_domain::limits::Limits;
 use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
 use certtui_infra::clock::SystemClock;
+use certtui_infra::config::FileConfigRepository;
+use certtui_infra::env::EnvVars;
 use certtui_infra::source::FsSourceLoader;
 use certtui_infra::tls::RustlsChainFetcher;
 use certtui_infra::trust::NativeTrustProvider;
@@ -37,6 +40,9 @@ pub fn run_process() -> std::process::ExitCode {
             Limits::default(),
         ))
     };
+    let config = |flag: Option<&Path>| -> Result<Config, ConfigError> {
+        FileConfigRepository::new(flag.map(Path::to_owned), EnvVars::from_process()).load()
+    };
     let env = cli::Env {
         loader: loader.as_ref(),
         fetcher: &fetcher,
@@ -46,6 +52,7 @@ pub fn run_process() -> std::process::ExitCode {
         tui: &ProcessLauncher,
         writer: &AtomicFileWriter,
         enricher: &enricher,
+        config: &config,
     };
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();

@@ -23,6 +23,8 @@ pub enum ClipboardStrategy {
     Native,
     /// OSC 52, then the native clipboard.
     Osc52ThenNative,
+    /// The native clipboard, then OSC 52.
+    NativeThenOsc52,
     /// Copying is disabled.
     Off,
 }
@@ -31,11 +33,32 @@ pub enum ClipboardStrategy {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ClipboardConfigError {
     /// The value is not one of the known strategies.
-    #[error("unknown clipboard strategy `{0}`; use auto, osc52, native, osc52,native or off")]
+    #[error(
+        "unknown clipboard strategy `{0}`; use auto, osc52, native, osc52,native, native,osc52 or off"
+    )]
     Unknown(String),
     /// The strategy needs the native clipboard, which this build lacks.
     #[error("the native clipboard is not compiled in; rebuild with the `native-clipboard` feature")]
     NativeNotCompiled,
+}
+
+impl ClipboardStrategy {
+    /// Whether this build can honor the strategy.
+    ///
+    /// # Errors
+    ///
+    /// [`ClipboardConfigError::NativeNotCompiled`] when the strategy names the
+    /// native clipboard and the build lacks it. `Auto` just skips it.
+    pub fn check_supported(self) -> Result<(), ClipboardConfigError> {
+        let needs_native = matches!(
+            self,
+            Self::Native | Self::Osc52ThenNative | Self::NativeThenOsc52
+        );
+        if needs_native && !NATIVE_COMPILED {
+            return Err(ClipboardConfigError::NativeNotCompiled);
+        }
+        Ok(())
+    }
 }
 
 impl FromStr for ClipboardStrategy {
@@ -47,6 +70,7 @@ impl FromStr for ClipboardStrategy {
             "osc52" => Ok(Self::Osc52),
             "native" => Ok(Self::Native),
             "osc52,native" => Ok(Self::Osc52ThenNative),
+            "native,osc52" => Ok(Self::NativeThenOsc52),
             "off" => Ok(Self::Off),
             other => Err(ClipboardConfigError::Unknown(
                 other.chars().take(40).collect(),
@@ -110,20 +134,16 @@ pub fn plan_methods(
     strategy: ClipboardStrategy,
     env: &EnvView,
 ) -> Result<Vec<CopyMethod>, ClipboardConfigError> {
-    let needs_native = matches!(
-        strategy,
-        ClipboardStrategy::Native | ClipboardStrategy::Osc52ThenNative
-    );
-    if needs_native && !NATIVE_COMPILED {
-        return Err(ClipboardConfigError::NativeNotCompiled);
-    }
+    strategy.check_supported()?;
     let mut methods = match strategy {
         ClipboardStrategy::Off => Vec::new(),
         ClipboardStrategy::Osc52 => vec![CopyMethod::Osc52],
         ClipboardStrategy::Native => vec![CopyMethod::Native],
         ClipboardStrategy::Osc52ThenNative => vec![CopyMethod::Osc52, CopyMethod::Native],
         ClipboardStrategy::Auto if env.is_ssh() => vec![CopyMethod::Osc52, CopyMethod::Native],
-        ClipboardStrategy::Auto => vec![CopyMethod::Native, CopyMethod::Osc52],
+        ClipboardStrategy::Auto | ClipboardStrategy::NativeThenOsc52 => {
+            vec![CopyMethod::Native, CopyMethod::Osc52]
+        }
     };
     if !NATIVE_COMPILED {
         methods.retain(|method| *method != CopyMethod::Native);
@@ -247,6 +267,38 @@ mod tests {
             Ok(ClipboardStrategy::Osc52ThenNative)
         );
         assert_eq!("off".parse(), Ok(ClipboardStrategy::Off));
+    }
+
+    #[test]
+    fn quando_estrategia_e_native_depois_osc52_deve_parsear_e_tentar_nessa_ordem() {
+        assert_eq!(
+            "native,osc52".parse(),
+            Ok(ClipboardStrategy::NativeThenOsc52)
+        );
+        if NATIVE_COMPILED {
+            assert_eq!(
+                plan_methods(ClipboardStrategy::NativeThenOsc52, &EnvView::default()),
+                Ok(vec![CopyMethod::Native, CopyMethod::Osc52])
+            );
+        } else {
+            assert_eq!(
+                plan_methods(ClipboardStrategy::NativeThenOsc52, &EnvView::default()),
+                Err(ClipboardConfigError::NativeNotCompiled)
+            );
+        }
+    }
+
+    #[test]
+    fn quando_check_supported_e_native_sem_feature_deve_dar_erro_e_com_feature_ok() {
+        let result = ClipboardStrategy::Native.check_supported();
+        if NATIVE_COMPILED {
+            assert_eq!(result, Ok(()));
+        } else {
+            assert_eq!(result, Err(ClipboardConfigError::NativeNotCompiled));
+        }
+        assert_eq!(ClipboardStrategy::Auto.check_supported(), Ok(()));
+        assert_eq!(ClipboardStrategy::Osc52.check_supported(), Ok(()));
+        assert_eq!(ClipboardStrategy::Off.check_supported(), Ok(()));
     }
 
     #[test]

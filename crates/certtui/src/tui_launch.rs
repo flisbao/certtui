@@ -4,14 +4,15 @@ use std::fs::File;
 use std::io::{self, IsTerminal as _};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
+use certtui_app::config::{Theme, UiConfig};
 use certtui_app::enrich::RevocationOptions;
 use certtui_app::error::LoadError;
 use certtui_app::keystore::SecretString;
 use certtui_app::ports::{LoadedCerts, LocalSource, SourceLoader};
 use certtui_app::trust::TrustSource;
 use certtui_domain::limits::Limits;
+use certtui_domain::lint::Thresholds;
 use certtui_domain::target::{NetworkTarget, Target};
 use certtui_infra::atomic_write::AtomicFileWriter;
 use certtui_infra::chain_verifier::WebpkiChainVerifier;
@@ -35,8 +36,10 @@ pub struct InspectorOptions {
     pub sni: Option<String>,
     /// `--connect-to`.
     pub connect_to: Option<ConnectTo>,
-    /// `--timeout`.
-    pub timeout: Option<Duration>,
+    /// The limits of the run: defaults, config, `--timeout`.
+    pub limits: Limits,
+    /// Expiry thresholds: defaults, config, `--warn-days`.
+    pub thresholds: Thresholds,
     /// Trust sources to validate against.
     pub trust_sources: Vec<TrustSource>,
     /// `--ca-file` paths.
@@ -62,6 +65,8 @@ pub struct TuiRequest {
     pub batch_concurrency: Option<usize>,
     /// The options of the command line.
     pub options: InspectorOptions,
+    /// Interface settings of the configuration.
+    pub ui: UiConfig,
 }
 
 /// Decides whether a terminal is there and opens the TUI on it.
@@ -98,6 +103,7 @@ impl TuiLauncher for ProcessLauncher {
             inner: files,
             stdin: request.stdin,
         });
+        let limits = request.options.limits;
         let inspector = SystemInspector {
             loader,
             fetcher: Arc::new(RustlsChainFetcher::new()),
@@ -107,7 +113,7 @@ impl TuiLauncher for ProcessLauncher {
                 Box::new(NativeTrustProvider::new(
                     ca_files,
                     Arc::clone(&trust_loader),
-                    Limits::default(),
+                    limits,
                 ))
             }),
             enricher: Arc::new(crate::system_inspector::real_enricher()),
@@ -115,6 +121,12 @@ impl TuiLauncher for ProcessLauncher {
             anchors: OnceCell::new(),
         };
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+        // The strategy was checked when the configuration was resolved.
+        let clipboard = request
+            .ui
+            .clipboard
+            .parse::<ClipboardStrategy>()
+            .map_err(|error| anyhow::anyhow!("ui.clipboard: {error}"))?;
         tui_runner::run(
             TuiOptions {
                 initial: request.target,
@@ -123,16 +135,25 @@ impl TuiLauncher for ProcessLauncher {
                 theme: if no_color {
                     ThemeKind::Mono
                 } else {
-                    ThemeKind::Dark
+                    theme_kind(request.ui.theme)
                 },
-                clipboard: ClipboardStrategy::default(),
-                limits: Limits::default(),
+                clipboard,
+                limits,
                 target_parser: parse_for_tui,
                 batch_loader: crate::cli::load_batch_list,
             },
             Arc::new(inspector),
             Arc::new(AtomicFileWriter),
         )
+    }
+}
+
+/// The TUI theme a configuration value names.
+fn theme_kind(theme: Theme) -> ThemeKind {
+    match theme {
+        Theme::Dark => ThemeKind::Dark,
+        Theme::Light => ThemeKind::Light,
+        Theme::Mono => ThemeKind::Mono,
     }
 }
 

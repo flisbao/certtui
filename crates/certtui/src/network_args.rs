@@ -5,7 +5,6 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
-use certtui_domain::limits::Limits;
 use certtui_domain::target_parse::parse_sni as parse_sni_name;
 
 /// The address given to `--connect-to`; the port is optional.
@@ -74,16 +73,6 @@ pub fn parse_timeout(value: &str) -> Result<Duration, String> {
     match value.parse::<u64>() {
         Ok(seconds) if seconds > 0 => Ok(Duration::from_secs(seconds)),
         _ => Err("expected a whole number of seconds, 1 or more".to_owned()),
-    }
-}
-
-/// `limits` with `target_total_timeout` set to `timeout`, never above the
-/// hard cap.
-#[must_use]
-pub fn with_timeout(limits: &Limits, timeout: Duration) -> Limits {
-    Limits {
-        target_total_timeout: timeout.min(Limits::HARD_CAPS.target_total_timeout),
-        ..*limits
     }
 }
 
@@ -157,12 +146,21 @@ mod tests {
 
     #[test]
     fn quando_timeout_passa_do_teto_deve_ser_limitado_ao_hard_cap() {
-        let limits = with_timeout(&Limits::default(), Duration::from_secs(10_000));
+        use certtui_app::config::{CliOverrides, Config};
+        use certtui_domain::limits::Limits;
+
+        let resolve = |seconds| {
+            let flags = CliOverrides {
+                timeout_secs: Some(seconds),
+                ..CliOverrides::default()
+            };
+            Config::default().resolve(&flags).unwrap().limits
+        };
         assert_eq!(
-            limits.target_total_timeout,
+            resolve(10_000).target_total_timeout,
             Limits::HARD_CAPS.target_total_timeout
         );
-        let limits = with_timeout(&Limits::default(), Duration::from_secs(2));
+        let limits = resolve(2);
         assert_eq!(limits.target_total_timeout, Duration::from_secs(2));
         assert_eq!(limits.dns_timeout, Limits::default().dns_timeout);
     }
