@@ -50,8 +50,9 @@ def new_key():
     return ec.generate_private_key(ec.SECP256R1())
 
 
-def build_cert(subject_cn, key, issuer_cert, issuer_key, serial, *, ca=False, extra=()):
-    issuer_name = issuer_cert.subject if issuer_cert is not None else name(subject_cn)
+def build_cert(subject_cn, key, issuer_cert, issuer_key, serial, *, ca=False, extra=(), issuer_name=None):
+    if issuer_name is None:
+        issuer_name = issuer_cert.subject if issuer_cert is not None else name(subject_cn)
     signer = issuer_key if issuer_key is not None else key
     b = (
         x509.CertificateBuilder()
@@ -105,6 +106,17 @@ def leaf_extras(cn):
             ),
             False,
         ),
+    ]
+
+
+def aia_only(url):
+    return [
+        (
+            x509.AuthorityInformationAccess(
+                [x509.AccessDescription(AuthorityInformationAccessOID.CA_ISSUERS, x509.UniformResourceIdentifier(url))]
+            ),
+            False,
+        )
     ]
 
 
@@ -243,6 +255,23 @@ def main():
     leaf_int = build_cert("leaf-int.example.test", new_key(), inter, int_key, 0x4002, extra=leaf_extras("leaf-int.example.test"))
     write_cert("intermediate", inter)
     write_cert("leaf-int", leaf_int)
+
+    # AIA hostil 1: anel de 12 CAs, cada uma emitida (só pelo nome) pela próxima, que nunca converge.
+    ring_keys = [new_key() for _ in range(13)]
+    ring_cn = [f"CertTui AIA Ring {i:02d}" for i in range(13)]
+    for i in range(12):
+        ring = build_cert(
+            ring_cn[i], ring_keys[i], None, ring_keys[i + 1], 0x5000 + i, ca=True,
+            extra=aia_only(f"http://aia.example.test/ring-{i + 1:02d}.der"),
+            issuer_name=name(ring_cn[i + 1]),
+        )
+        write_cert(f"aia-ring-{i:02d}", ring)
+    # AIA hostil 2: ciclo A -> B -> A.
+    ka, kb = new_key(), new_key()
+    loop_a = build_cert("CertTui Loop A", ka, None, kb, 0x6001, ca=True, extra=aia_only("http://aia.example.test/loop-b.der"), issuer_name=name("CertTui Loop B"))
+    loop_b = build_cert("CertTui Loop B", kb, None, ka, 0x6002, ca=True, extra=aia_only("http://aia.example.test/loop-a.der"), issuer_name=name("CertTui Loop A"))
+    write_cert("aia-loop-a", loop_a)
+    write_cert("aia-loop-b", loop_b)
 
     # CA cujo keyUsage não tem cRLSign, com uma folha e uma CRL assinadas por ela.
     ca2_key = new_key()

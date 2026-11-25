@@ -426,18 +426,9 @@ async fn cancellable<T>(
     cancel: &CancellationToken,
     fut: impl Future<Output = T>,
 ) -> Result<T, Cancelled> {
-    let mut fut = std::pin::pin!(fut);
-    let mut cancelled = std::pin::pin!(cancel.cancelled());
-    std::future::poll_fn(|cx| {
-        if let Poll::Ready(value) = fut.as_mut().poll(cx) {
-            return Poll::Ready(Ok(value));
-        }
-        if cancelled.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Err(Cancelled));
-        }
-        Poll::Pending
-    })
-    .await
+    crate::cancel::cancellable(cancel, fut)
+        .await
+        .ok_or(Cancelled)
 }
 
 /// Polls every future to completion together, returning results in order.

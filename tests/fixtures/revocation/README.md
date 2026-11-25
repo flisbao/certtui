@@ -45,6 +45,8 @@ SHA-1, como manda o RFC 6960 (só identificação).
 | `responder-noeku` | responder delegado, assinado pela CA, **sem** EKU |
 | `intermediate` | CA intermediária (serial `0x4001`) emitida pela `ca`, com AIA/CRL DP e `cRLSign` |
 | `leaf-int` | folha `0x4002` emitida pela `intermediate`, com AIA/CRL DP (cadeia de 3: `leaf-int`, `intermediate`, `ca`) |
+| `aia-ring-00` … `aia-ring-11` | 12 CAs sem assinatura válida entre si: a `ring-NN` tem como *issuer name* a `ring-(NN+1)` e AIA CA Issuers `http://aia.example.test/ring-(NN+1).der`; a `ring-11` aponta para uma 12ª que não existe. Para testar AIA que nunca converge |
+| `aia-loop-a`, `aia-loop-b` | A tem issuer B (AIA `.../loop-b.der`) e B tem issuer A (AIA `.../loop-a.der`): ciclo de AIA |
 | `ca-no-crlsign` | segunda CA (serial 2) cujo `keyUsage` tem só `keyCertSign` (sem `cRLSign`) |
 | `leaf-no-crlsign` | folha `0x3001` emitida por `ca-no-crlsign`, com os mesmos CRL DP/AIA |
 | `leaf-forged` | serial `0x1002`, **issuer name = o da `ca`**, mas assinada por outra chave (não foi emitida pela `ca`) |
