@@ -64,7 +64,28 @@ if [ -n "$problems" ]; then
 fi
 echo "${PUBLISH_ORDER[*]}"
 
-if cargo publish --help 2>/dev/null | grep -q -- '--workspace'; then
+echo "== license texts =="
+# Each crate tarball must ship the license texts (the crates.io tarball only
+# holds files under the crate directory), so every crates/*/LICENSE-* must be a
+# byte-identical copy of the root file.
+license_problems=0
+for crate_dir in crates/*/; do
+    for lic in LICENSE-MIT LICENSE-APACHE; do
+        if ! cmp -s "$lic" "${crate_dir}${lic}"; then
+            echo "${crate_dir}${lic} is missing or differs from the root ${lic}" >&2
+            license_problems=1
+        fi
+    done
+done
+if [ "$license_problems" -ne 0 ]; then
+    exit 1
+fi
+echo "license texts match the root files"
+
+# Capture the help text first: `cargo publish --help | grep -q` can die of
+# SIGPIPE under pipefail and silently select the weaker fallback.
+publish_help="$(cargo publish --help 2>/dev/null || true)"
+if grep -q -- '--workspace' <<<"$publish_help"; then
     echo "== dry-run: workspace (each crate verified from its own tarball) =="
     cargo publish --workspace --dry-run --locked "$@"
 else
