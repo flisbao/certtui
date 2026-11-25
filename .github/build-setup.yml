@@ -2,7 +2,7 @@
 # job (dist-workspace.toml: github-build-setup).
 #
 # Policy (M9): the `native-clipboard` feature of the `certtui` binary is OFF on the
-# musl targets and ON everywhere else. dist 0.34 takes `features` /
+# musl targets and ON everywhere else. dist 0.33.1 (the pinned version) takes `features` /
 # `default-features` per package, not per target, so the musl matrix entries
 # switch the default feature off here, in the CI checkout only (never committed).
 - name: Disable native-clipboard on musl targets

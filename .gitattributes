@@ -1,3 +1,6 @@
 # Fixtures and fuzz corpora are byte-exact inputs (CRLF, UTF-16, BOMs): never normalize.
 tests/fixtures/** -text
 fuzz/corpus/** -text
+# Shell scripts must keep LF: Windows runners check out with autocrlf=true and
+# `bash scripts/smoke.sh` would die on `set -euo pipefail\r`.
+*.sh text eol=lf

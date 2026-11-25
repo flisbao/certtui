@@ -47,6 +47,11 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 echo "== layers =="
 bash scripts/check_layers.sh
 
+echo "== musl feature set =="
+# The musl release builds switch native-clipboard off (.github/build-setup.yml);
+# that configuration is otherwise compiled only at release time.
+cargo check --locked -p certtui --no-default-features
+
 echo "== test =="
 cargo test --locked --workspace --all-features
 

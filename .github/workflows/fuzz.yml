@@ -32,6 +32,7 @@ jobs:
             parse_target,
             parse_pkcs12,
             parse_jks,
+            parse_config_json,
           ]
     env:
       # 60 s on pull requests, 30 min on the nightly schedule.

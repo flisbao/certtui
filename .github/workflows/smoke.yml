@@ -25,27 +25,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `bin` is the binary path inside the unpacked archive, relative to dist/.
+        # dist 0.33.1 builds tarballs with a `certtui-<target>/` root directory but
+        # FLAT zips (cargo-dist src/tasks.rs: `with_root = None` for ZipStyle::Zip).
         include:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
             archive: tar.xz
-            exe: certtui
+            bin: certtui-x86_64-unknown-linux-musl/certtui
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
             archive: tar.xz
-            exe: certtui
+            bin: certtui-aarch64-unknown-linux-musl/certtui
           - target: x86_64-apple-darwin
             runner: macos-15-intel
             archive: tar.xz
-            exe: certtui
+            bin: certtui-x86_64-apple-darwin/certtui
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive: tar.xz
-            exe: certtui
+            bin: certtui-aarch64-apple-darwin/certtui
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             archive: zip
-            exe: certtui.exe
+            bin: certtui.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,25 +87,26 @@ jobs:
           else
             tar -xJf "certtui-${{ matrix.target }}.tar.xz"
           fi
-          test -f "certtui-${{ matrix.target }}/${{ matrix.exe }}"
+          test -f "${{ matrix.bin }}"
 
       - name: Smoke test
         shell: bash
-        run: bash scripts/smoke.sh "dist/certtui-${{ matrix.target }}/${{ matrix.exe }}"
+        run: bash scripts/smoke.sh "dist/${{ matrix.bin }}"
 
       - name: Static linkage and no native clipboard (musl)
         if: ${{ contains(matrix.target, '-linux-musl') }}
         shell: bash
         run: |
           set -euo pipefail
+          command -v strings >/dev/null || { echo "strings not found" >&2; exit 1; }
           # Policy: native-clipboard (arboard) is OFF on the musl targets.
           # `grep -c` (not `-q`) reads all of its input: under pipefail, `grep -q`
           # exits early, `strings` dies of SIGPIPE and the check would pass.
-          hits="$(strings "dist/certtui-${{ matrix.target }}/certtui" | grep -ci arboard || true)"
+          hits="$(strings "dist/${{ matrix.bin }}" | grep -ci arboard || true)"
           if [ "$hits" -gt 0 ]; then
             echo "arboard found in a musl binary (${hits} strings): native-clipboard must be off" >&2
             exit 1
           fi
-          out="$(ldd "dist/certtui-${{ matrix.target }}/certtui" 2>&1 || true)"
+          out="$(ldd "dist/${{ matrix.bin }}" 2>&1 || true)"
           echo "$out"
           grep -Eq 'not a dynamic executable|statically linked' <<<"$out"
