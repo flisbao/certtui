@@ -16,6 +16,8 @@ pub mod ports;
 
 pub mod present;
 
+pub mod revocation;
+
 pub mod trust;
 
 pub mod validate;

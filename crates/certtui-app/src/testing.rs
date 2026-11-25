@@ -9,12 +9,13 @@ use crate::error::LoadError;
 use crate::fetch::{FetchError, FetchRequest, FetchedChain};
 use std::sync::{Mutex, PoisonError};
 
-use certtui_domain::model::Chain;
+use certtui_domain::model::{Chain, RevocationStatus};
 
 use crate::ports::{
     ChainFetcher, ChainVerification, ChainVerifier, Clock, LoadedCerts, LocalSource, SourceLoader,
     TrustStoreProvider,
 };
+use crate::revocation::{OcspRequest, RevocationError, RevocationProtocol};
 use crate::trust::{TrustAnchors, TrustError, TrustSource};
 
 /// A [`Clock`] that always returns the same instant.
@@ -122,5 +123,46 @@ mod tests {
         assert_eq!(clock.now(), t);
         let boxed: Box<dyn Clock> = Box::new(clock);
         assert_eq!(boxed.now(), t);
+    }
+}
+
+/// A [`RevocationProtocol`] that returns canned results whatever the input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeRevocationProtocol {
+    /// Result of `build_ocsp_request`.
+    pub request: Result<OcspRequest, RevocationError>,
+    /// Result of `evaluate_ocsp`.
+    pub ocsp: Result<RevocationStatus, RevocationError>,
+    /// Result of `evaluate_crl`.
+    pub crl: Result<RevocationStatus, RevocationError>,
+}
+
+impl RevocationProtocol for FakeRevocationProtocol {
+    fn build_ocsp_request(
+        &self,
+        _cert_der: &[u8],
+        _issuer_der: &[u8],
+    ) -> Result<OcspRequest, RevocationError> {
+        self.request.clone()
+    }
+
+    fn evaluate_ocsp(
+        &self,
+        _response: &[u8],
+        _cert_der: &[u8],
+        _issuer_der: &[u8],
+        _now: Timestamp,
+    ) -> Result<RevocationStatus, RevocationError> {
+        self.ocsp.clone()
+    }
+
+    fn evaluate_crl(
+        &self,
+        _crl: &[u8],
+        _cert_der: &[u8],
+        _issuer_der: &[u8],
+        _now: Timestamp,
+    ) -> Result<RevocationStatus, RevocationError> {
+        self.crl.clone()
     }
 }
