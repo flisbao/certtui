@@ -2,6 +2,8 @@
 
 pub mod aia;
 
+pub mod batch;
+
 mod cancel;
 
 pub mod check;

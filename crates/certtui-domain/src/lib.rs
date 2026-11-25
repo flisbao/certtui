@@ -2,6 +2,8 @@
 
 pub mod batch_input;
 
+pub mod batch_row;
+
 pub mod chain_analysis;
 
 pub mod error;
