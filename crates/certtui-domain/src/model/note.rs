@@ -107,6 +107,9 @@ pub enum LoadNote {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// A JKS keystore was read without a password, so its integrity check
+    /// (a SHA-1 over the content keyed by the password) was skipped.
+    KeystoreIntegrityUnverified,
 }
 
 impl LoadNote {

@@ -234,6 +234,9 @@ fn reject_reason(reason: RejectReason) -> &'static str {
 #[must_use]
 pub fn note_text(note: &LoadNote) -> String {
     match note {
+        LoadNote::KeystoreIntegrityUnverified => {
+            "keystore read without a password: its integrity was not verified".to_owned()
+        }
         LoadNote::HandshakeFailedAfterClientCertRequest { peer_ip } => {
             format!("TLS handshake with {peer_ip} failed after a client certificate request")
         }

@@ -295,7 +295,10 @@ fn child_failure_note(error: &LoadError, relative: &str) -> LoadNote {
     let path = Some(relative.to_owned());
     match error {
         LoadError::Io(_) => LoadNote::Unreadable { path },
-        LoadError::Unsupported(_) => LoadNote::UnsupportedFormat { path },
+        // A keystore met while scanning a directory has no password to open it.
+        LoadError::Unsupported(_) | LoadError::PasswordRequired => {
+            LoadNote::UnsupportedFormat { path }
+        }
         LoadError::TooLarge { limit } => LoadNote::FileTooLarge {
             path,
             limit: *limit,
@@ -303,6 +306,7 @@ fn child_failure_note(error: &LoadError, relative: &str) -> LoadNote {
         // `NoCertificatesFound` is handled by the caller and a single file
         // never yields `TooManyCerts`; both are reported as malformed input.
         LoadError::Malformed(_)
+        | LoadError::Keystore(_)
         | LoadError::NoCertificatesFound { .. }
         | LoadError::TooManyCerts { .. } => LoadNote::MalformedInput { path },
     }

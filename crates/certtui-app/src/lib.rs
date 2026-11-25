@@ -16,6 +16,8 @@ pub mod http;
 
 pub mod inspect;
 
+pub mod keystore;
+
 pub mod inspect_network;
 
 pub mod ports;
