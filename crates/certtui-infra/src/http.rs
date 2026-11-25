@@ -7,6 +7,7 @@
 //! covers connect, redirects and the whole body (so a server that drips one
 //! byte a second still ends).
 
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
@@ -80,6 +81,41 @@ impl ReqwestHttpFetcher {
             .map_err(Clone::clone)
     }
 
+    /// Applies the destination policy to a request that goes through a proxy.
+    ///
+    /// The proxy resolves the host name, out of sight of the filtering
+    /// resolver, so a name that points at loopback or the metadata address
+    /// would pass. The name is therefore also resolved here and refused when
+    /// ANY address is blocked (the proxy may pick any of them). A name this
+    /// machine cannot resolve is left to the proxy, which may know internal
+    /// names that only it can see. Runs on every hop, redirects included.
+    async fn check_proxied_destination(&self, url: &Url) -> Result<(), HttpError> {
+        let Some(host) = url.host_str() else {
+            return Ok(());
+        };
+        let proxied = self
+            .proxy
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|settings| settings.endpoint_for(host).is_some());
+        // Literal addresses were already checked by `parse_url` and
+        // `redirect_target`.
+        if !proxied || self.internal_allowed() || host.parse::<IpAddr>().is_ok() {
+            return Ok(());
+        }
+        let port = url.port_or_known_default().unwrap_or(80);
+        let blocked = match tokio::net::lookup_host((host, port)).await {
+            Ok(mut found) => found.any(|addr| is_blocked(addr.ip())),
+            Err(_) => false,
+        };
+        if blocked {
+            Err(HttpError::DisallowedDestination)
+        } else {
+            Ok(())
+        }
+    }
+
     async fn execute(
         &self,
         method: Method,
@@ -103,6 +139,7 @@ impl ReqwestHttpFetcher {
     ) -> Result<Vec<u8>, HttpError> {
         let mut redirects = 0_usize;
         loop {
+            self.check_proxied_destination(&url).await?;
             let mut request = self.client()?.request(method.clone(), url.clone());
             if let Some((content_type, body)) = &payload {
                 request = request

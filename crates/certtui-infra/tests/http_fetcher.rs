@@ -384,3 +384,78 @@ async fn quando_proxy_e_removido_deve_voltar_a_conexao_direta() {
     assert_eq!(got, Ok(vec![1]));
     assert_eq!(proxy.received_requests().await.unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn quando_proxy_e_nome_resolve_para_loopback_deve_recusar_sem_tocar_no_proxy() {
+    // Through a proxy the proxy resolves the name, so the policy is applied to
+    // what this machine resolves too: `localhost` is loopback.
+    let proxy = MockServer::start().await;
+    let fetcher = ReqwestHttpFetcher::new(3);
+    fetcher.use_proxy(Some(proxy_settings(&proxy, None)));
+
+    let got = fetcher.get("http://localhost:9/x", LIMIT, TIMEOUT).await;
+
+    assert_eq!(got, Err(HttpError::DisallowedDestination));
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn quando_proxy_e_internal_permitido_deve_deixar_o_nome_interno_passar() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![5]))
+        .mount(&proxy)
+        .await;
+    let fetcher = ReqwestHttpFetcher::new(3).with_internal_allowed(true);
+    fetcher.use_proxy(Some(proxy_settings(&proxy, None)));
+
+    let got = fetcher.get("http://localhost:9/x", LIMIT, TIMEOUT).await;
+
+    assert_eq!(got, Ok(vec![5]));
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn quando_redirect_leva_a_nome_interno_pelo_proxy_deve_recusar_o_salto() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "http://localhost:9/next"),
+        )
+        .mount(&proxy)
+        .await;
+    let fetcher = ReqwestHttpFetcher::new(3);
+    fetcher.use_proxy(Some(proxy_settings(&proxy, None)));
+
+    let got = fetcher
+        .get("http://public.example.invalid/start", LIMIT, TIMEOUT)
+        .await;
+
+    assert_eq!(got, Err(HttpError::DisallowedDestination));
+    // Only the first hop reached the proxy.
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn quando_proxy_e_nome_nao_resolve_aqui_deve_deixar_o_proxy_resolver() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ok"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1]))
+        .mount(&proxy)
+        .await;
+    let fetcher = ReqwestHttpFetcher::new(3);
+    fetcher.use_proxy(Some(proxy_settings(&proxy, None)));
+
+    let got = fetcher
+        .get(
+            "http://only-the-proxy-knows.example.invalid/ok",
+            LIMIT,
+            TIMEOUT,
+        )
+        .await;
+
+    assert_eq!(got, Ok(vec![1]));
+}
