@@ -393,6 +393,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "certtui-domain",
+ "proptest",
  "rcgen",
  "serde",
  "serde_json",
