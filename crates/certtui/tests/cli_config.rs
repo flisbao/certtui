@@ -285,3 +285,41 @@ fn quando_ui_clipboard_native_com_feature_deve_aceitar_a_config() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
+
+#[test]
+fn quando_keymap_invalido_na_config_deve_sair_2() {
+    let dir = Scratch::new();
+    let cases = [
+        (r#"{"ui":{"keymap":{"explode":"x"}}}"#, "explode"),
+        (r#"{"ui":{"keymap":{"quit":"esc"}}}"#, "reserved"),
+        (r#"{"ui":{"keymap":{"quit":"ctrl+c"}}}"#, "reserved"),
+        (r#"{"ui":{"keymap":{"quit":"hyper+q"}}}"#, "hyper+q"),
+        (
+            r#"{"ui":{"keymap":{"quit":"z","favorite":"z"}}}"#,
+            "favorite",
+        ),
+        (r#"{"ui":{"keymap":{"quit":"f"}}}"#, "favorite"),
+    ];
+    for (json, needle) in cases {
+        let config = dir.config(json);
+        let out = certtui()
+            .args(["--config", &config, "inspect", &chain3()])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{json}: {}", stderr(&out));
+        let text = stderr(&out);
+        assert!(text.contains("ui.keymap"), "{json}: {text}");
+        assert!(text.contains(needle), "{json}: {text}");
+    }
+}
+
+#[test]
+fn quando_keymap_valido_na_config_deve_ser_aceito() {
+    let dir = Scratch::new();
+    let config = dir.config(r#"{"ui":{"keymap":{"quit":"z","copy_pem":"ctrl+y","refresh":"F5"}}}"#);
+    let out = certtui()
+        .args(["--config", &config, "inspect", &chain3(), "--text"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}

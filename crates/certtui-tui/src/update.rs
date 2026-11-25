@@ -4,7 +4,7 @@ use crossterm::event::KeyEvent;
 
 use crate::app_state::{AppState, Modal, Screen};
 use crate::copy::CopyPayload;
-use crate::keymap::{Action, Keymap};
+use crate::keymap::Action;
 use crate::msg::{Command, Msg};
 use crate::toast::{Toast, ToastKind};
 use crate::view::help;
@@ -103,7 +103,7 @@ fn on_key(state: &mut AppState, key: KeyEvent) -> Vec<Command> {
     {
         return commands;
     }
-    match Keymap::new().resolve(key) {
+    match state.keymap.resolve(key) {
         Some(action) => on_action(state, action),
         None => Vec::new(),
     }
@@ -164,7 +164,7 @@ fn on_modal_action(state: &mut AppState, action: Action) -> Vec<Command> {
 }
 
 fn scroll_help(state: &mut AppState, action: Action) {
-    let lines = help::help_lines(&Keymap::new()).len();
+    let lines = help::help_lines(&state.keymap).len();
     let last = lines.saturating_sub(help::viewport_rows(state.size));
     let scroll = usize::from(state.help_scroll);
     let scroll = if action == Action::Down {
@@ -191,6 +191,7 @@ mod tests {
 
     use super::*;
     use crate::app_state::Screen;
+    use crate::keymap::Keymap;
 
     fn key(c: char) -> Msg {
         Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
@@ -211,6 +212,35 @@ mod tests {
         let commands = update(&mut s, key('q'));
         assert!(s.should_quit);
         assert_eq!(commands, Vec::new());
+    }
+
+    #[test]
+    fn quando_keymap_do_estado_foi_remapeado_deve_resolver_a_tecla_nova() {
+        let mut s = state();
+        s.keymap = Keymap::from_overrides(&std::collections::BTreeMap::from([(
+            "quit".to_owned(),
+            "z".to_owned(),
+        )]))
+        .unwrap();
+        update(&mut s, key('q'));
+        assert!(!s.should_quit);
+        update(&mut s, key('z'));
+        assert!(s.should_quit);
+    }
+
+    #[test]
+    fn quando_quit_remapeado_ctrl_c_deve_sair_mesmo_assim() {
+        let mut s = state();
+        s.keymap = Keymap::from_overrides(&std::collections::BTreeMap::from([(
+            "quit".to_owned(),
+            "z".to_owned(),
+        )]))
+        .unwrap();
+        update(
+            &mut s,
+            Msg::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+        assert!(s.should_quit);
     }
 
     #[test]

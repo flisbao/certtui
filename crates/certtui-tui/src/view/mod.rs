@@ -49,7 +49,7 @@ pub fn view(state: &AppState, frame: &mut Frame) {
         Screen::Batch => batch::render(state, frame, area, &theme),
     }
     if state.modal.as_ref().is_some_and(Modal::is_help) {
-        help::render(frame, area, state.help_scroll, &theme);
+        help::render(frame, area, state.help_scroll, &state.keymap, &theme);
     } else if let Some(modal) = &state.modal {
         modals::render(modal, frame, area, &theme);
     }

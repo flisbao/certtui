@@ -13,6 +13,7 @@ use certtui_domain::time::Timestamp;
 
 use zeroize::Zeroizing;
 
+use crate::keymap::Keymap;
 use crate::msg::{ExportRequest, Password};
 use crate::theme::ThemeKind;
 use crate::toast::Toast;
@@ -546,6 +547,8 @@ pub struct AppState {
     pub batch_loader: BatchLoader,
     /// Largest text a copy may put on the clipboard, in bytes.
     pub max_clipboard_bytes: usize,
+    /// The keys, with the user's remapping applied.
+    pub keymap: Keymap,
     /// Recent targets and favorites.
     pub history: History,
     /// Most recent targets the history keeps.
@@ -603,6 +606,7 @@ impl AppState {
             target_parser: crate::update_home::default_target_parser,
             batch_loader: crate::update_home::default_batch_loader,
             max_clipboard_bytes: Limits::default().max_clipboard_bytes,
+            keymap: Keymap::new(),
             history: History::default(),
             history_max_entries: Limits::default().history_entries,
             wall_clock: epoch,

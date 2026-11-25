@@ -31,6 +31,7 @@ use certtui_domain::model::{FingerprintFormat, InspectionReport, LoadNote};
 use certtui_domain::target::{NetworkTarget, Target};
 use certtui_infra::env::EnvVars;
 use certtui_infra::proxy::{EnvProxy, ProxyError, parse_proxy_url};
+use certtui_tui::Keymap;
 use certtui_tui::clipboard::ClipboardStrategy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
@@ -698,6 +699,9 @@ fn load_settings(
         .and_then(ClipboardStrategy::check_supported)
     {
         return usage(err, &format!("ui.clipboard: {error}")).map(Err);
+    }
+    if let Err(error) = Keymap::from_overrides(&resolved.ui.keymap) {
+        return usage(err, &format!("ui.keymap: {error}")).map(Err);
     }
     Ok(Ok(resolved))
 }

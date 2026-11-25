@@ -55,7 +55,7 @@ fn dialog_height(rows: u16) -> u16 {
 }
 
 /// Draws the dialog centered over `area`, scrolled by `scroll` lines.
-pub fn render(frame: &mut Frame, area: Rect, scroll: u16, theme: &Theme) {
+pub fn render(frame: &mut Frame, area: Rect, scroll: u16, keymap: &Keymap, theme: &Theme) {
     let width = area.width.saturating_sub(2).min(MAX_WIDTH);
     let height = dialog_height(area.height);
     let rect = Rect::new(
@@ -64,7 +64,7 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: u16, theme: &Theme) {
         width,
         height,
     );
-    let text = help_lines(&Keymap::new()).join("\n");
+    let text = help_lines(keymap).join("\n");
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(text)
@@ -90,6 +90,39 @@ mod tests {
     use crate::msg::Msg;
     use crate::update::update;
     use crate::view::test_support::{render as render_state, state, text};
+
+    #[test]
+    fn quando_ajuda_abre_deve_mostrar_tecla_remapeada() {
+        let overrides = std::collections::BTreeMap::from([
+            ("quit".to_owned(), "ctrl+z".to_owned()),
+            ("refresh".to_owned(), "F5".to_owned()),
+        ]);
+        let keymap = Keymap::from_overrides(&overrides).unwrap();
+        let lines = help_lines(&keymap).join("\n");
+        assert!(lines.contains("Ctrl-Z"), "{lines}");
+        assert!(lines.contains("F5"), "{lines}");
+        // The default `q` is gone from the Quit line; Ctrl-C is still listed.
+        let quit_line = lines
+            .lines()
+            .find(|line| line.contains("quit (on Inspect"))
+            .unwrap();
+        assert!(!quit_line.trim_start().starts_with("q "), "{quit_line}");
+        assert!(lines.contains("Ctrl-C"), "{lines}");
+    }
+
+    #[test]
+    fn quando_ajuda_e_desenhada_deve_usar_o_keymap_do_estado() {
+        let mut state = crate::app_state::AppState::new(std::time::Instant::now());
+        state.keymap = Keymap::from_overrides(&std::collections::BTreeMap::from([(
+            "refresh".to_owned(),
+            "F5".to_owned(),
+        )]))
+        .unwrap();
+        state.modal = Some(crate::app_state::Modal::Help);
+        let screen =
+            crate::view::test_support::text(&crate::view::test_support::render(&state, 100, 40));
+        assert!(screen.contains("F5"), "{screen}");
+    }
 
     #[test]
     fn quando_ajuda_deve_listar_todas_as_actions_do_keymap() {

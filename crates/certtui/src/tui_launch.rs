@@ -24,8 +24,8 @@ use certtui_infra::history::FileHistoryRepository;
 use certtui_infra::source::FsSourceLoader;
 use certtui_infra::tls::RustlsChainFetcher;
 use certtui_infra::trust::NativeTrustProvider;
-use certtui_tui::ThemeKind;
 use certtui_tui::clipboard::ClipboardStrategy;
+use certtui_tui::{Keymap, ThemeKind};
 use tokio::sync::OnceCell;
 
 use crate::network_args::ConnectTo;
@@ -131,6 +131,9 @@ impl TuiLauncher for ProcessLauncher {
             anchors: OnceCell::new(),
         };
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+        // The keymap was checked when the configuration was resolved.
+        let keymap = Keymap::from_overrides(&request.ui.keymap)
+            .map_err(|error| anyhow::anyhow!("ui.keymap: {error}"))?;
         // The strategy was checked when the configuration was resolved.
         let clipboard = request
             .ui
@@ -151,6 +154,7 @@ impl TuiLauncher for ProcessLauncher {
                 limits,
                 target_parser: parse_for_tui,
                 batch_loader: crate::cli::load_batch_list,
+                keymap,
                 history: certtui_infra::paths::history_path().map(|path| {
                     Arc::new(FileHistoryRepository::new(path)) as Arc<dyn HistoryRepository>
                 }),

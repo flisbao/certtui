@@ -56,6 +56,8 @@ pub struct TuiOptions {
     pub target_parser: TargetParser,
     /// How the path typed for a batch on Home becomes its targets.
     pub batch_loader: BatchLoader,
+    /// The keys, with the user's remapping applied.
+    pub keymap: certtui_tui::Keymap,
     /// Where the history of targets is kept; `None` keeps none.
     pub history: Option<Arc<dyn HistoryRepository>>,
     /// The wall clock the history stamps targets with.
@@ -97,6 +99,7 @@ pub fn run(
         state.batch_loader = options.batch_loader;
         state.max_clipboard_bytes = options.limits.max_clipboard_bytes;
         state.history_max_entries = options.limits.history_entries;
+        state.keymap = options.keymap;
         state.wall_clock = options.wall_clock;
         if let Some(repository) = &options.history {
             load_history(&mut state, repository.as_ref());
