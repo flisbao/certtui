@@ -11,6 +11,9 @@ pub mod http;
 /// OCSP and CRL wire formats: the `RevocationProtocol` adapter.
 pub mod revocation;
 
+/// PKCS#12 and JKS keystore readers (certificates only).
+pub mod keystore;
+
 /// Local filesystem and standard-input source adapters.
 pub mod source;
 
