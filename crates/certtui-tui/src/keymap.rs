@@ -49,11 +49,13 @@ pub enum Action {
     Filter,
     /// Sort rows.
     Sort,
+    /// Reverse the order of the rows.
+    ReverseSort,
 }
 
 impl Action {
     /// Every action, in the order the help lists them.
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 23] = [
         Action::Down,
         Action::Up,
         Action::NextPane,
@@ -68,6 +70,7 @@ impl Action {
         Action::Favorite,
         Action::Filter,
         Action::Sort,
+        Action::ReverseSort,
         Action::Export,
         Action::CopyFocused,
         Action::CopyView,
@@ -96,14 +99,15 @@ impl Action {
             Action::Refresh => "inspect again (not yet)",
             Action::ToggleFingerprintFormat => "cycle fingerprint format",
             Action::Favorite => "favorite the target (not yet)",
-            Action::CopyFocused => "copy the field under the cursor",
-            Action::CopyView => "copy the visible tab as text",
+            Action::CopyFocused => "copy the field under the cursor (Batch: the row as TSV)",
+            Action::CopyView => "copy the visible tab as text (Batch: the table as CSV)",
             Action::CopyPem => "copy the certificate as PEM",
             Action::CopyChainPem => "copy the whole chain as PEM",
             Action::CopyJson => "copy the report as JSON",
             Action::Export => "export to a file",
-            Action::Filter => "filter rows (not yet)",
-            Action::Sort => "sort rows (not yet)",
+            Action::Filter => "filter rows (Batch)",
+            Action::Sort => "sort by the next column (Batch)",
+            Action::ReverseSort => "reverse the order (Batch)",
         }
     }
 }
@@ -151,6 +155,7 @@ impl Keymap {
             (KeyCode::Char('x'), Action::ToggleFingerprintFormat),
             (KeyCode::Char('f'), Action::Favorite),
             (KeyCode::Char('s'), Action::Sort),
+            (KeyCode::Char('S'), Action::ReverseSort),
             (KeyCode::Enter, Action::Enter),
             (KeyCode::Esc, Action::Back),
             (KeyCode::Char('?'), Action::Help),

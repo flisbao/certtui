@@ -1,0 +1,29 @@
+---
+source: crates/certtui-tui/src/view/help.rs
+assertion_line: 123
+expression: "text(&render_state(&s, 80, 24))"
+---
+┌ certtui ─────────────────────────────────────────────────────────────────────┐
+│┌ Help · j/k scroll · Esc closes ────────────────────────────────────────────┐│
+││Keys                                                                        ││
+││  j / ↓         move down                                                   ││
+││  k / ↑         move up                                                     ││
+││  l / Tab       next pane                                                   ││
+││  h / Shift-Tab previous pane                                               ││
+││  ]             next tab                                                    ││
+││  [             previous tab                                                ││
+││  Enter         open / confirm                                              ││
+││  Esc           back, cancel, stop typing                                   ││
+││  o             enter a new target                                          ││
+││  r             inspect again (not yet)                                     ││
+││  x             cycle fingerprint format                                    ││
+││  f             favorite the target (not yet)                               ││
+││  /             filter rows (Batch)                                         ││
+││  s             sort by the next column (Batch)                             ││
+││  S             reverse the order (Batch)                                   ││
+││  e             export to a file                                            ││
+││  y             copy the field under the cursor (Batch: the row as TSV)     ││
+││  Y             copy the visible tab as text (Batch: the table as CSV)      ││
+││  c             copy the certificate as PEM                                 ││
+│└────────────────────────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────┘

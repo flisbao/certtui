@@ -10,8 +10,7 @@ use crate::copy::{Copyable as _, InspectCopy};
 use crate::detail_rows::{DetailRow, rows_for_tab};
 use crate::keymap::Action;
 use crate::msg::Command;
-use crate::toast::{Toast, ToastKind};
-use crate::update::on_global_action;
+use crate::update::{on_global_action, request_copy};
 use crate::view::details_viewport_rows;
 
 /// Applies the result of an inspect job.
@@ -51,6 +50,7 @@ pub fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
         }
         Action::NewTarget => {
             let commands = leave(state);
+            state.screen = Screen::Home;
             state.home.editing = true;
             state.home.cursor = state.home.input.chars().count();
             return commands;
@@ -79,15 +79,22 @@ fn is_loading(state: &AppState) -> bool {
         .is_some_and(|inspect| inspect.phase == Phase::Loading)
 }
 
-/// Goes back to Home, cancelling the job still in flight.
+/// Goes back to where the screen was opened from (the Batch table or Home),
+/// cancelling the job still in flight.
 fn leave(state: &mut AppState) -> Vec<Command> {
     let mut commands = Vec::new();
-    if let Some(inspect) = state.inspect.take()
-        && state.jobs.finish(inspect.job)
-    {
-        commands.push(Command::CancelJob(inspect.job));
+    let mut from_batch = false;
+    if let Some(inspect) = state.inspect.take() {
+        from_batch = inspect.from_batch;
+        if state.jobs.finish(inspect.job) {
+            commands.push(Command::CancelJob(inspect.job));
+        }
     }
-    state.screen = Screen::Home;
+    state.screen = if from_batch && state.batch.is_some() {
+        Screen::Batch
+    } else {
+        Screen::Home
+    };
     commands
 }
 
@@ -142,17 +149,7 @@ fn copy(state: &mut AppState, action: Action) -> Vec<Command> {
     let Some(payload) = payload else {
         return Vec::new();
     };
-    if payload.text.len() > state.max_clipboard_bytes {
-        let kib = payload.text.len().div_ceil(1024);
-        let toast = Toast::new(
-            format!("too large to copy ({kib} KiB); press e to export"),
-            ToastKind::Error,
-            state.now,
-        );
-        state.set_toast(toast);
-        return Vec::new();
-    }
-    vec![Command::CopyToClipboard(payload)]
+    request_copy(state, payload)
 }
 
 /// The rows of the visible tab; empty until the report is ready.

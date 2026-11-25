@@ -102,7 +102,7 @@ mod tests {
             );
             assert!(lines.contains(&entry.keys), "{:?}", entry.keys);
         }
-        assert_eq!(Action::ALL.len(), 22);
+        assert_eq!(Action::ALL.len(), 23);
     }
 
     #[test]

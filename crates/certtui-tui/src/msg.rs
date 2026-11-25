@@ -6,10 +6,11 @@ use std::time::Instant;
 use std::fmt;
 use std::path::PathBuf;
 
+use certtui_app::batch::BatchEvent;
 use certtui_app::export::{ExportFormat, ExportSelection, Overwrite};
 use certtui_app::keystore::{ExposeSecret, SecretString};
 use certtui_domain::model::InspectionReport;
-use certtui_domain::target::Target;
+use certtui_domain::target::{NetworkTarget, Target};
 use crossterm::event::KeyEvent;
 
 use crate::app_state::JobId;
@@ -104,6 +105,14 @@ pub enum Msg {
         /// The report, or a user-facing error message.
         result: Result<Arc<InspectionReport>, String>,
     },
+    /// Events of a running batch, in the order they happened; rows are
+    /// grouped so a large batch does not flood the loop.
+    Batch {
+        /// Job that produced the events.
+        id: JobId,
+        /// What happened.
+        events: Vec<BatchEvent>,
+    },
     /// The job needs a keystore password (`wrong` when one was tried).
     PasswordNeeded {
         /// Job that asked.
@@ -152,6 +161,13 @@ pub enum Command {
         target: Target,
         /// The password the user typed.
         password: Password,
+    },
+    /// Inspect every target as job `id`, reporting compact rows.
+    RunBatch {
+        /// Identifier of the job.
+        id: JobId,
+        /// The targets, in list order.
+        targets: Vec<NetworkTarget>,
     },
     /// Write certificates to a file.
     Export(ExportRequest),

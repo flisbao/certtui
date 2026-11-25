@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use certtui_app::export::{ExportFormat, ExportSelection};
+use certtui_domain::batch_row::BatchRow;
 use certtui_domain::limits::Limits;
 use certtui_domain::model::{FingerprintFormat, InspectionReport};
-use certtui_domain::target::Target;
+use certtui_domain::target::{NetworkTarget, Target};
 
 use zeroize::Zeroizing;
 
@@ -25,6 +26,8 @@ pub enum Screen {
     Home,
     /// Chain tree and detail tabs of one target.
     Inspect,
+    /// Table of a batch run.
+    Batch,
 }
 
 /// What is typed into the password dialog: shown as dots, wiped when dropped,
@@ -268,6 +271,9 @@ pub struct InspectState {
     pub row_cursor: usize,
     /// First visible row of the details pane.
     pub scroll: u16,
+    /// Whether the screen was opened from a row of the Batch screen, which
+    /// is where `Esc` goes back to.
+    pub from_batch: bool,
 }
 
 impl InspectState {
@@ -283,6 +289,7 @@ impl InspectState {
             pane: Pane::default(),
             row_cursor: 0,
             scroll: 0,
+            from_batch: false,
         }
     }
 
@@ -293,6 +300,149 @@ impl InspectState {
             Phase::Ready(report) => Some(report),
             Phase::Loading | Phase::Failed(_) => None,
         }
+    }
+}
+
+/// The column a batch table is ordered by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SortKey {
+    /// The order of the list (the default).
+    #[default]
+    Input,
+    /// Days until the leaf expires.
+    Days,
+    /// Worst outcome.
+    Status,
+    /// Target name.
+    Target,
+    /// Subject common name.
+    Cn,
+    /// Issuer common name.
+    Issuer,
+    /// Number of errors, then warnings.
+    Errors,
+}
+
+impl SortKey {
+    /// The column after this one, wrapping around to the input order.
+    #[must_use]
+    pub fn next(self) -> SortKey {
+        match self {
+            SortKey::Input => SortKey::Days,
+            SortKey::Days => SortKey::Status,
+            SortKey::Status => SortKey::Target,
+            SortKey::Target => SortKey::Cn,
+            SortKey::Cn => SortKey::Issuer,
+            SortKey::Issuer => SortKey::Errors,
+            SortKey::Errors => SortKey::Input,
+        }
+    }
+
+    /// Name shown in the status line.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            SortKey::Input => "list order",
+            SortKey::Days => "days",
+            SortKey::Status => "status",
+            SortKey::Target => "target",
+            SortKey::Cn => "CN",
+            SortKey::Issuer => "issuer",
+            SortKey::Errors => "errors",
+        }
+    }
+}
+
+/// Where a batch job stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchPhase {
+    /// Targets are still being inspected.
+    Running,
+    /// Every target was inspected.
+    Done,
+    /// The user stopped it; the rows collected so far stay.
+    Cancelled,
+}
+
+/// State of the Batch screen.
+///
+/// Only [`BatchRow`]s are kept, never reports: memory grows with the number
+/// of targets and not with the size of their chains. Sorting and filtering
+/// work on `view`, a list of indices, so no row is ever cloned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchState {
+    /// Job that feeds this screen; events of other jobs are ignored.
+    pub job: JobId,
+    /// The targets, in list order; a row opens an inspect of its target.
+    pub targets: Vec<NetworkTarget>,
+    /// The row of each target, in list order, once it arrived.
+    pub rows: Vec<Option<BatchRow>>,
+    /// Indices into `rows` of the rows shown, in display order.
+    pub view: Vec<usize>,
+    /// Targets finished so far.
+    pub done: usize,
+    /// Column the table is ordered by.
+    pub sort: SortKey,
+    /// Whether the order is reversed.
+    pub descending: bool,
+    /// Text rows must contain (target, CN or issuer), ignoring case.
+    pub filter: String,
+    /// Whether keys type into `filter`.
+    pub filter_editing: bool,
+    /// Position of the selected row in `view`.
+    pub selected: usize,
+    /// First visible row of `view`.
+    pub scroll: usize,
+    /// Where the job stands.
+    pub phase: BatchPhase,
+}
+
+impl BatchState {
+    /// A screen waiting for job `job` to inspect `targets`.
+    #[must_use]
+    pub fn new(job: JobId, targets: Vec<NetworkTarget>) -> Self {
+        let total = targets.len();
+        Self {
+            job,
+            targets,
+            rows: vec![None; total],
+            view: Vec::new(),
+            done: 0,
+            sort: SortKey::default(),
+            descending: false,
+            filter: String::new(),
+            filter_editing: false,
+            selected: 0,
+            scroll: 0,
+            phase: BatchPhase::Running,
+        }
+    }
+
+    /// Whether the job is still running.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.phase == BatchPhase::Running
+    }
+
+    /// Targets in the batch.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.targets.len()
+    }
+
+    /// The row at position `position` of the table, with its index in the
+    /// list.
+    #[must_use]
+    pub fn row_at(&self, position: usize) -> Option<(usize, &BatchRow)> {
+        let index = *self.view.get(position)?;
+        self.rows.get(index)?.as_ref().map(|row| (index, row))
+    }
+
+    /// The rows of the table, in display order.
+    pub fn visible_rows(&self) -> impl Iterator<Item = &BatchRow> {
+        self.view
+            .iter()
+            .filter_map(|index| self.rows.get(*index).and_then(Option::as_ref))
     }
 }
 
@@ -346,6 +496,8 @@ pub struct AppState {
     pub home: HomeState,
     /// Inspect screen data, when a target was opened.
     pub inspect: Option<InspectState>,
+    /// Batch screen data, when a batch was started.
+    pub batch: Option<BatchState>,
     /// Dialog over the screen.
     pub modal: Option<Modal>,
     /// The export in flight, kept to ask for confirmation or to retry.
@@ -385,6 +537,7 @@ impl AppState {
             screen: Screen::Home,
             home: HomeState::default(),
             inspect: None,
+            batch: None,
             modal: None,
             pending_export: None,
             help_scroll: 0,

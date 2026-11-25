@@ -3,11 +3,12 @@
 use crossterm::event::KeyEvent;
 
 use crate::app_state::{AppState, Modal, Screen};
+use crate::copy::CopyPayload;
 use crate::keymap::{Action, Keymap};
 use crate::msg::{Command, Msg};
-use crate::toast::Toast;
+use crate::toast::{Toast, ToastKind};
 use crate::view::help;
-use crate::{update_home, update_inspect, update_modal};
+use crate::{update_batch, update_home, update_inspect, update_modal};
 use certtui_domain::model::FingerprintFormat;
 
 /// Applies `msg` to `state` and returns the side effects to run.
@@ -22,6 +23,10 @@ pub fn update(state: &mut AppState, msg: Msg) -> Vec<Command> {
             } else if state.screen == Screen::Home {
                 update_home::on_paste(state, &text);
             }
+            Vec::new()
+        }
+        Msg::Batch { id, events } => {
+            update_batch::on_events(state, id, events);
             Vec::new()
         }
         Msg::PasswordNeeded { id, wrong } => {
@@ -78,6 +83,15 @@ fn on_key(state: &mut AppState, key: KeyEvent) -> Vec<Command> {
         return update_modal::on_key(state, key);
     }
     if state.modal.is_none()
+        && state.screen == Screen::Batch
+        && state
+            .batch
+            .as_ref()
+            .is_some_and(|batch| batch.filter_editing)
+    {
+        return update_batch::on_filter_key(state, key);
+    }
+    if state.modal.is_none()
         && state.screen == Screen::Home
         && state.home.editing
         && let Some(commands) = update_home::on_edit_key(state, key)
@@ -97,7 +111,24 @@ fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
     match state.screen {
         Screen::Home => update_home::on_action(state, action),
         Screen::Inspect => update_inspect::on_action(state, action),
+        Screen::Batch => update_batch::on_action(state, action),
     }
+}
+
+/// Asks for `payload` to be copied, or explains why it will not be: text
+/// above `max_clipboard_bytes` is never copied.
+pub(crate) fn request_copy(state: &mut AppState, payload: CopyPayload) -> Vec<Command> {
+    if payload.text.len() > state.max_clipboard_bytes {
+        let kib = payload.text.len().div_ceil(1024);
+        let toast = Toast::new(
+            format!("too large to copy ({kib} KiB); press e to export"),
+            ToastKind::Error,
+            state.now,
+        );
+        state.set_toast(toast);
+        return Vec::new();
+    }
+    vec![Command::CopyToClipboard(payload)]
 }
 
 /// Actions that mean the same on every screen.

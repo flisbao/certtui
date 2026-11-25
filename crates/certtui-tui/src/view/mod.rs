@@ -1,5 +1,6 @@
 //! Pure rendering of [`AppState`].
 
+pub mod batch;
 pub mod help;
 pub mod home;
 pub mod inspect;
@@ -23,6 +24,15 @@ pub fn details_viewport_rows(size: (u16, u16)) -> usize {
     usize::from(size.1.saturating_sub(4))
 }
 
+/// Rows of the batch table that fit on a terminal of `size`.
+///
+/// The screen loses two rows to its border, one to the column header, one to
+/// the progress line and one to the key hints.
+#[must_use]
+pub fn batch_viewport_rows(size: (u16, u16)) -> usize {
+    usize::from(size.1.saturating_sub(5))
+}
+
 /// Draws the whole screen for `state`.
 ///
 /// Below [`MIN_SIZE`] only the "terminal too small" message is drawn.
@@ -36,6 +46,7 @@ pub fn view(state: &AppState, frame: &mut Frame) {
     match state.screen {
         Screen::Home => home::render(state, frame, area, &theme),
         Screen::Inspect => inspect::render(state, frame, area, &theme),
+        Screen::Batch => batch::render(state, frame, area, &theme),
     }
     if state.modal.as_ref().is_some_and(Modal::is_help) {
         help::render(frame, area, state.help_scroll, &theme);

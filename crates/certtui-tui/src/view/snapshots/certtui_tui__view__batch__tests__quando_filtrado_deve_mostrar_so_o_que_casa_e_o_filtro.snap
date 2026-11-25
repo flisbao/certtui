@@ -1,0 +1,28 @@
+---
+source: crates/certtui-tui/src/view/batch.rs
+expression: screen
+---
+┌ Batch · running ─────────────────────────────────────────────────────────────┐
+│Target                 Status  Days   CN              Issuer          E/W/I   │
+│h3.test:443            ok      70     host3.example   Test CA         0/0/1   │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│[████████████████████] 100% 5/5  filter: host3 (1 shown)                      │
+│Esc cancel · Enter inspect · s sort · / filter · y row · Y table · ? help     │
+└──────────────────────────────────────────────────────────────────────────────┘

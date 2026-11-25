@@ -17,12 +17,12 @@ expression: "text(&render_state(&s, 80, 24))"
 ││  r             inspect again (not yet)                                     ││
 ││  x             cycle fingerprint format                                    ││
 ││  f             favorite the target (not yet)                               ││
-││  /             filter rows (not yet)                                       ││
-││  s             sort rows (not yet)                                         ││
+││  /             filter rows (Batch)                                         ││
+││  s             sort by the next column (Batch)                             ││
+││  S             reverse the order (Batch)                                   ││
 ││  e             export to a file                                            ││
-││  y             copy the field under the cursor                             ││
-││  Y             copy the visible tab as text                                ││
+││  y             copy the field under the cursor (Batch: the row as TSV)     ││
+││  Y             copy the visible tab as text (Batch: the table as CSV)      ││
 ││  c             copy the certificate as PEM                                 ││
-││  C             copy the whole chain as PEM                                 ││
 │└────────────────────────────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────────────────┘

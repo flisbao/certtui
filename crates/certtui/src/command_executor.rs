@@ -4,10 +4,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use certtui_app::batch::{BatchRunner, TargetInspector};
 use certtui_app::export::{FileWriter, WriteError, render_export};
 use certtui_app::keystore::SecretString;
+use certtui_domain::limits::Limits;
 use certtui_domain::model::InspectionReport;
-use certtui_domain::target::Target;
+use certtui_domain::target::{NetworkTarget, Target};
+use certtui_infra::clock::SystemClock;
 use certtui_tui::clipboard::{ClipboardSink, copy_with_timeout};
 use certtui_tui::{Command, ExportFailure, ExportRequest, InspectFailure, JobId, Msg};
 use tokio::sync::mpsc;
@@ -70,6 +73,7 @@ impl CommandExecutor {
                 target,
                 password,
             } => self.inspect(id, target, Some(password.into_secret()), tx),
+            Command::RunBatch { id, targets } => self.batch(id, targets, tx),
             Command::Export(request) => self.export(request, tx),
             Command::CancelJob(id) => self.cancel(id),
             Command::CopyToClipboard(payload) => {
@@ -150,10 +154,75 @@ impl CommandExecutor {
         });
     }
 
+    /// Runs a batch as one job: its events reach the loop in groups of up to
+    /// [`BATCH_GROUP`], so a large batch does not flood it.
+    fn batch(&self, id: JobId, targets: Vec<NetworkTarget>, tx: mpsc::Sender<Msg>) {
+        let token = CancellationToken::new();
+        lock(&self.jobs).insert(id, token.clone());
+        let inspector = InspectorAdapter(Arc::clone(&self.inspector));
+        let jobs = Arc::clone(&self.jobs);
+        tokio::spawn(async move {
+            // The inspector enforces the user's `--timeout`; this limit is
+            // only the net under it.
+            let limits = Limits {
+                target_total_timeout: Limits::HARD_CAPS.target_total_timeout,
+                ..Limits::default()
+            };
+            let clock = SystemClock;
+            let runner = BatchRunner::new(&inspector, &clock, &limits);
+            let (events_tx, mut events_rx) = mpsc::channel(BATCH_CHANNEL);
+            let run = runner.run(targets, limits.batch_concurrency, events_tx, token.clone());
+            let forward = async {
+                while let Some(first) = events_rx.recv().await {
+                    let mut events = vec![first];
+                    while events.len() < BATCH_GROUP {
+                        let Ok(event) = events_rx.try_recv() else {
+                            break;
+                        };
+                        events.push(event);
+                    }
+                    // A cancelled batch leaves nothing behind: its screen is gone.
+                    if token.is_cancelled() || tx.send(Msg::Batch { id, events }).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            tokio::join!(run, forward);
+            lock(&jobs).remove(&id);
+        });
+    }
+
     fn cancel(&self, id: JobId) {
         if let Some(token) = lock(&self.jobs).remove(&id) {
             token.cancel();
         }
+    }
+}
+
+/// Events per message of a batch job.
+const BATCH_GROUP: usize = 64;
+/// Capacity of the channel between the batch runner and its forwarder.
+const BATCH_CHANNEL: usize = 256;
+
+/// Lets the batch runner use the inspector of the TUI.
+struct InspectorAdapter(Arc<dyn Inspector>);
+
+#[async_trait::async_trait]
+impl TargetInspector for InspectorAdapter {
+    async fn inspect(
+        &self,
+        target: &NetworkTarget,
+        cancel: CancellationToken,
+    ) -> Result<InspectionReport, String> {
+        self.0
+            .inspect(Target::Network(target.clone()), None, cancel)
+            .await
+            .map_err(|failure| match failure {
+                InspectFailure::Message(message) => message,
+                InspectFailure::PasswordRequired | InspectFailure::WrongPassword => {
+                    "a password is required".to_owned()
+                }
+            })
     }
 }
 
@@ -179,6 +248,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use certtui_app::batch::BatchEvent;
     use certtui_app::keystore::ExposeSecret;
     use certtui_app::testing::FakeFileWriter;
     use certtui_domain::target::NetworkTarget;
@@ -291,6 +361,128 @@ mod tests {
             other => unreachable!("expected InspectDone, got {other:?}"),
         }
         assert!(lock(&exec.jobs).is_empty(), "the finished job is forgotten");
+    }
+
+    /// Every message of a batch job, flattened, until it finishes.
+    async fn batch_events(rx: &mut mpsc::Receiver<Msg>, id: JobId) -> Vec<BatchEvent> {
+        let mut events = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            let Msg::Batch {
+                id: got,
+                events: chunk,
+            } = msg
+            else {
+                unreachable!("expected Batch, got {msg:?}");
+            };
+            assert_eq!(got, id);
+            let finished = chunk
+                .iter()
+                .any(|event| matches!(event, BatchEvent::Finished { .. }));
+            events.extend(chunk);
+            if finished {
+                break;
+            }
+        }
+        events
+    }
+
+    fn network_targets(n: usize) -> Vec<NetworkTarget> {
+        (0..n)
+            .map(|i| NetworkTarget {
+                host: format!("h{i}.test"),
+                port: 443,
+                sni: None,
+                connect_to: None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn quando_run_batch_deve_devolver_uma_row_por_alvo_em_lotes_e_finished() {
+        let report = network_report(&["rsa2048-leaf"]);
+        let inspector = FakeInspector::new(Duration::from_millis(1), Ok(report));
+        let exec = executor(
+            Arc::clone(&inspector),
+            sink(Ok(CopyMethod::Native), Duration::ZERO),
+            Duration::from_secs(1),
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        exec.run(
+            Command::RunBatch {
+                id: JobId(3),
+                targets: network_targets(150),
+            },
+            tx,
+        );
+        let events = batch_events(&mut rx, JobId(3)).await;
+        let rows = events
+            .iter()
+            .filter(|event| matches!(event, BatchEvent::Row { .. }))
+            .count();
+        assert_eq!(rows, 150);
+        assert_eq!(
+            events.last(),
+            Some(&BatchEvent::Finished { cancelled: false })
+        );
+        assert_eq!(inspector.started.load(Ordering::SeqCst), 150);
+        assert!(lock(&exec.jobs).is_empty(), "the finished job is forgotten");
+    }
+
+    #[tokio::test]
+    async fn quando_inspector_falha_no_batch_deve_virar_row_failed_com_a_mensagem() {
+        let inspector = FakeInspector::new(
+            Duration::ZERO,
+            Err(InspectFailure::Message("connection refused".to_owned())),
+        );
+        let exec = executor(
+            inspector,
+            sink(Ok(CopyMethod::Native), Duration::ZERO),
+            Duration::from_secs(1),
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        exec.run(
+            Command::RunBatch {
+                id: JobId(1),
+                targets: network_targets(1),
+            },
+            tx,
+        );
+        let events = batch_events(&mut rx, JobId(1)).await;
+        let Some(BatchEvent::Row { row, .. }) = events.first() else {
+            unreachable!("{events:?}");
+        };
+        assert_eq!(row.status, certtui_domain::batch_row::RowStatus::Failed);
+        assert_eq!(row.failure.as_deref(), Some("connection refused"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quando_cancel_job_no_batch_deve_parar_os_alvos_pendentes() {
+        let inspector = FakeInspector::new(
+            Duration::from_secs(10),
+            Ok(network_report(&["rsa2048-leaf"])),
+        );
+        let exec = executor(
+            Arc::clone(&inspector),
+            sink(Ok(CopyMethod::Native), Duration::ZERO),
+            Duration::from_secs(1),
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        exec.run(
+            Command::RunBatch {
+                id: JobId(9),
+                targets: network_targets(100),
+            },
+            tx.clone(),
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        exec.run(Command::CancelJob(JobId(9)), tx);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(
+            inspector.started.load(Ordering::SeqCst) <= 32,
+            "only the first wave starts"
+        );
+        assert!(rx.try_recv().is_err(), "a cancelled batch reports nothing");
+        assert!(lock(&exec.jobs).is_empty());
     }
 
     #[tokio::test]
