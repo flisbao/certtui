@@ -1,0 +1,29 @@
+name: advisories
+
+# A new RustSec advisory against a locked dependency must fail loudly even
+# when nobody pushes: the ci workflow only checks advisories on push and PR.
+on:
+  schedule:
+    # Daily, 05:41 UTC.
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10
+        with:
+          tool: cargo-deny
+
+      - name: Check advisories
+        run: cargo deny check advisories
