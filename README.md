@@ -10,8 +10,8 @@ com limites de memória, tamanho e tempo em toda entrada.
 
 ## Instalação
 
-Os instaladores, os binários e o `cargo install` passam a funcionar com a
-publicação da v1.0.0 (GitHub Releases e crates.io).
+Os instaladores e os binários vêm das [GitHub Releases](https://github.com/flisbao/certtui/releases);
+o `cargo install` funciona depois que a crate for publicada no crates.io.
 
 | Como | Comando |
 |---|---|

@@ -14,11 +14,10 @@ ci = "github"
 # GitHub Releases host the archives, installers and checksums
 hosting = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell", "homebrew"]
-# Homebrew tap that receives the generated formula (needs the HOMEBREW_TAP_TOKEN
-# repository secret; the token is read by the generated workflow, never stored here)
-tap = "flisbao/homebrew-tap"
-publish-jobs = ["homebrew"]
+# Homebrew is off until the tap exists. To turn it on: add "homebrew" here, set
+# `tap = "flisbao/homebrew-tap"` and `publish-jobs = ["homebrew"]`, and create
+# the HOMEBREW_TAP_TOKEN repository secret.
+installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax). The Linux
 # targets are musl (static, zero OpenSSL, no glibc requirement).
 targets = [
@@ -49,6 +48,6 @@ github-build-setup = "../build-setup.yml"
 #  - smoke.yml: runs scripts/smoke.sh on every built archive, on a native runner.
 #    It is a GLOBAL artifacts job on purpose: the generated `host` job (which
 #    creates the GitHub Release) only runs when every global job succeeded, so a
-#    failed smoke test blocks the release and the Homebrew publish. (A host-job
+#    failed smoke test blocks the release. (A host-job
 #    would not: dist 0.33 does not gate `announce` on host-jobs.)
 global-artifacts-jobs = ["./sbom", "./smoke"]
