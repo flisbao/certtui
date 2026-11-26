@@ -51,3 +51,8 @@ github-build-setup = "../build-setup.yml"
 #    failed smoke test blocks the release. (A host-job
 #    would not: dist 0.33 does not gate `announce` on host-jobs.)
 global-artifacts-jobs = ["./sbom", "./smoke"]
+
+# GitHub retired the macos-14 image that dist 0.33.1 picks for Apple Silicon
+# ("The configuration 'macos-14-arm64-us-default' is not supported").
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
