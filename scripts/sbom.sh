@@ -41,9 +41,13 @@ jq -e '.bomFormat == "CycloneDX"' "$OUT" >/dev/null \
     || { echo "${OUT}: not a CycloneDX document" >&2; exit 1; }
 
 forbidden='^(openssl|openssl-sys|openssl-src|native-tls)$'
-if jq -e --arg re "$forbidden" '[.. | objects | select(has("name")) | .name | select(test($re))] | length > 0' "$OUT" >/dev/null; then
+# Capture the names first: inside an `if`, a jq error would look like "nothing
+# found" and the gate would pass.
+found="$(jq -r --arg re "$forbidden" '[.. | objects | select(has("name")) | .name | select(test($re))] | unique[]' "$OUT")" \
+    || { echo "${OUT}: could not check for forbidden TLS components (jq failed)" >&2; exit 1; }
+if [ -n "$found" ]; then
     echo "${OUT}: forbidden TLS component (OpenSSL / native-tls) found:" >&2
-    jq -r --arg re "$forbidden" '[.. | objects | select(has("name")) | .name | select(test($re))] | unique[]' "$OUT" >&2
+    echo "$found" >&2
     exit 1
 fi
 

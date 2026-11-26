@@ -47,6 +47,9 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 echo "== layers =="
 bash scripts/check_layers.sh
 
+echo "== sbom gate =="
+bash scripts/sbom_test.sh
+
 echo "== musl feature set =="
 # The musl release builds switch native-clipboard off (.github/build-setup.yml);
 # that configuration is otherwise compiled only at release time.
