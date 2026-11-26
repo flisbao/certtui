@@ -148,7 +148,7 @@ impl Action {
             Action::Down => "move down",
             Action::Enter => "open / confirm",
             Action::NewTarget => "enter a new target",
-            Action::Refresh => "inspect again (not yet)",
+            Action::Refresh => "inspect the target again (Inspect)",
             Action::ToggleFingerprintFormat => "cycle fingerprint format",
             Action::Favorite => "favorite or unfavorite the selected target (Home)",
             Action::CopyFocused => "copy the field under the cursor (Batch: the row as TSV)",

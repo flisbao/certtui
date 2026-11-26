@@ -162,7 +162,9 @@ fn render_chain(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// `TLSv1.3 · cipher · IP · handshake 42ms`, or the target when there is no session.
+/// `? help · TLSv1.3 · cipher · IP · handshake 42ms`, or a short hint when
+/// there is no session. The help key comes first so a narrow terminal never
+/// cuts it.
 fn render_footer(
     inspect: &InspectState,
     keymap: &Keymap,
@@ -170,19 +172,23 @@ fn render_footer(
     area: Rect,
     theme: &Theme,
 ) {
+    let help = keymap.label(Action::Help);
     let text = match inspect.report() {
-        Some(report) => footer_text(report),
-        None => format!("Esc back \u{b7} {} help", keymap.label(Action::Help)),
+        Some(report) => footer_text(report, &help),
+        None => format!("Esc back \u{b7} {help} help"),
     };
     let text = fit(&text, usize::from(area.width));
     frame.render_widget(Paragraph::new(text).style(theme.dim), area);
 }
 
-fn footer_text(report: &InspectionReport) -> String {
+fn footer_text(report: &InspectionReport, help: &str) -> String {
     let Some(tls) = &report.tls else {
-        return String::from("no TLS session \u{b7} Esc back \u{b7} ? help");
+        return labels::single_line(&format!(
+            "no TLS session \u{b7} Esc back \u{b7} {help} help"
+        ));
     };
     let mut parts = vec![
+        format!("{help} help"),
         tls.version.clone(),
         tls.cipher_suite.clone(),
         tls.peer_ip.to_string(),
@@ -230,6 +236,21 @@ mod tests {
             inspect.pane = Pane::Details;
         }
         state
+    }
+
+    #[test]
+    fn quando_relatorio_tem_sessao_tls_deve_mostrar_a_tecla_de_ajuda_primeiro() {
+        let text = super::footer_text(&sample_report(), "?");
+        assert!(text.starts_with("? help \u{b7} TLSv1.3"), "{text}");
+    }
+
+    #[test]
+    fn quando_ajuda_foi_remapeada_deve_mostrar_a_tecla_nova_sem_sessao() {
+        let mut report = sample_report();
+        report.tls = None;
+        let text = super::footer_text(&report, "F1");
+        assert!(text.contains("F1 help"), "{text}");
+        assert!(!text.contains("? help"), "{text}");
     }
 
     #[test]

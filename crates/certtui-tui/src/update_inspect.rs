@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use certtui_app::present::labels;
 use certtui_domain::model::InspectionReport;
+use certtui_domain::target::Target;
 
 use crate::app_state::{AppState, InspectState, Pane, Phase, Screen};
 use crate::copy::{Copyable as _, InspectCopy};
 use crate::detail_rows::{DetailRow, rows_for_tab};
 use crate::keymap::Action;
 use crate::msg::Command;
+use crate::toast::{Toast, ToastKind};
 use crate::update::{on_global_action, request_copy};
 use crate::view::details_viewport_rows;
 
@@ -58,6 +60,7 @@ pub fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
         Action::NextPane | Action::PrevPane => toggle_pane(state),
         Action::Enter => focus_details(state),
         Action::Export => crate::update_modal::open_export(state),
+        Action::Refresh => return refresh(state),
         Action::NextTab => change_tab(state, true),
         Action::PrevTab => change_tab(state, false),
         Action::Down => move_cursor(state, true),
@@ -70,6 +73,38 @@ pub fn on_action(state: &mut AppState, action: Action) -> Vec<Command> {
         _ => return on_global_action(state, action),
     }
     Vec::new()
+}
+
+/// `r`: inspects the same target again, keeping the tab and where the
+/// screen goes back to. Standard input was consumed by the first read, so it
+/// cannot be read again.
+fn refresh(state: &mut AppState) -> Vec<Command> {
+    let Some(inspect) = state.inspect.as_ref() else {
+        return Vec::new();
+    };
+    if inspect.target == Target::Stdin {
+        state.toast = Some(Toast::new(
+            "standard input cannot be read again",
+            ToastKind::Error,
+            state.now,
+        ));
+        return Vec::new();
+    }
+    let (old, target) = (inspect.job, inspect.target.clone());
+    let mut commands = Vec::new();
+    if state.jobs.finish(old) {
+        commands.push(Command::CancelJob(old));
+    }
+    let id = state.jobs.start();
+    if let Some(inspect) = state.inspect.as_mut() {
+        let tab = inspect.tab;
+        let from_batch = inspect.from_batch;
+        *inspect = InspectState::loading(id, target.clone());
+        inspect.tab = tab;
+        inspect.from_batch = from_batch;
+    }
+    commands.push(Command::Inspect { id, target });
+    commands
 }
 
 fn is_loading(state: &AppState) -> bool {
@@ -252,6 +287,70 @@ mod tests {
             certtui_domain::target::Target::Stdin,
         ));
         (state, id)
+    }
+
+    fn ready_on(target: certtui_domain::target::Target) -> (AppState, JobId) {
+        let mut state = AppState::new(std::time::Instant::now());
+        let id = state.jobs.start();
+        state.screen = Screen::Inspect;
+        state.inspect = Some(InspectState::loading(id, target));
+        update(
+            &mut state,
+            Msg::InspectDone {
+                id,
+                result: Ok(Arc::new(sample_report())),
+            },
+        );
+        (state, id)
+    }
+
+    fn file_target() -> certtui_domain::target::Target {
+        certtui_domain::target::Target::File("chain.pem".into())
+    }
+
+    #[test]
+    fn quando_r_com_relatorio_pronto_deve_inspecionar_de_novo_o_mesmo_alvo() {
+        let (mut state, old) = ready_on(file_target());
+        inspect_mut(&mut state).tab = Tab::Findings;
+
+        let commands = update(&mut state, key('r'));
+
+        let [Command::Inspect { id, target }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_ne!(*id, old);
+        assert_eq!(*target, file_target());
+        assert_eq!(inspect(&state).job, *id);
+        assert_eq!(inspect(&state).phase, Phase::Loading);
+        assert_eq!(inspect(&state).tab, Tab::Findings);
+    }
+
+    #[test]
+    fn quando_r_com_job_rodando_deve_cancelar_o_anterior() {
+        let mut state = AppState::new(std::time::Instant::now());
+        let old = state.jobs.start();
+        state.screen = Screen::Inspect;
+        state.inspect = Some(InspectState::loading(old, file_target()));
+
+        let commands = update(&mut state, key('r'));
+
+        assert_eq!(commands.first(), Some(&Command::CancelJob(old)));
+        assert!(matches!(commands.get(1), Some(Command::Inspect { .. })));
+    }
+
+    #[test]
+    fn quando_r_em_stdin_deve_nao_reinspecionar_e_avisar() {
+        let (mut state, old) = ready_on(certtui_domain::target::Target::Stdin);
+
+        let commands = update(&mut state, key('r'));
+
+        assert!(commands.is_empty(), "{commands:?}");
+        assert_eq!(inspect(&state).job, old);
+        assert!(state.toast.is_some());
+    }
+
+    fn inspect_mut(state: &mut AppState) -> &mut InspectState {
+        state.inspect.as_mut().unwrap()
     }
 
     #[test]

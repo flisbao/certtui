@@ -25,4 +25,4 @@ expression: "text(&render(&inspect_state(sample_report()), 80, 24))"
 │                         ││                                                   │
 │                         ││                                                   │
 └─────────────────────────┘└───────────────────────────────────────────────────┘
-TLSv1.3 · TLS_AES_256_GCM_SHA384 · 192.0.2.7 · handshake 42ms · total 120ms
+? help · TLSv1.3 · TLS_AES_256_GCM_SHA384 · 192.0.2.7 · handshake 42ms · total …

@@ -15,7 +15,7 @@ expression: "text(&render_state(&s, 80, 24))"
 ││  Esc           back, cancel, stop typing                                   ││
 ││  o             enter a new target                                          ││
 ││  b             inspect a list of targets from a file (Home)                ││
-││  r             inspect again (not yet)                                     ││
+││  r             inspect the target again (Inspect)                          ││
 ││  x             cycle fingerprint format                                    ││
 ││  f             favorite or unfavorite the selected target (Home)           ││
 ││  /             filter rows (Batch)                                         ││
