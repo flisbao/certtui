@@ -20,7 +20,7 @@ pub use fingerprint::{Digest, FingerprintAlgorithm, FingerprintFormat, Fingerpri
 pub use key::{HashAlgorithm, PublicKeyAlgorithm, PublicKeyInfo, SignatureAlgorithm};
 pub use name::{DistinguishedName, SerialNumber};
 pub use note::{DiagnosticNoteCollector, LoadNote, RejectReason, retain_diagnostic_notes};
-pub use parse::{parse_der_cert, parse_name_der};
+pub use parse::{parse_der_cert, parse_name_content, parse_name_der};
 pub use record::{CertOrigin, CertificateRecord};
 pub use report::{
     CertRevocation, InspectionReport, RevocationStatus, StapleState, Timings, TlsSessionInfo,

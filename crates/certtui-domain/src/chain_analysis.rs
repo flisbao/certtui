@@ -64,14 +64,17 @@ pub fn analyze_chain(chain: &Chain, anchors: &[KnownIssuer], limits: &Limits) ->
         .collect();
     let last = path.last().and_then(|i| records.get(*i));
     let last_self_signed = last.is_some_and(is_self_signed);
-    let incomplete = last.is_some_and(|record| {
-        !is_self_signed(record)
-            && !anchors.iter().any(|anchor| {
-                anchor
-                    .subject_rfc4514
-                    .eq_ignore_ascii_case(&record.summary.issuer.rfc4514)
-            })
+    // Complete when any certificate on the path is issued by a known anchor,
+    // not only the last: a server may append a cross-signed root whose own
+    // issuer is unknown, while the certificate before it already anchors.
+    let anchored = path.iter().filter_map(|i| records.get(*i)).any(|record| {
+        anchors.iter().any(|anchor| {
+            anchor
+                .subject_rfc4514
+                .eq_ignore_ascii_case(&record.summary.issuer.rfc4514)
+        })
     });
+    let incomplete = last.is_some_and(|record| !is_self_signed(record) && !anchored);
     let in_presented_order = path.iter().copied().eq(0..path.len());
     ChainAnalysis {
         root_sent: last_self_signed && path.len() > 1,
@@ -239,6 +242,33 @@ mod tests {
         assert_eq!(a.path, vec![0, 1]);
         assert!(!a.incomplete);
         assert!(!a.root_sent);
+    }
+
+    #[test]
+    fn quando_raiz_cross_signed_e_enviada_e_o_intermediario_ancora_deve_nao_marcar_incompleta() {
+        // leaf <- Int <- Root (anchor), plus Root cross-signed by an Old Root
+        // that is not an anchor (the example.com / Let's Encrypt pattern).
+        let root_key = KeyPair::generate().expect("key");
+        let old_root = Issuer::new(params("Old Root", true), KeyPair::generate().expect("key"));
+        let cross = params("Root", true)
+            .signed_by(&root_key, &old_root)
+            .expect("cross");
+        let root_issuer = Issuer::new(params("Root", true), root_key);
+        let int_key = KeyPair::generate().expect("key");
+        let int = params("Int", true)
+            .signed_by(&int_key, &root_issuer)
+            .expect("int");
+        let int_issuer = Issuer::new(params("Int", true), int_key);
+        let leaf = params("leaf", false)
+            .signed_by(&KeyPair::generate().expect("key"), &int_issuer)
+            .expect("leaf");
+
+        let a = analyze(
+            &chain_of(&[leaf.der(), int.der(), cross.der()]),
+            &[anchor("CN=Root")],
+        );
+
+        assert!(!a.incomplete);
     }
 
     #[test]

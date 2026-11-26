@@ -3,7 +3,7 @@
 use certtui_domain::chain_analysis::{KnownIssuer, analyze_chain};
 use certtui_domain::limits::Limits;
 use certtui_domain::lint::{LintContext, Thresholds, run_lints};
-use certtui_domain::model::{InspectionReport, TrustVerdict, parse_name_der};
+use certtui_domain::model::{InspectionReport, TrustVerdict, parse_name_content};
 use certtui_domain::sanitize::sanitize_display;
 
 use crate::ports::{ChainVerifier, Clock};
@@ -73,7 +73,7 @@ pub fn known_issuers(anchors: &TrustAnchors) -> Vec<KnownIssuer> {
     anchors
         .entries
         .iter()
-        .filter_map(|anchor| parse_name_der(&anchor.subject_der))
+        .filter_map(|anchor| parse_name_content(&anchor.subject_der))
         .map(|name| KnownIssuer {
             subject_rfc4514: name.rfc4514,
         })
@@ -194,7 +194,7 @@ mod tests {
     fn anchors(source: TrustSource) -> TrustAnchors {
         TrustAnchors {
             entries: vec![TrustAnchor {
-                subject_der: name_der("Root"),
+                subject_der: name_der("Root").get(2..).expect("content").to_vec(),
                 spki_der: vec![1],
                 name_constraints_der: None,
                 source,
@@ -202,6 +202,33 @@ mod tests {
             }],
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn quando_ancora_traz_o_conteudo_do_name_como_o_webpki_deve_virar_emissor_conhecido() {
+        // webpki (and the infra trust store) keep the *content* of the Name
+        // SEQUENCE, without its tag and length.
+        let full = name_der("Root");
+        let content = full.get(2..).expect("content").to_vec();
+        let anchors = TrustAnchors {
+            entries: vec![TrustAnchor {
+                subject_der: content,
+                spki_der: vec![1],
+                name_constraints_der: None,
+                source: TrustSource::System,
+                label: "Root".to_owned(),
+            }],
+            warnings: Vec::new(),
+        };
+
+        let got = known_issuers(&anchors);
+
+        assert_eq!(
+            got.iter()
+                .map(|k| k.subject_rfc4514.as_str())
+                .collect::<Vec<_>>(),
+            ["CN=Root"]
+        );
     }
 
     fn feb_2026() -> FixedClock {

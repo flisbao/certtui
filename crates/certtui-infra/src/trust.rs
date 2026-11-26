@@ -7,7 +7,7 @@ use std::sync::Arc;
 use certtui_app::ports::{LocalSource, SourceLoader, TrustStoreProvider};
 use certtui_app::trust::{TrustAnchor, TrustAnchors, TrustError, TrustSource};
 use certtui_domain::limits::Limits;
-use certtui_domain::model::{DistinguishedName, LoadNote, parse_der_cert, parse_name_der};
+use certtui_domain::model::{DistinguishedName, LoadNote, parse_der_cert, parse_name_content};
 use certtui_domain::sanitize::sanitize_display;
 use rustls_pki_types::CertificateDer;
 
@@ -209,25 +209,9 @@ fn label_for_cert(der: &[u8], subject_content: &[u8]) -> String {
     }
 }
 
-/// `subject` of a webpki anchor is the *content* of the `Name` SEQUENCE;
-/// re-wrap it to get a parsable `Name`.
+/// `subject` of a webpki anchor is the *content* of the `Name` SEQUENCE.
 fn label_from_subject_content(content: &[u8]) -> String {
-    let mut der = vec![0x30];
-    let len = content.len();
-    if len < 0x80 {
-        // Justificativa: `len < 0x80` cabe em um byte.
-        #[allow(clippy::cast_possible_truncation)]
-        der.push(len as u8);
-    } else {
-        let bytes = len.to_be_bytes();
-        let significant: Vec<u8> = bytes.iter().copied().skip_while(|b| *b == 0).collect();
-        // Justificativa: no máximo `size_of::<usize>()` bytes significativos.
-        #[allow(clippy::cast_possible_truncation)]
-        der.push(0x80 | significant.len() as u8);
-        der.extend(significant);
-    }
-    der.extend_from_slice(content);
-    parse_name_der(&der).map_or_else(|| "unknown subject".to_owned(), |n| display_name(&n))
+    parse_name_content(content).map_or_else(|| "unknown subject".to_owned(), |n| display_name(&n))
 }
 
 fn display_name(name: &DistinguishedName) -> String {

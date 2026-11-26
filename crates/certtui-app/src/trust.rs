@@ -19,7 +19,8 @@ pub enum TrustSource {
 /// A single trusted root anchor.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TrustAnchor {
-    /// DER-encoded Subject Name.
+    /// Content of the DER Subject `Name` SEQUENCE, without its tag and
+    /// length (the form `webpki` keeps for anchors).
     pub subject_der: Vec<u8>,
     /// DER-encoded `SubjectPublicKeyInfo`.
     pub spki_der: Vec<u8>,

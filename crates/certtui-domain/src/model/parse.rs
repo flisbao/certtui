@@ -83,6 +83,26 @@ pub fn parse_name_der(der: &[u8]) -> Option<DistinguishedName> {
     rest.is_empty().then(|| distinguished_name(&name))
 }
 
+/// Parses the *content* of a `Name` SEQUENCE (no tag, no length), the form
+/// `webpki` keeps for trust anchor subjects.
+#[must_use]
+pub fn parse_name_content(content: &[u8]) -> Option<DistinguishedName> {
+    let mut der = vec![0x30];
+    let len = content.len();
+    if let Ok(short) = u8::try_from(len)
+        && short < 0x80
+    {
+        der.push(short);
+    } else {
+        let bytes = len.to_be_bytes();
+        let significant: Vec<u8> = bytes.iter().copied().skip_while(|b| *b == 0).collect();
+        der.push(0x80 | u8::try_from(significant.len()).ok()?);
+        der.extend(significant);
+    }
+    der.extend_from_slice(content);
+    parse_name_der(&der)
+}
+
 /// Builds the summary from an already-parsed certificate.
 fn summarize(cert: &X509Certificate<'_>) -> Result<CertificateSummary, ParseError> {
     let validity = cert.validity();
