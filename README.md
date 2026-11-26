@@ -10,9 +10,11 @@ com limites de memória, tamanho e tempo em toda entrada.
 
 ## Instalação
 
+Os instaladores, os binários e o `cargo install` passam a funcionar com a
+publicação da v1.0.0 (GitHub Releases e crates.io).
+
 | Como | Comando |
 |---|---|
-| Homebrew (macOS e Linux) | `brew install flisbao/tap/certtui` |
 | Shell (Linux e macOS) | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/flisbao/certtui/releases/latest/download/certtui-installer.sh \| sh` |
 | PowerShell (Windows) | `powershell -ExecutionPolicy Bypass -c "irm https://github.com/flisbao/certtui/releases/latest/download/certtui-installer.ps1 \| iex"` |
 | Cargo | `cargo install certtui --locked` (Rust 1.97 ou mais novo) |
@@ -22,8 +24,7 @@ Plataformas dos binários: Linux x86_64 e aarch64 (musl, estáticos), macOS x86_
 e aarch64 e Windows x86_64.
 
 > **Os binários Linux (musl) são compilados sem o clipboard nativo.** Neles a
-> cópia funciona só por **OSC 52** (veja [Clipboard](#clipboard)). Isto vale
-> também para o Homebrew no Linux, que instala o mesmo binário musl. Para ter o
+> cópia funciona só por **OSC 52** (veja [Clipboard](#clipboard)). Para ter o
 > clipboard nativo no Linux, instale com `cargo install certtui --locked` (a
 > feature `native-clipboard` vem ligada por padrão). Nos binários musl,
 > `ui.clipboard` com `native` é erro de configuração (exit 2).
@@ -197,10 +198,10 @@ head -n 1 "${TMPDIR:-/tmp}/cadeia.pem"
 |---|---|
 | Rede | `--sni <nome>`, `--connect-to <ip[:porta]>`, `--proxy http://host:porta`, `--no-proxy`, `--timeout <s>` (teto de 120) |
 | Validação | `--trust system\|mozilla\|custom` (repetível, padrão `system`), `--ca-file <caminho>`, `--ca-only`, `--host-check <nome>` |
-| Revogação e AIA | `--revocation leaf\|full`, `--no-revocation`, `--aia` / `--no-aia` (busca de intermediários, desligada por padrão) |
+| Revogação e AIA | `--revocation leaf\|full` (só alvos de rede), `--no-revocation`, `--aia` / `--no-aia` (busca de intermediários, desligada por padrão), `--allow-internal-urls` (libera loopback, link-local e metadados de nuvem nas URLs de OCSP/CRL/AIA) |
 | Keystores | `--password-env VAR`, `--password-file <caminho>`, `--password-stdin` (nunca passe a senha como argumento) |
 | Entrada | `--file` (trata o alvo como arquivo), `--recursive` |
-| Saída | `--json`, `--text`, `--pem` (`inspect`), `--csv` (`batch`), `--fingerprint-format colon\|hex\|base64` |
+| Saída | `--json` (`inspect`, `check`, `batch`); `--text`, `--pem`, `--field <campo>`, `--fingerprint-format colon\|hex\|base64` (`inspect`); `--csv` (`batch`); `--index N` (`inspect`, `export`) |
 | Outras | `--config <caminho>`, `--log-file <caminho>` |
 
 - **Somente TLS 1.2 e TLS 1.3.** A cadeia é capturada exatamente como o servidor
@@ -214,10 +215,15 @@ head -n 1 "${TMPDIR:-/tmp}/cadeia.pem"
 - **Revogação:** OCSP stapling, OCSP e CRL. Os SCTs embutidos no certificado são
   exibidos, mas a assinatura deles **não** é verificada.
 - **Configuração (JSON):** `$CERTTUI_CONFIG` tem precedência sobre `--config`; sem
-  nenhum dos dois, lê `~/.config/certtui/config.json` (Linux) se existir. Config
-  ausente usa os padrões; config inválida termina com exit 2 apontando o campo.
-  O JSON Schema está em [`docs/config.schema.json`](docs/config.schema.json).
-  Histórico e favoritos ficam em `history.json` no diretório de dados do usuário.
+  nenhum dos dois, lê o arquivo padrão da plataforma, se existir:
+  `~/.config/certtui/config.json` (Linux, ou `$XDG_CONFIG_HOME`),
+  `~/Library/Preferences/certtui/config.json` (macOS) e
+  `%APPDATA%\certtui\config\config.json` (Windows). Config ausente usa os
+  padrões; config inválida termina com exit 2 apontando o campo. O JSON Schema
+  está em [`docs/config.schema.json`](docs/config.schema.json). Histórico e
+  favoritos ficam em `history.json` no diretório de dados do usuário
+  (`~/.local/share/certtui`, `~/Library/Application Support/certtui` ou
+  `%APPDATA%\certtui\data`).
 - O JSON de `inspect`, `check` e `batch` tem `"schema_version": 1` e é um contrato
   público.
 
@@ -332,9 +338,11 @@ batch; CPU abaixo de 1% em idle no TUI.
 
 ## Segurança
 
-- **Nunca extrai chave privada.** Keystores (PKCS#12, JKS) e textos são lidos só
+- **Nunca expõe chave privada.** Keystores (PKCS#12, JKS) e textos são lidos só
   para os certificados; chaves privadas nunca são exibidas, exportadas nem
-  registradas em log. A senha de um keystore não vai como argumento de linha de
+  registradas em log. Em texto e em JKS a chave nem é decodificada. Num PKCS#12
+  a biblioteca de leitura decifra o arquivo inteiro, então a chave passa pela
+  memória do processo e é descartada sem ser zerada. A senha de um keystore não vai como argumento de linha de
   comando (`--password-env`, `--password-file` ou `--password-stdin`).
 - **Sem OpenSSL** (`openssl` e `openssl-sys` são banidos no `deny.toml`) e sem
   invocar binários externos.
@@ -345,6 +353,11 @@ batch; CPU abaixo de 1% em idle no TUI.
   nuvem são recusadas por padrão (`--allow-internal-urls` as libera).
 - O certificado é mostrado **mesmo que inválido**; a validação é uma camada
   separada, que gera achados.
+- O servidor precisa **provar a posse da chave** do leaf: a assinatura do
+  handshake TLS é conferida com a chave pública do certificado. Se não confere
+  (um intermediário reapresentando uma cadeia alheia), o handshake é abortado,
+  a cadeia continua visível e o achado `HANDSHAKE_SIGNATURE_INVALID` (erro) é
+  gerado.
 
 ## Fora do escopo da v1
 
