@@ -158,7 +158,6 @@ fn open_in_worker(
     let spawned = std::thread::Builder::new()
         .name("pkcs12".to_owned())
         .spawn(move || {
-            let _slot = slot;
             // Without a password the empty one is still tried: a PKCS#12 made
             // with an empty password opens, any other asks for one.
             let given = secret.as_ref().map_or("", |s| s.expose_secret());
@@ -189,6 +188,9 @@ fn open_in_worker(
                         mapped
                     }
                 });
+            // Free the slot before answering: whoever reads the outcome may
+            // start the next keystore at once and must find the slot free.
+            drop(slot);
             // The receiver is gone when the deadline passed.
             let _ = tx.send(outcome);
         });
