@@ -89,6 +89,11 @@ pub enum Behavior {
     Tls12ClientAuth(Vec<u8>),
     /// TLS server restricted to TLS 1.3.
     Tls13Only,
+    /// TLS 1.2 server that presents the normal chain but signs the handshake
+    /// with a key that is not the leaf's (an impostor replaying a chain).
+    ImpostorTls12,
+    /// The TLS 1.3 form of [`Behavior::ImpostorTls12`].
+    ImpostorTls13,
     /// Replies `HTTP/1.1 400 Bad Request` in clear text and closes.
     PlainHttp,
     /// Accepts and drops the connection.
@@ -294,7 +299,10 @@ impl TestServer {
             Behavior::SelfSigned => PkiKind::SelfSignedLeaf,
             _ => PkiKind::Chain,
         };
-        let pki = Pki::generate(kind)?;
+        let mut pki = Pki::generate(kind)?;
+        if matches!(behavior, Behavior::ImpostorTls12 | Behavior::ImpostorTls13) {
+            pki.leaf_key = KeyPair::generate()?.serialize_der();
+        }
         let normal = if kind == PkiKind::SelfSignedLeaf {
             vec![pki.leaf.clone()]
         } else {
@@ -360,6 +368,12 @@ impl TestServer {
                 Duration::ZERO,
             )?,
             Behavior::Tls13Only => tls(&normal, None, &[&rustls::version::TLS13], Duration::ZERO)?,
+            Behavior::ImpostorTls12 => {
+                tls(&normal, None, &[&rustls::version::TLS12], Duration::ZERO)?
+            }
+            Behavior::ImpostorTls13 => {
+                tls(&normal, None, &[&rustls::version::TLS13], Duration::ZERO)?
+            }
             Behavior::NeverResponds => (Mode::NeverResponds, Vec::new()),
             Behavior::FloodBytes => (Mode::Flood, Vec::new()),
             Behavior::PlainHttp => (Mode::PlainHttp, Vec::new()),

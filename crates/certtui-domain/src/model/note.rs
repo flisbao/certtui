@@ -36,6 +36,9 @@ pub enum LoadNote {
         /// IP address of the connected peer.
         peer_ip: std::net::IpAddr,
     },
+    /// The server's handshake signature did not verify with the public key
+    /// of the leaf it presented; the chain was kept for inspection.
+    HandshakeSignatureInvalid,
     /// A candidate block at `offset` was rejected.
     Rejected {
         /// Byte offset of the block in the input.

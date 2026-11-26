@@ -1,18 +1,27 @@
-//! Always-accept certificate verifier that records what the server sent.
+//! Certificate verifier that accepts any chain and records what the server sent.
 //!
 //! `CertTui` is an inspection tool: it must be able to show a certificate chain
 //! even when that chain is expired, self-signed, signed with an exotic
 //! algorithm, or otherwise untrustworthy. The TLS handshake is therefore run
 //! with [`CapturingVerifier`], which keeps the DER bytes the server presented
-//! and accepts everything. Trust is decided separately, after the handshake,
+//! and accepts every chain. Trust is decided separately, after the handshake,
 //! by validating the captured chain with `rustls-webpki` (milestone M3).
+//!
+//! The handshake signature, however, IS verified against the leaf's public
+//! key: without it an impostor could replay a real, trusted chain it holds no
+//! key for, and the report would call it trusted. A signature that does not
+//! verify aborts the handshake; the chain stays captured and
+//! [`CapturingVerifier::signature_invalid`] tells the fetcher to keep it with
+//! a note.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustls::DigitallySignedStruct;
 use rustls::SignatureScheme;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 
 /// DER material the server presented during the TLS handshake.
@@ -37,13 +46,13 @@ impl fmt::Debug for CapturedHandshake {
     }
 }
 
-/// Server certificate verifier that accepts everything and remembers the chain.
+/// Server certificate verifier that accepts any chain and remembers it.
 ///
 /// # UNSAFE FOR AUTHENTICATION
 ///
-/// This type performs **no** validation: it does not check the chain, the
-/// validity period, the server name, the revocation status or the handshake
-/// signatures. A connection established with it is not authenticated and must
+/// This type does not check the chain, the validity period, the server name
+/// or the revocation status. It only checks the handshake signature, so the
+/// server proves it holds the leaf's key. A connection established with it is not authenticated and must
 /// never carry anything but the handshake needed to read the certificates.
 /// Never use it for any purpose other than inspection.
 ///
@@ -59,7 +68,9 @@ impl fmt::Debug for CapturedHandshake {
 /// on, so no extra cap is applied here.
 pub struct CapturingVerifier {
     captured: Mutex<Option<CapturedHandshake>>,
+    algorithms: WebPkiSupportedAlgorithms,
     schemes: Vec<SignatureScheme>,
+    signature_invalid: AtomicBool,
 }
 
 impl CapturingVerifier {
@@ -68,12 +79,12 @@ impl CapturingVerifier {
     /// The advertised signature schemes are those of the `ring` crypto provider.
     #[must_use]
     pub fn new() -> Arc<Self> {
-        let schemes = rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes();
+        let algorithms = rustls::crypto::ring::default_provider().signature_verification_algorithms;
         Arc::new(Self {
             captured: Mutex::new(None),
-            schemes,
+            schemes: algorithms.supported_schemes(),
+            algorithms,
+            signature_invalid: AtomicBool::new(false),
         })
     }
 
@@ -82,6 +93,24 @@ impl CapturingVerifier {
     #[must_use]
     pub fn captured(&self) -> Option<CapturedHandshake> {
         self.lock().clone()
+    }
+
+    /// Whether the server's handshake signature failed to verify with the
+    /// leaf's public key (the handshake was then aborted).
+    #[must_use]
+    pub fn signature_invalid(&self) -> bool {
+        self.signature_invalid.load(Ordering::Relaxed)
+    }
+
+    /// Records a failed verification; the error aborts the handshake.
+    fn checked(
+        &self,
+        result: Result<HandshakeSignatureValid, rustls::Error>,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        if result.is_err() {
+            self.signature_invalid.store(true, Ordering::Relaxed);
+        }
+        result
     }
 
     /// Locks the state, recovering the data if another thread panicked while
@@ -121,24 +150,34 @@ impl ServerCertVerifier for CapturingVerifier {
         Ok(ServerCertVerified::assertion())
     }
 
-    /// Accepts any TLS 1.2 handshake signature: trust is decided in M3.
+    /// Verifies the TLS 1.2 `ServerKeyExchange` signature with the leaf's key.
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        self.checked(rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.algorithms,
+        ))
     }
 
-    /// Accepts any TLS 1.3 handshake signature: trust is decided in M3.
+    /// Verifies the TLS 1.3 `CertificateVerify` signature with the leaf's key.
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        self.checked(rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.algorithms,
+        ))
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {

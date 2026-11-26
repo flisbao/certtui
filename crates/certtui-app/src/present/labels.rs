@@ -243,6 +243,9 @@ pub fn note_text(note: &LoadNote) -> String {
         LoadNote::HandshakeFailedAfterClientCertRequest { peer_ip } => {
             format!("TLS handshake with {peer_ip} failed after a client certificate request")
         }
+        LoadNote::HandshakeSignatureInvalid => {
+            "TLS handshake signature did not verify; the handshake was aborted".to_owned()
+        }
         LoadNote::Rejected { offset, reason } => {
             format!(
                 "candidate at offset {offset} rejected: {}",

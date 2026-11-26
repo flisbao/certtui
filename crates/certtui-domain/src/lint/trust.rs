@@ -13,6 +13,31 @@ pub struct TrustUntrustedLint;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HostnameMismatchLint;
 
+/// The server did not prove it holds the leaf's private key.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HandshakeSignatureInvalidLint;
+
+impl Lint for HandshakeSignatureInvalidLint {
+    fn code(&self) -> FindingCode {
+        FindingCode::HandshakeSignatureInvalid
+    }
+
+    fn check(&self, ctx: &LintContext<'_>) -> Vec<Finding> {
+        if !ctx.notes.contains(&LoadNote::HandshakeSignatureInvalid) {
+            return Vec::new();
+        }
+        vec![Finding {
+            code: FindingCode::HandshakeSignatureInvalid,
+            severity: Severity::Error,
+            category: FindingCategory::Trust,
+            cert_index: Some(0),
+            message: "the TLS handshake signature does not verify with the leaf's public key: \
+                      the server did not prove it holds the private key (possible interception)"
+                .to_owned(),
+        }]
+    }
+}
+
 /// A keystore was read without its integrity check, so what it lists is
 /// unauthenticated.
 #[derive(Debug, Clone, Copy, Default)]
@@ -91,6 +116,27 @@ mod tests {
 
     fn fixture() -> crate::lint::test_support::Fixture {
         network_fixture_of(vec![fixture_record("rsa2048-leaf.der")])
+    }
+
+    #[test]
+    fn quando_assinatura_do_handshake_nao_confere_deve_dar_erro_no_leaf() {
+        let mut f = fixture();
+        f.notes = vec![LoadNote::HandshakeSignatureInvalid];
+        let findings = HandshakeSignatureInvalidLint.check(&f.ctx(0, false));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, FindingCode::HandshakeSignatureInvalid);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert_eq!(findings[0].category, FindingCategory::Trust);
+        assert_eq!(findings[0].cert_index, Some(0));
+    }
+
+    #[test]
+    fn quando_handshake_sem_nota_de_assinatura_deve_nao_dar_erro() {
+        let f = fixture();
+        assert_eq!(
+            HandshakeSignatureInvalidLint.check(&f.ctx(0, false)),
+            Vec::new()
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use certtui_app::ports::ChainFetcher;
+use certtui_domain::model::LoadNote;
 use certtui_infra::tls::RustlsChainFetcher;
 use support::fetch::{fetch_ok, request_to};
 use support::tls_server::{Behavior, Observation, TestServer};
@@ -119,4 +120,31 @@ async fn quando_fetch_tem_sucesso_deve_medir_fases_sem_dns() {
     let (connect, handshake, total) = (t.connect.unwrap(), t.handshake.unwrap(), t.total.unwrap());
     assert!(total >= connect + handshake, "{t:?}");
     assert!(total < Duration::from_secs(3), "{t:?}");
+}
+
+#[tokio::test]
+async fn quando_server_nao_prova_posse_da_chave_tls13_deve_manter_cadeia_e_anotar() {
+    let server = start(Behavior::ImpostorTls13).await;
+    let got = fetch_ok(&server).await;
+
+    assert_eq!(got.ders, server.presented_chain());
+    assert_eq!(got.note, Some(LoadNote::HandshakeSignatureInvalid));
+    assert!(got.session.is_none(), "{got:?}");
+}
+
+#[tokio::test]
+async fn quando_server_nao_prova_posse_da_chave_tls12_deve_manter_cadeia_e_anotar() {
+    let server = start(Behavior::ImpostorTls12).await;
+    let got = fetch_ok(&server).await;
+
+    assert_eq!(got.ders, server.presented_chain());
+    assert_eq!(got.note, Some(LoadNote::HandshakeSignatureInvalid));
+}
+
+#[tokio::test]
+async fn quando_server_e_legitimo_deve_nao_anotar_assinatura() {
+    let server = start(Behavior::Ok).await;
+    let got = fetch_ok(&server).await;
+
+    assert_eq!(got.note, None);
 }

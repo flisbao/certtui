@@ -136,7 +136,7 @@ impl RustlsChainFetcher {
         };
 
         let phase = Instant::now();
-        let (tls, captured) = negotiate(req, tcp).await?;
+        let (ended, captured) = negotiate(req, tcp).await?;
         let handshake = phase.elapsed();
 
         let timings = Timings {
@@ -145,7 +145,11 @@ impl RustlsChainFetcher {
             handshake: Some(handshake),
             total: Some(started.elapsed()),
         };
-        let chain = assemble(captured, tls.as_ref(), peer.ip(), timings);
+        let chain = assemble(captured, &ended, peer.ip(), timings);
+        let tls = match ended {
+            Ended::Completed(stream) => Some(stream),
+            Ended::Aborted(_) => None,
+        };
         Ok((chain, tls))
     }
 }
@@ -232,7 +236,7 @@ fn server_name(target: &NetworkTarget) -> Result<ServerName<'static>, FetchError
 async fn negotiate(
     req: &FetchRequest,
     tcp: TcpStream,
-) -> Result<(Option<Stream>, CapturedHandshake), FetchError> {
+) -> Result<(Ended<Stream>, CapturedHandshake), FetchError> {
     let verifier = CapturingVerifier::new();
     let request = Arc::new(ClientCertRequest::default());
     let connector = connector(&verifier, Arc::clone(&request))?;
@@ -244,27 +248,63 @@ async fn negotiate(
     )
     .await
     .map_err(|_| FetchError::Timeout(Stage::Handshake))?;
-    handshake_capture(result, request.observed(), verifier.captured())
+    let observed = Observed {
+        client_cert_requested: request.observed(),
+        signature_invalid: verifier.signature_invalid(),
+    };
+    handshake_capture(result, observed, verifier.captured())
+}
+
+/// How the handshake ended when it still yielded a chain.
+#[derive(Debug)]
+enum Ended<S> {
+    /// The handshake completed; the stream has session parameters.
+    Completed(S),
+    /// The handshake was aborted after the chain was captured.
+    Aborted(AbortReason),
+}
+
+/// Why a handshake that captured a chain did not complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbortReason {
+    /// The server rejected us after asking for a client certificate.
+    ClientCertRequested,
+    /// The server's handshake signature did not verify: we aborted.
+    SignatureInvalid,
+}
+
+/// What the verifier and the client certificate resolver saw.
+#[derive(Debug, Clone, Copy, Default)]
+struct Observed {
+    client_cert_requested: bool,
+    signature_invalid: bool,
 }
 
 /// A rejection alert is ambiguous on its own. Recover only a chain actually
-/// presented on this connection after observing a client certificate request.
+/// presented on this connection after observing a client certificate
+/// request, or one whose handshake we aborted for a bad signature.
 fn handshake_capture<S>(
     result: io::Result<S>,
-    request_observed: bool,
+    observed: Observed,
     captured: Option<CapturedHandshake>,
-) -> Result<(Option<S>, CapturedHandshake), FetchError> {
+) -> Result<(Ended<S>, CapturedHandshake), FetchError> {
     let captured = captured.filter(|chain| !chain.end_entity.is_empty());
     match result {
-        Ok(stream) => Ok((Some(stream), captured.ok_or(FetchError::EmptyChain)?)),
+        Ok(stream) => Ok((
+            Ended::Completed(stream),
+            captured.ok_or(FetchError::EmptyChain)?,
+        )),
         Err(error) => {
-            if request_observed
-                && is_client_auth_alert(&error)
-                && let Some(chain) = captured
-            {
-                Ok((None, chain))
+            let reason = if observed.signature_invalid {
+                Some(AbortReason::SignatureInvalid)
+            } else if observed.client_cert_requested && is_client_auth_alert(&error) {
+                Some(AbortReason::ClientCertRequested)
             } else {
-                Err(map_tls_error(&error))
+                None
+            };
+            match (reason, captured) {
+                (Some(reason), Some(chain)) => Ok((Ended::Aborted(reason), chain)),
+                _ => Err(map_tls_error(&error)),
             }
         }
     }
@@ -284,16 +324,19 @@ fn is_client_auth_alert(error: &io::Error) -> bool {
 /// Only a completed stream has negotiated session parameters.
 fn assemble(
     captured: CapturedHandshake,
-    stream: Option<&Stream>,
+    ended: &Ended<Stream>,
     peer_ip: IpAddr,
     timings: Timings,
 ) -> FetchedChain {
-    let (session, note) = match stream {
-        Some(tls) => (Some(build_session_info(tls.get_ref().1, peer_ip)), None),
-        None => (
+    let (session, note) = match ended {
+        Ended::Completed(tls) => (Some(build_session_info(tls.get_ref().1, peer_ip)), None),
+        Ended::Aborted(AbortReason::ClientCertRequested) => (
             None,
             Some(LoadNote::HandshakeFailedAfterClientCertRequest { peer_ip }),
         ),
+        Ended::Aborted(AbortReason::SignatureInvalid) => {
+            (None, Some(LoadNote::HandshakeSignatureInvalid))
+        }
     };
     let mut ders = vec![captured.end_entity];
     ders.extend(captured.intermediates);
@@ -470,7 +513,7 @@ mod tests {
     #[test]
     fn quando_nada_foi_capturado_deve_dar_empty_chain() {
         assert_eq!(
-            handshake_capture(Ok(()), false, None),
+            handshake_capture(Ok(()), Observed::default(), None).map(|(_, chain)| chain),
             Err(FetchError::EmptyChain)
         );
     }
@@ -489,14 +532,18 @@ mod tests {
             AlertDescription::CertificateRequired,
         ] {
             let error = || wrapped(rustls::Error::AlertReceived(alert));
-            assert!(handshake_capture::<()>(Err(error()), true, captured(vec![42])).is_ok());
+            assert!(
+                handshake_capture::<()>(Err(error()), requested(true), captured(vec![42])).is_ok()
+            );
             for (observed, capture) in [
                 (false, captured(vec![42])),
                 (true, None),
                 (true, captured(vec![])),
             ] {
                 assert_eq!(
-                    handshake_capture::<()>(Err(error()), observed, capture).unwrap_err(),
+                    handshake_capture::<()>(Err(error()), requested(observed), capture)
+                        .map(|(_, chain)| chain)
+                        .unwrap_err(),
                     map_tls_error(&error())
                 );
             }
@@ -504,8 +551,17 @@ mod tests {
         let other = wrapped(rustls::Error::AlertReceived(AlertDescription::AccessDenied));
         let expected = map_tls_error(&other);
         assert_eq!(
-            handshake_capture::<()>(Err(other), true, captured(vec![42])).unwrap_err(),
+            handshake_capture::<()>(Err(other), requested(true), captured(vec![42]))
+                .map(|(_, chain)| chain)
+                .unwrap_err(),
             expected
         );
+    }
+
+    fn requested(client_cert_requested: bool) -> Observed {
+        Observed {
+            client_cert_requested,
+            signature_invalid: false,
+        }
     }
 }

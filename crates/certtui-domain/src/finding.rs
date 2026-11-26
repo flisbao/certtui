@@ -83,6 +83,9 @@ pub enum FindingCode {
     AiaFetched,
     /// A JKS keystore was read without a password.
     KeystoreIntegrityUnverified,
+    /// The server's TLS handshake signature does not verify with the leaf's
+    /// public key: it did not prove it holds the private key.
+    HandshakeSignatureInvalid,
 }
 
 impl FindingCode {
@@ -117,11 +120,12 @@ impl FindingCode {
             FindingCode::NoEmbeddedSct => "NO_EMBEDDED_SCT",
             FindingCode::AiaFetched => "AIA_FETCHED",
             FindingCode::KeystoreIntegrityUnverified => "KEYSTORE_INTEGRITY_UNVERIFIED",
+            FindingCode::HandshakeSignatureInvalid => "HANDSHAKE_SIGNATURE_INVALID",
         }
     }
 
     /// Every code, in the order of the spec section 7 table.
-    pub const ALL: [FindingCode; 25] = [
+    pub const ALL: [FindingCode; 26] = [
         FindingCode::TrustUntrusted,
         FindingCode::HostnameMismatch,
         FindingCode::Expired,
@@ -147,6 +151,7 @@ impl FindingCode {
         FindingCode::NoEmbeddedSct,
         FindingCode::AiaFetched,
         FindingCode::KeystoreIntegrityUnverified,
+        FindingCode::HandshakeSignatureInvalid,
     ];
 }
 
@@ -214,6 +219,10 @@ mod tests {
             (
                 FindingCode::KeystoreIntegrityUnverified,
                 "KEYSTORE_INTEGRITY_UNVERIFIED",
+            ),
+            (
+                FindingCode::HandshakeSignatureInvalid,
+                "HANDSHAKE_SIGNATURE_INVALID",
             ),
         ];
         assert_eq!(table.len(), FindingCode::ALL.len());
